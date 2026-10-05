@@ -48,11 +48,7 @@ class Addresses:
     buffer_flag = 0x03004000    # double-buffer half currently played by DMA
     buffers = (0x0809b040, 0x0809b038)  # mixer buffer addresses for a zero and nonzero flag
     samples_per_frame = 0x03001414
-    channel_instrument = 0x030015d0  # 16 instrument pointers
-    channel_volume = 0x03001560      # 16 controller 7 values
-    channel_bend = 0x03001580        # 16 pitch bend words
-    channel_modulation = 0x03001470  # 16 pairs of words: controller 1, vibrato phase
-    music_volume = 0x03002520
+    channel_volume = 0x03001560  # 16 controller 7 values
 
 
 class AddressesAWUE(Addresses):
@@ -66,11 +62,7 @@ class AddressesAWUE(Addresses):
     buffer_flag = 0x03004210
     buffers = (0x08089868, 0x08089860)
     samples_per_frame = 0x03001624
-    channel_instrument = 0x030017d0
     channel_volume = 0x03001760
-    channel_bend = 0x03001780
-    channel_modulation = 0x03001680
-    music_volume = 0x03002730
 
 
 class AddressesBPIE(Addresses):
@@ -85,11 +77,7 @@ class AddressesBPIE(Addresses):
     buffer_flag = 0x03003ae0
     buffers = (0x08169e48, 0x08169e40)
     samples_per_frame = 0x02027a58
-    channel_instrument = 0x03005360
     channel_volume = 0x03004378
-    channel_bend = 0x030042b8
-    channel_modulation = 0x030042f8
-    music_volume = 0x03006810
 
 
 class AddressesBKZX(Addresses):
@@ -104,11 +92,7 @@ class AddressesBKZX(Addresses):
     buffer_flag = 0x030043a8
     buffers = (0x080a0030, 0x080a0028)
     samples_per_frame = 0x0203f4c8
-    channel_instrument = 0x03005a38
     channel_volume = 0x03004a40
-    channel_bend = 0x03004980
-    channel_modulation = 0x030049c0
-    music_volume = 0x03006ee8
 
 
 class AddressesB2DE(Addresses):
@@ -122,11 +106,7 @@ class AddressesB2DE(Addresses):
     buffer_flag = 0x03003650
     buffers = (0x080d2c44, 0x080d2c3c)
     samples_per_frame = 0x03000c14
-    channel_instrument = 0x03000dd0
     channel_volume = 0x03000d60
-    channel_bend = 0x03000d80
-    channel_modulation = 0x03000c70
-    music_volume = 0x03001d20
 
 
 class AddressesBAJE(Addresses):
@@ -142,11 +122,7 @@ class AddressesBAJE(Addresses):
     buffer_flag = 0x03007764
     buffers = (0x0806b8f4, 0x0806b8fc)
     samples_per_frame = 0x0203cc60
-    channel_instrument = 0x030064a4
     channel_volume = 0x0203cd2c
-    channel_bend = 0x0203cc6c
-    channel_modulation = 0x0203ccac
-    music_volume = 0x0203cdd8
 
 
 GAMES = {b'A5NE': Addresses, b'AWUE': AddressesAWUE, b'BPIE': AddressesBPIE, b'BKZX': AddressesBKZX,
@@ -165,10 +141,11 @@ class Voice:
 
     def __init__(self, raw, index):
         self.index = index
-        self.state, self.loop_mode, self.key, self.velocity, self.phase, self.pitch_key = raw[0:6]
+        self.state = raw[0]
+        self.key, self.velocity, self.phase, self.pitch_key = raw[2:6]
         self.channel = struct.unpack('<b', raw[6:7])[0]
-        self.step, self.position, self.fraction, self.level = struct.unpack('<IIII', raw[8:24])
-        self.instrument, self.pitch_scale = struct.unpack('<II', raw[32:40])
+        self.position, self.fraction, self.level = struct.unpack('<III', raw[12:24])
+        self.instrument = struct.unpack('<I', raw[32:36])[0]
 
     def active(self):
         return self.state in (0x11, 0x12)

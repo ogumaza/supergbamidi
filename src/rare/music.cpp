@@ -69,6 +69,11 @@ public:
         return Report(rare::ConvertSong(rom_, info_, song, OptionsFor(song, settings), shared_.get()));
     }
 
+    bool SupportsVoiceChannels() const override
+    {
+        return false;
+    }
+
     // The tunes that use the first tune's program map and instruments have their presets in bank 0, and each other pair
     // gets a bank of its own: 1, 2 and so on, past the drum channel's bank 128.
     void ShareSoundfont() override
@@ -105,8 +110,8 @@ public:
         return rare::DumpSong(rom_, info_, song, path, error);
     }
 
-    // Writes each note slot that's playing after each frame, one line for each: frame, slot, state, channel, key,
-    // pitch key, velocity, envelope phase and level, instrument, sample position and fraction.
+    // Writes each note slot that's playing after each frame, one line for each: frame, slot, state, channel, key, pitch
+    // key, velocity, envelope phase and level, instrument, sample position and fraction.
     bool Trace(int song, long long frames, std::FILE* out, std::vector<std::string>& warnings) const override
     {
         Sequencer seq(rom_, info_, song);

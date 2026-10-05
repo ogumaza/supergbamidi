@@ -2,9 +2,9 @@
 
 """Game Boy APU model (as on the GBA) driven by captured register writes.
 
-Output is normalised like the DirectSound output of driver_emu.py: one PSG
-channel at volume v contributes v * 8 * (master + 1) / 4 in mGBA's units, and a
-FIFO sample s contributes s * 4, so both are divided by 4 * 128.
+Output is normalised like the DirectSound output of konami/driver_emu.py and quintet/driver_emu.py: one PSG channel at
+volume v contributes v * 8 * (master + 1) / 4 in mGBA's units, and a FIFO sample s contributes s * 4, so both are
+divided by 4 * 128.
 """
 import numpy as np
 

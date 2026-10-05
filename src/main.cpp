@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
-// Converts the music of GBA games with Konami's or Rare's sound driver to MIDI files and SoundFonts.
+// Converts the music of GBA games with Konami's, Rare's, Quintet's or Nintendo R&D2's sound driver, or Nintendo's MP2K,
+// to MIDI files and SoundFonts.
 
 #include <cmath>
 #include <cstdint>
@@ -42,16 +43,19 @@ using namespace supergbamidi;
 namespace
 {
 
+// Prints the help text to `f`.
 void Usage(FILE* f)
 {
     std::fprintf(f,
-                 "%s %s - music converter for Konami's and Rare's GBA sound drivers\n"
+                 "%s %s - music converter for GBA games\n"
                  "\n"
                  "usage: %s [options] <file> [<file> ...]\n"
                  "\n"
                  "Converts every song in each GBA ROM (.gba) or GSF rip (.gsflib, .minigsf) to\n"
-                 "a MIDI file and a matching SoundFont. The results go in a folder beside\n"
-                 "the input file, with the same name. You can also drop files on the program.\n"
+                 "a MIDI file and a matching SoundFont, for games whose music uses Konami's,\n"
+                 "Rare's, Quintet's or Nintendo R&D2's sound driver, or Nintendo's MP2K. The\n"
+                 "results go in a folder beside the input file, with the same name. You can\n"
+                 "also drop files on the program.\n"
                  "\n"
                  "options:\n"
                  "  -o, --output DIR      output directory (default: <file's folder>/<base name>)\n"
@@ -60,12 +64,19 @@ void Usage(FILE* f)
                  "  -l, --loops N         play each song's loop N times (default: 2)\n"
                  "  -t, --tracks LIST     only convert these tracks, e.g. 4-15 (default: all; in\n"
                  "                        Konami's driver, 0-3 are the PSG channels and 4 and up\n"
-                 "                        the sample voices)\n"
+                 "                        the sample voices, and in Quintet's, 0-3 are the PSG\n"
+                 "                        channels and 4 and 5 the PCM channels)\n"
                  "      --single-sf2      write one SoundFont for all songs\n"
+                 "      --voice-channels  give each of the driver's sound channels a MIDI channel\n"
+                 "                        (MP2K), so that notes stop where the game cuts them\n"
+                 "                        off, though a track's notes then move between channels\n"
                  "      --dump            also write a text listing of each song's sequence data\n"
-                 "      --info            print the detected driver tables and songs, then exit\n"
-                 "      --driver NAME     use konami or rare instead of detecting the driver\n"
-                 "      --song-table ADDR    use this song table address (hex)\n"
+                 "      --info            print each driver's detected tables and songs, then\n"
+                 "                        exit\n"
+                 "      --driver NAME     use konami, rare, quintet, rd2 or mp2k instead of\n"
+                 "                        detecting the driver\n"
+                 "      --song-table ADDR    use this song table address (hex; in Nintendo R&D2's\n"
+                 "                           driver, the address of the game's settings for it)\n"
                  "      --song-count N       use this many songs\n"
                  "      --sample-table ADDR  use this sample table address (hex; Konami's driver)\n"
                  "      --mix-rate HZ        use this DirectSound mixer rate (Konami's driver)\n"
@@ -74,7 +85,18 @@ void Usage(FILE* f)
                  "                        pitch b2 vol trig flags key, and 2 pan fields, which\n"
                  "                        depend on the revision); in Rare's, each note slot\n"
                  "                        that plays (frame slot state channel key pitch-key\n"
-                 "                        velocity phase level instrument position fraction)\n"
+                 "                        velocity phase level instrument position fraction);\n"
+                 "                        in Quintet's, each write to the sound, DMA and timer\n"
+                 "                        registers (frame address size value, with frame -1\n"
+                 "                        for the song's start); in MP2K, each sound channel\n"
+                 "                        that plays (frame channel status track key pitch-key\n"
+                 "                        velocity priority level right left, then rate sample\n"
+                 "                        count position fraction, or a PSG channel's frequency\n"
+                 "                        goal counter sustain pan wave); in Nintendo R&D2's,\n"
+                 "                        each write to the PSG's registers (frame address size\n"
+                 "                        value), each voice that plays (frame voice state type\n"
+                 "                        track priority note velocity, and the rest of its\n"
+                 "                        record) and the order the mixer takes them in\n"
                  "      --trace-frames N  frames to trace (default: 3000)\n"
                  "  -q, --quiet           only print warnings and errors\n"
                  "  -h, --help            show this help\n"
@@ -245,6 +267,10 @@ int ParseArgs(const std::vector<std::string>& args, Options& o)
         {
             o.single_sf2 = true;
         }
+        else if (a == "--voice-channels")
+        {
+            o.convert.voice_channels = true;
+        }
         else if (a == "--dump")
         {
             o.dump = true;
@@ -259,17 +285,40 @@ int ParseArgs(const std::vector<std::string>& args, Options& o)
             {
                 return 2;
             }
-            if (v != "konami" && v != "rare")
+
+            if (v == "konami")
             {
-                OptionError("--driver needs konami or rare");
+                o.overrides.driver = Driver::kKonami;
+            }
+            else if (v == "rare")
+            {
+                o.overrides.driver = Driver::kRare;
+            }
+            else if (v == "quintet")
+            {
+                o.overrides.driver = Driver::kQuintet;
+            }
+            else if (v == "rd2")
+            {
+                o.overrides.driver = Driver::kRd2;
+            }
+            else if (v == "mp2k")
+            {
+                o.overrides.driver = Driver::kMp2k;
+            }
+            else
+            {
+                OptionError("--driver needs konami, rare, quintet, rd2 or mp2k");
                 return 2;
             }
-
-            o.overrides.driver = v == "konami" ? Driver::kKonami : Driver::kRare;
         }
         else if (a == "--song-table" || a == "--sample-table")
         {
-            if (!value(a.c_str(), v) || !ParseNumber(v, n, 16) || n <= 0 || n > 0xFFFFFFFF)
+            if (!value(a.c_str(), v))
+            {
+                return 2;
+            }
+            if (!ParseNumber(v, n, 16) || n <= 0 || n > 0xFFFFFFFF)
             {
                 OptionError(a + " needs a hex address");
                 return 2;
@@ -279,7 +328,11 @@ int ParseArgs(const std::vector<std::string>& args, Options& o)
         }
         else if (a == "--song-count")
         {
-            if (!value("--song-count", v) || !ParseNumber(v, n, 10) || n < 1 || n > 4096)
+            if (!value("--song-count", v))
+            {
+                return 2;
+            }
+            if (!ParseNumber(v, n, 10) || n < 1 || n > 4096)
             {
                 OptionError("--song-count needs a number from 1 to 4096");
                 return 2;
@@ -289,9 +342,14 @@ int ParseArgs(const std::vector<std::string>& args, Options& o)
         }
         else if (a == "--mix-rate")
         {
+            if (!value("--mix-rate", v))
+            {
+                return 2;
+            }
+
             // The same range that Konami's driver detection accepts from the driver's timer setting.
             double& rate = o.overrides.mix_rate;
-            if (!value("--mix-rate", v) || !ParseNumber(v, rate) || !(rate >= 4000 && rate <= 65536))
+            if (!ParseNumber(v, rate) || !(rate >= 4000 && rate <= 65536))
             {
                 OptionError("--mix-rate needs a rate from 4000 to 65536 Hz");
                 return 2;
@@ -299,7 +357,11 @@ int ParseArgs(const std::vector<std::string>& args, Options& o)
         }
         else if (a == "--trace")
         {
-            if (!value("--trace", v) || !ParseNumber(v, n, 10) || n < 0 || n > std::numeric_limits<int>::max())
+            if (!value("--trace", v))
+            {
+                return 2;
+            }
+            if (!ParseNumber(v, n, 10) || n < 0 || n > std::numeric_limits<int>::max())
             {
                 OptionError("--trace needs a song number");
                 return 2;
@@ -309,7 +371,11 @@ int ParseArgs(const std::vector<std::string>& args, Options& o)
         }
         else if (a == "--trace-frames")
         {
-            if (!value("--trace-frames", v) || !ParseNumber(v, o.trace_frames, 10) || o.trace_frames < 1)
+            if (!value("--trace-frames", v))
+            {
+                return 2;
+            }
+            if (!ParseNumber(v, o.trace_frames, 10) || o.trace_frames < 1)
             {
                 OptionError("--trace-frames needs a positive number");
                 return 2;
@@ -344,7 +410,7 @@ int ParseArgs(const std::vector<std::string>& args, Options& o)
     // Only Konami's driver has a sample table and a mixer rate to override.
     if (o.overrides.sample_table || o.overrides.mix_rate > 0)
     {
-        if (o.overrides.driver == Driver::kRare)
+        if (o.overrides.driver != Driver::kAny && o.overrides.driver != Driver::kKonami)
         {
             OptionError("--sample-table and --mix-rate are for Konami's driver");
             return 2;
@@ -367,38 +433,49 @@ std::string TimeString(double seconds)
     return b;
 }
 
-// Prints the --info report: the ROM's title, detection log and warnings, followed by each song's data address,
-// note-playing track count, length and loop points, calculated with the current conversion options.
-void PrintInfo(const Rom& rom, const Music& music, const Options& o)
+// Prints the --info report: the ROM's title, then for each driver the game has, its detection log and warnings,
+// followed by each song's data address, note-playing track count, length and loop points, calculated with the current
+// conversion options. The first driver is the one a conversion uses, and with --driver it's the only one.
+void PrintInfo(const Rom& rom, const std::vector<std::unique_ptr<Music>>& drivers, const Options& o)
 {
     std::printf("ROM: %s (%s)%s\n", rom.Title().c_str(), rom.GameCode().c_str(), rom.FromGsf() ? ", from GSF" : "");
-    for (const std::string& l : music.Log())
-    {
-        std::printf("  %s\n", l.c_str());
-    }
-    for (const std::string& w : music.Warnings())
-    {
-        std::printf("  warning: %s\n", w.c_str());
-    }
 
-    std::printf("\n song  address     tracks  length     loop\n");
-    for (int s = 0; s < music.SongCount(); s++)
+    for (size_t d = 0; d < drivers.size(); d++)
     {
-        if (!music.HasSong(s))
+        if (d > 0)
         {
-            std::printf("  %3d  (empty)\n", s);
-            continue;
+            std::printf("\n");
         }
 
-        const SongReport r = music.InspectSong(s, o.convert);
-        std::string loop = "-";
-        if (r.loop_end >= 0)
+        const Music& music = *drivers[d];
+        for (const std::string& l : music.Log())
         {
-            loop = TimeString(r.loop_start) + " - " + TimeString(r.loop_end);
+            std::printf("  %s\n", l.c_str());
+        }
+        for (const std::string& w : music.Warnings())
+        {
+            std::printf("  warning: %s\n", w.c_str());
         }
 
-        std::printf("  %3d  0x%08X  %6d  %-9s  %s\n", s, unsigned(r.address), r.tracks, TimeString(r.seconds).c_str(),
-                    loop.c_str());
+        std::printf("\n song  address     tracks  length     loop\n");
+        for (int s = 0; s < music.SongCount(); s++)
+        {
+            if (!music.HasSong(s))
+            {
+                std::printf("  %3d  (empty)\n", s);
+                continue;
+            }
+
+            const SongReport r = music.InspectSong(s, o.convert);
+            std::string loop = "-";
+            if (r.loop_end >= 0)
+            {
+                loop = TimeString(r.loop_start) + " - " + TimeString(r.loop_end);
+            }
+
+            std::printf("  %3d  0x%08X  %6d  %-9s  %s\n", s, unsigned(r.address), r.tracks,
+                        TimeString(r.seconds).c_str(), loop.c_str());
+        }
     }
 }
 
@@ -443,8 +520,8 @@ void ReportSong(int song, const SongReport& r, uint16_t track_mask)
 
     const std::string midi = Utf8(PathFromUtf8(r.midi_path).filename());
     const std::string sf2 = r.sf2_path.empty() ? "" : ", " + Utf8(PathFromUtf8(r.sf2_path).filename());
-    std::printf("song %2d: %s%s, %d tracks, %.1f BPM -> %s%s\n", song, TimeString(r.seconds).c_str(), loop.c_str(),
-                r.tracks, r.bpm, midi.c_str(), sf2.c_str());
+    std::printf("song %2d: %s%s, %d track%s, %.1f BPM -> %s%s\n", song, TimeString(r.seconds).c_str(), loop.c_str(),
+                r.tracks, r.tracks == 1 ? "" : "s", r.bpm, midi.c_str(), sf2.c_str());
 }
 
 // Converts one input file, which messages call `label`. `done` holds the ROM images already converted in this run, so
@@ -465,9 +542,11 @@ int ConvertFile(const std::string& input, const std::string& label, const Option
         std::fprintf(stderr, "%s: %s\n", label.c_str(), error.c_str());
         return 1;
     }
+
     if (o.info)
     {
-        PrintInfo(rom, *music, o);
+        // A game can have more than one driver, and the report covers each.
+        PrintInfo(rom, OpenAllMusic(rom, o.overrides), o);
         return 0;
     }
     if (o.trace_song >= 0)
@@ -523,6 +602,11 @@ int ConvertFile(const std::string& input, const std::string& label, const Option
     for (const std::string& w : music->Warnings())
     {
         std::fprintf(stderr, "%swarning: %s\n", prefix.c_str(), w.c_str());
+    }
+    if (o.convert.voice_channels && !music->SupportsVoiceChannels())
+    {
+        std::fprintf(stderr, "%swarning: --voice-channels only changes MP2K's conversions, so it's ignored\n",
+                     prefix.c_str());
     }
 
     if (o.single_sf2)

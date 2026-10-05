@@ -4,6 +4,8 @@
 
 #include <cstdio>
 
+#include "thumb.h"
+
 namespace supergbamidi::rare
 {
 namespace
@@ -40,6 +42,7 @@ struct RateSetting
     uint32_t scale;
 };
 
+// The rates that the rate routine knows.
 constexpr RateSetting kRateSettings[] = {
     {10512, 176, 0x018F0064}, {13379, 224, 0x01397FC3}, {18157, 304, 0x00E70086}, {21024, 352, 0x00C78032}};
 
@@ -69,12 +72,6 @@ std::string Hex(uint32_t v)
     std::snprintf(b, sizeof b, "0x%08X", unsigned(v));
 
     return b;
-}
-
-// Returns the word that the Thumb instruction `ldr rX, [pc, #imm]` at `at` loads.
-uint32_t ThumbLiteral(const Rom& rom, uint32_t at)
-{
-    return rom.U32(((at + 4) & ~3u) + (rom.U16(at) & 0xFFu) * 4);
 }
 
 // Returns true if the halfword is `ldr r<reg>, [pc, #imm]`.
@@ -170,7 +167,6 @@ uint32_t ArmLiteral(const Rom& rom, uint32_t at)
 {
     const uint32_t insn = rom.U32(at);
     const uint32_t offset = insn & 0xFFF;
-
     return rom.U32((insn & 0x00800000) ? at + 8 + offset : at + 8 - offset);
 }
 
@@ -218,8 +214,8 @@ bool ReadDriverCode(const Rom& rom, const InitCode& init, DriverInfo& info)
         return false;
     }
 
-    // The note on reads the size of a channel's slots from a word in ROM: ldr r4, =size; ldr r4, [r4];
-    // ldr r3, =slots; add r3, r3, r4.
+    // The note on reads the size of a channel's slots from a word in ROM: ldr r4, =size; ldr r4, [r4]; ldr r3, =slots;
+    // add r3, r3, r4.
     const uint32_t channel_size_at = FindArmTable(rom, init, kLdrR4Pc, kLoadR4);
     const uint32_t channel_size = rom.U32(channel_size_at);
     if (rom.Contains(channel_size_at, 4) && channel_size % kSlotSize == 0 && channel_size >= kSlotSize &&
@@ -347,10 +343,6 @@ bool DetectDriver(const Rom& rom, const DriverOverrides& overrides, DriverInfo& 
         {
             info.warnings.push_back("the driver's init was found, but not its command reader");
         }
-    }
-    else
-    {
-        info.tune_table = 0;
     }
 
     if (overrides.tune_table)

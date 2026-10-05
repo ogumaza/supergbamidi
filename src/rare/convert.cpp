@@ -7,11 +7,13 @@
 #include <cmath>
 #include <cstdio>
 #include <map>
+#include <optional>
 #include <set>
 #include <utility>
 
 #include "files.h"
 #include "midi.h"
+#include "music.h"
 #include "program.h"
 #include "rare/sequencer.h"
 #include "rare/song.h"
@@ -46,43 +48,54 @@ std::string TwoDigits(int n)
 struct Plan
 {
     bool loops = false;
-    uint64_t loop_start = 0; // the loop of the track with the longest loop
-    uint64_t loop_end = 0;
+    uint64_t loop_start = 0; // the latest of the looping tracks' loop starts and the other tracks' last commands
+    uint64_t loop_end = 0;   // the loop start plus the length LoopLength() gives for the tracks' loops
     uint64_t end = 0;
 };
 
-// Plans a tune: a looping tune plays its loop `loops` times, and the conversion goes on until any track without a loop
-// has ended too. The tracks of a tune may loop at different points, and each goes on looping in its own way.
+// Plans a tune: a looping tune plays its loop `loops` times, and a tune without one goes on until its last track has
+// ended. The tracks of a tune may loop at different points and lengths, and each goes on looping in its own way, so the
+// loop starts where every looping track has started its loop, and where every track without a loop has played its
+// last command other than a delay or the end, and lasts until every looping track is back where its loop started, if
+// that isn't too long (see LoopLength()).
 Plan PlanTune(const Rom& rom, const DriverInfo& info, const TuneHeader& header, int loops)
 {
     Plan plan;
     uint64_t longest_end = 0;
-    uint64_t longest_loop = 0;
+    uint64_t last_command = 0;
+    std::vector<uint64_t> lengths;
     for (uint32_t address : header.tracks)
     {
         const TrackLayout layout = ScanTrack(rom, address, info.format);
         if (layout.loops && layout.loop_end > layout.loop_start)
         {
-            if (layout.loop_end - layout.loop_start > longest_loop)
-            {
-                longest_loop = layout.loop_end - layout.loop_start;
-                plan.loops = true;
-                plan.loop_start = layout.loop_start;
-                plan.loop_end = layout.loop_end;
-            }
+            plan.loops = true;
+            plan.loop_start = std::max(plan.loop_start, layout.loop_start);
+            lengths.push_back(layout.loop_end - layout.loop_start);
         }
         else if (!layout.loops)
         {
             longest_end = std::max(longest_end, layout.end);
+            last_command = std::max(last_command, layout.last_command);
         }
     }
 
-    plan.end = plan.loops ? std::max(plan.loop_start + uint64_t(loops) * longest_loop, longest_end) : longest_end;
+    if (plan.loops)
+    {
+        const uint64_t length = LoopLength(lengths);
+        plan.loop_start = std::max(plan.loop_start, last_command);
+        plan.loop_end = plan.loop_start + length;
+        plan.end = plan.loop_start + uint64_t(loops) * length;
+    }
+    else
+    {
+        plan.end = longest_end;
+    }
 
     return plan;
 }
 
-// Converts frame start times to ticks, following the tempo.
+// A clock that converts frame start times to ticks, following the tempo.
 class TickClock
 {
 public:
@@ -135,22 +148,23 @@ struct PitchChange
     int64_t offset;
 };
 
-// Results of running a tune through the model: track actions, channel pitch changes and frame count.
+// Results of running a tune through the model: track actions, channel pitch changes and warnings.
 struct Simulation
 {
     std::vector<Action> actions;
     std::vector<PitchChange> pitches;
-    uint32_t frames = 0;
     std::vector<std::string> warnings;
+    std::optional<uint64_t> cut_off; // the tick where the model gave up, at the frame limit
 };
 
-// Runs the model until the plan's end, or until the driver has stopped the tune.
+// Runs the model until the plan's end or until the driver has stopped the tune, for an hour at most.
 Simulation Simulate(const Rom& rom, const DriverInfo& info, int song, const TuneHeader& header, const Plan& plan)
 {
     Simulation sim;
     Sequencer seq(rom, info, song);
     TickClock clock(header.ticks_per_quarter);
     std::array<int64_t, kChannels> last = {};
+    uint32_t frames = 0;
     for (uint32_t f = 0; f < kMaxFrames; f++)
     {
         // A pitch change that a bend or program change makes, without vibrato, belongs at that command's tick. Vibrato
@@ -188,7 +202,7 @@ Simulation Simulate(const Rom& rom, const DriverInfo& info, int song, const Tune
 
         // Stop once every track has read up to the end, and the frames have reached it. A track counts the ticks of a
         // delay as it starts it, so its count reaches the end before the frames do.
-        sim.frames = f + 1;
+        frames = f + 1;
         bool done = clock.Known() ? clock.FrameTick(f + 1) >= plan.end : true;
         for (int t = 0; t < seq.TrackCount() && done; t++)
         {
@@ -200,9 +214,10 @@ Simulation Simulate(const Rom& rom, const DriverInfo& info, int song, const Tune
         }
     }
 
-    if (sim.frames == kMaxFrames)
+    if (frames == kMaxFrames)
     {
         sim.warnings.push_back("the tune was cut off after an hour");
+        sim.cut_off = clock.FrameTick(frames);
     }
     sim.warnings.insert(sim.warnings.end(), seq.Warnings().begin(), seq.Warnings().end());
 
@@ -291,10 +306,7 @@ std::vector<Note> CollectNotes(const Simulation& sim, const Plan& plan, uint16_t
     {
         if (a.kind == Action::kNoteOn)
         {
-            if (a.slot >= 0)
-            {
-                release(a.slot, a.tick, a.frame);
-            }
+            release(a.slot, a.tick, a.frame);
 
             const Action* program = &a;
             if (!a.playable && a.instrument == 0)
@@ -373,8 +385,8 @@ std::vector<Note> CollectNotes(const Simulation& sim, const Plan& plan, uint16_t
     return notes;
 }
 
-// The pitch bend range of each channel, in semitones: wide enough for its largest pitch offset, and its instruments'
-// own range, so that a bend without vibrato keeps its value.
+// Returns the pitch bend range of each channel, in semitones: wide enough for its largest pitch offset, and its
+// instruments' bend range, so that a bend without vibrato keeps its value.
 std::array<int, kChannels> BendRanges(const Rom& rom, const Simulation& sim)
 {
     std::array<int, kChannels> range = {};
@@ -410,18 +422,12 @@ std::array<int, kChannels> BendRanges(const Rom& rom, const Simulation& sim)
     return range;
 }
 
-// Returns the MIDI pitch bend value for a pitch offset, with a bend range of `range` semitones.
+// Returns the MIDI pitch bend value for a pitch offset, with a bend range of `range` semitones, at least 1.
 int BendValue(int64_t offset, int range)
 {
-    if (range <= 0)
-    {
-        return 8192;
-    }
-
     const int64_t scaled = offset * 8192;
     const int64_t unit = int64_t(range) * kSemitone;
     const int64_t steps = scaled >= 0 ? (scaled + unit / 2) / unit : -((-scaled + unit / 2) / unit);
-
     return int(std::clamp<int64_t>(8192 + steps, 0, 16383));
 }
 
@@ -722,8 +728,15 @@ SongSummary Run(const Rom& rom, const DriverInfo& info, int song, const ConvertO
         return sum;
     }
 
-    const Plan plan = PlanTune(rom, info, header, opt.loops);
+    Plan plan = PlanTune(rom, info, header, opt.loops);
     const Simulation sim = Simulate(rom, info, song, header, plan);
+
+    // A tune that the model gave up on ends where it stopped.
+    if (sim.cut_off)
+    {
+        plan.end = std::min(plan.end, *sim.cut_off);
+    }
+
     sum.warnings = sim.warnings;
     const std::vector<Note> notes = CollectNotes(sim, plan, opt.track_mask, kChannels * info.slots_per_channel);
     Summarize(sim, plan, header.ticks_per_quarter, sum);
@@ -868,7 +881,6 @@ bool DumpSong(const Rom& rom, const DriverInfo& info, int song, const std::strin
     }
 
     std::vector<uint8_t> data(text.begin(), text.end());
-
     return WriteFile(path, data, error);
 }
 

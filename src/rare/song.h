@@ -37,7 +37,7 @@ enum Command : uint8_t
     kCmdPressure = 9, // 1 byte, ignored
     kCmdBend = 10,    // 2 bytes: a 16-bit pitch bend, centred on 0x2000
     kCmdEnd = 11,     // the end of the track
-    kCmdNop = 12,     // does nothing
+    kCmdNop = 12,     // a command that does nothing
     kCommandCount
 };
 
@@ -68,8 +68,7 @@ bool ReadTuneHeader(const Rom& rom, uint32_t address, TuneHeader& header);
 // A decoded track command.
 struct Event
 {
-    uint32_t address = 0;
-    uint8_t size = 0;    // bytes, including the command's own
+    uint8_t size = 0;    // bytes, including the command's
     uint8_t command = 0; // a Command
     uint8_t channel = 0;
     uint8_t a = 0, b = 0; // the first two argument bytes: key and velocity, controller and value, program
@@ -86,9 +85,10 @@ std::string DescribeEvent(const Event& event);
 struct TrackLayout
 {
     bool loops = false;
-    uint64_t loop_start = 0; // loop start tick
-    uint64_t loop_end = 0;   // tick at which the track returns to the loop start
-    uint64_t end = 0;        // end tick for a track without a loop
+    uint64_t loop_start = 0;   // loop start tick
+    uint64_t loop_end = 0;     // tick at which the track returns to the loop start
+    uint64_t end = 0;          // end tick for a track without a loop
+    uint64_t last_command = 0; // the tick of a track without a loop's last command other than a delay or the end
 };
 
 // Reads the loop and end of the track at `address`. A loop ends at the first loop end controller after a loop start.
@@ -108,28 +108,9 @@ constexpr uint32_t kLoopOnceB = 3;
 constexpr uint32_t kLoopForwardB = 4;
 
 // An instrument: 17 words. A sample instrument plays a sample of signed 8-bit PCM. A drum kit or key split picks one of
-// its instruments for each key from its key map, and a drum kit plays that instrument at its own root key.
+// its instruments for each key from its key map, and a drum kit plays that instrument at its root key.
 struct Instrument
 {
-    uint32_t address = 0;
-    uint32_t type = 0;
-    uint32_t loop_mode = 0;
-    uint32_t rate = 0; // Hz
-    uint32_t root_key = 0;
-    uint32_t start = 0;
-    uint32_t loop_length = 0; // the loop is the last loop_length bytes before the end
-    uint32_t end = 0;
-    uint32_t key_map = 0;      // a drum kit's or key split's 128 bytes: each key's instrument
-    uint32_t key_table = 0;    // the instruments that key_map numbers
-    uint32_t attack = 0;       // 0-99, and 99 is instant
-    uint32_t decay = 0;        // 0-99, an index into the fade times table
-    uint32_t sustain = 0;      // 0-99, a level
-    uint32_t release = 0;      // 0-99, an index into the fade times table
-    int32_t fine_tune = 0;     // cents
-    int32_t bend_range = 0;    // semitones
-    uint32_t vibrato_rate = 0; // added to the vibrato phase each frame, a 24-bit fraction of a cycle
-    int32_t vibrato_depth = 0; // the vibrato's depth scale
-
     bool IsSample() const
     {
         return type == kInstSample || type == kInstSampleB;
@@ -141,10 +122,23 @@ struct Instrument
         return loop_mode == kLoopForward || loop_mode == kLoopForwardB;
     }
 
-    bool IsSplit() const
-    {
-        return type == kInstDrumKit || type == kInstKeySplit;
-    }
+    uint32_t type = 0;
+    uint32_t loop_mode = 0;
+    uint32_t rate = 0; // Hz
+    uint32_t root_key = 0;
+    uint32_t start = 0;
+    uint32_t loop_length = 0; // the length of the loop at the sample's end, in bytes
+    uint32_t end = 0;
+    uint32_t key_map = 0;      // a drum kit's or key split's 128 bytes: each key's instrument
+    uint32_t key_table = 0;    // the instruments that key_map numbers
+    uint32_t attack = 0;       // 0-99, and 99 is instant
+    uint32_t decay = 0;        // 0-99, an index into the fade times table
+    uint32_t sustain = 0;      // 0-99, a level
+    uint32_t release = 0;      // 0-99, an index into the fade times table
+    int32_t fine_tune = 0;     // cents
+    int32_t bend_range = 0;    // semitones
+    uint32_t vibrato_rate = 0; // added to the vibrato phase each frame, a 24-bit fraction of a cycle
+    int32_t vibrato_depth = 0; // the vibrato's depth scale
 };
 
 // Reads the instrument at `address`. Returns false if it isn't in the ROM.
@@ -155,7 +149,7 @@ bool ReadInstrument(const Rom& rom, uint32_t address, Instrument& instrument);
 bool SampleValid(const Rom& rom, const Instrument& instrument);
 
 // Returns the address of the instrument that key `key` of a drum kit or key split plays, or 0 if its key map has no
-// instrument for the key.
+// instrument for the key. The driver plays every type of instrument that isn't a sample or a key split as a drum kit.
 uint32_t SplitInstrument(const Rom& rom, const Instrument& split, int key);
 
 } // namespace supergbamidi::rare

@@ -94,8 +94,8 @@ Every track is a byte stream of the form
 <delay> { <command> <delay> }*
 ```
 
-That is, a track begins with a delay, and every command is followed by the
-delay before the next one. A delay of 0 runs the next command in the same frame.
+A track begins with a delay. Each command is followed by the delay before the
+next command. A delay of 0 runs the next command in the same frame.
 
 ### Delays
 
@@ -330,11 +330,11 @@ WCT 2004](#output-stage-in-wct-2004)), and so gets wave 0 of that table.
 
 **Pitches past the frequency table.** The driver doesn't check the pitch it
 looks up. Note `FF`, which a song can play as if it were note -1, reads the
-word 16 KB past the table's end, and so does any pitch outside notes 0 to 104.
-Whatever data lies there sets the frequency. On a square channel, the channel
-only restarts if the word's bit 15 is set: otherwise a note that's playing goes
-on at the new frequency, and a silent channel stays silent. `supergbamidi` does
-the same.
+word 16 KB past the table's start, well past its end, and any other pitch
+outside notes 0 to 104 reads outside the table too. Whatever data lies there
+sets the frequency. On a square channel, the channel only restarts if the
+word's bit 15 is set: otherwise a note that's playing goes on at the new
+frequency, and a silent channel stays silent. `supergbamidi` does the same.
 
 **Noise.** Each note writes `SOUND4CNT_L = volume << 12` and
 `SOUND4CNT_H = noise table[note]`. The table holds the `NR43` value with the
@@ -432,7 +432,7 @@ follows the call instead of the fragment's. `90`-`9E` also set the duty byte or
 the wave from their low nibble, as `00`-`8F` do, before the fragment's first
 delay. `9F` doesn't, and with `nn` = 0 it plays 256 commands. A call inside a
 fragment replaces the return position of the first. A call runs the fragment's
-`F3`, `FD`, `FE` and `FF` as the track's own.
+`F3`, `FD`, `FE` and `FF` as the track's.
 
 #### Attack and decay
 
@@ -462,9 +462,10 @@ Ultimate Masters revision's in these ways:
   own channel plays the right side, at volume `table[volume × 16 + y]`, and the
   next channel plays a copy of the track's output on the left side, at
   `table[volume × 16 + x]`, instead of its own track's. When square 1 goes back
-  to the centre or one side, square 2 is silenced, unless its own track plays
-  something in that frame. The wave channel is left out of `NR51` until it
-  plays a note at a volume above 0.
+  to the centre or one side, and square 2's track plays nothing in that frame,
+  square 2 takes a copy of square 1's output at volume 0: a retrigger silences
+  it, and a pitch change moves it to square 1's pitch. The wave channel is left
+  out of `NR51` until it plays a note at a volume above 0.
 * **Wave.** Every output of the wave track, a pitch change included, loads the
   wave RAM image for the record's wave and volume into the idle bank and
   switches banks, and sets the channel's volume code to 100%, or to 0% for
@@ -488,7 +489,7 @@ differences:
 * **Tracks.** A song has 12 tracks: the four PSG tracks, and 8 sample tracks
   for 8 voices. A song table entry is 28 bytes.
 * **Commands.** There's no `F6`-`FA`: they do nothing, as `FB`, `FC` and
-  `00`-`7F` do. `F3` carries no extra bytes on sample tracks. `80`-`8F` set
+  `00`-`7F` do. `F3` carries no extra bytes on sample tracks. `80`-`83` set
   the duty byte to their low nibble as it is, where WCT 2004 shifts it into
   bits 6-7, so a duty command leaves a square at 12.5%.
 * **Loops.** A song loop centres each track's pan again.
@@ -749,7 +750,7 @@ voices are silent, the routine stops their FIFO until the next note starts.
 
 A FIFO plays at its timer's rate, so both of its voices play at the rate of the
 last note started on either, or of the last bend. Starting a note on voice 0
-(or 2) also stops voice 1 (or 3), unless that voice plays at its sample's own
+(or 2) also stops voice 1 (or 3), unless that voice plays at its sample's
 rate, and a note on voice 1 (or 3) at any other rate doesn't start while voice 0
 (or 2) plays at its own. `supergbamidi` gives each voice the rate of its own notes
 and bends, and leaves these rules out.
@@ -757,12 +758,11 @@ and bends, and leaves these rules out.
 ## Locating the driver
 
 `supergbamidi` first finds the driver's command reader, which loads a command's
-opcode and compares it with `FC`: `ldrb rX,[rY]` / `cmp rX,#0xFC` / `ble`. The
-next opcodes it compares with tell the revisions apart. The Ultimate Masters
-revision's compares `FF`, `FD`, `EF` and `FB`, the WCT 2004 revision's `FF`,
-`FE`, `EF` and `FA`, the Rave Master revision's `FF`, `FE`, `EF` and `F5`, the
-Eternal Duelist revision's `FF`, `FE`, `EF` and `F3`, and the Dungeon Dice
-Monsters revision's `FF`, `FE`, `EF` and `FC`. For any other reader that
+opcode and compares it with `FC`: `ldrb rX,[rY]` / `cmp rX,#0xFC` / `ble`.
+The next opcode comparisons identify the revision: `FF`, `FD`, `EF` and `FB`
+for Ultimate Masters; `FF`, `FE`, `EF` and `FA` for WCT 2004; `FF`, `FE`, `EF`
+and `F5` for Rave Master; `FF`, `FE`, `EF` and `F3` for Eternal Duelist; and
+`FF`, `FE`, `EF` and `FC` for Dungeon Dice Monsters. For any other reader that
 compares `FF` and then `FE`, detection fails with an error that says the game
 has an older revision. If no recognised command reader is found, detection
 assumes the Ultimate Masters revision.
@@ -846,12 +846,16 @@ apart. It hands on the bent pitch with `8BB0 4647 80F8 8830 1900 8038 7978
 (`strh r4,[r6,#0x1e]`). If that code isn't found, the tool assumes the bend is
 kept, and `--info` says so.
 
-If the song start code isn't found, the tool looks for the same `song × 36`
-computation with any registers: `lsls #3`, an `adds` of the song number,
-`lsls #2`, and then the `ldr` of the table. A song table found that way is
-only used if it's laid out like the driver's song data, which the data scan
-below checks too. Older revisions of the driver compute the same address, but
-their commands differ, and a few of their songs can parse anyway.
+If the song start code isn't found, the tool looks for the same computation
+with any registers: a shift of the song number, an `adds` of the song number,
+another shift, and then the `ldr` of the table. That's `lsls #3`, `adds` and
+`lsls #2` for `song × 36`; `lsls #3`, `subs` and `lsls #2` for Rave Master's
+`song × 28`; `lsls #1`, `adds` and `lsls #3` for Eternal Duelist's
+`song × 24`; and `lsls #2`, `adds` and `lsls #2` for Dungeon Dice Monsters'
+`song × 20`. A song table found that way is only used if it's laid out like
+the driver's song data, which the data scan below checks too. Another
+revision's code can compute an address the same way, but its commands differ,
+and a few of its songs can parse anyway.
 
 The song table runs up to the lowest song base address, and empty entries at
 its end aren't counted as songs. If most of an entry's tracks don't parse, the

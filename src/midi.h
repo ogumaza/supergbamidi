@@ -28,8 +28,14 @@ constexpr int kReverb = 91;
 constexpr int kChorus = 93;
 constexpr int kRpnLsb = 100;
 constexpr int kRpnMsb = 101;
+constexpr int kAllSoundOff = 120;
 
 } // namespace cc
+
+// Sets CC10 and CC11 for the levels `left` and `right` (full scale 128). CC11 carries the loudness: under the SF2
+// default modulator a controller value c scales amplitude by (c/127)^2. CC10 carries the ratio between the sides, for a
+// constant-power pan law. When both levels are 0, only CC11 changes.
+void LevelsToControllers(double left, double right, int& cc10, int& cc11);
 
 // A track of a Standard MIDI File. Events can be added in any order: they're written by tick, and at the same tick meta
 // events come first, then note-offs, bank selects, program changes, controllers, pitch bends and note-ons, each kind in
@@ -50,6 +56,7 @@ public:
     // Adds a note on. With `before_programs`, it goes before the bank selects and program changes at the same tick, so
     // that it plays with the program from before them.
     void NoteOn(uint32_t tick, int ch, int key, int velocity, bool before_programs = false);
+
     void NoteOff(uint32_t tick, int ch, int key);
     void Control(uint32_t tick, int ch, int cc, int value);
     void Program(uint32_t tick, int ch, int program);

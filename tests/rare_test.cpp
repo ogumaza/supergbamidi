@@ -13,7 +13,6 @@
 #include <vector>
 
 #include "files.h"
-#include "midi.h"
 #include "music.h"
 #include "rare/convert.h"
 #include "rare/driver.h"
@@ -24,14 +23,11 @@
 #include "sf2.h"
 #include "test_util.h"
 
-namespace fs = std::filesystem;
-
 namespace supergbamidi::rare
 {
 namespace
 {
 
-using test::Be32;
 using test::g_temp;
 using test::Le16;
 using test::Le32;
@@ -62,7 +58,7 @@ class Cart
 public:
     // Makes a cartridge whose driver reads the given format, with `slots` note slots for each channel. Without `code`,
     // it has no driver code, only the tune table.
-    Cart(Format format, int slots = 6, bool code = true) : d_(0x40000, 0), next_(kData)
+    explicit Cart(Format format, int slots = 6, bool code = true) : d_(0x40000, 0), next_(kData)
     {
         if (code)
         {
@@ -258,7 +254,7 @@ private:
         }
         Put32(kCodeSize, kCodeBytes);
 
-        // The driver's code, with its literal kPool at the end.
+        // The driver's code, with its literal pool at the end.
         std::vector<uint32_t> code = {0xE4DB0001};
         if (format == Format::kChannelNibble)
         {
@@ -283,7 +279,7 @@ private:
         Put32(kChannelSize, uint32_t(slots) * 0x28);
 
         // The tables: 2^(n/12) in 9.23 fixed point, the vibrato's sine, and a fade table whose entry i is 99 - i, so
-        // that a fade with index i takes 100 - i frames.
+        // that a fade with index i takes 100 - i frames, and one with index 99 none.
         for (int n = -64; n <= 64; n++)
         {
             Put32(kPitchTable + uint32_t(n * 4), uint32_t(std::lround(8388608.0 * std::pow(2.0, n / 12.0))));
@@ -304,7 +300,7 @@ private:
     uint32_t tunes_ = 0;
 };
 
-// Writes a track's commands in one of the two formats.
+// A track's commands being written, in one of the two formats.
 class Track
 {
 public:
@@ -389,7 +385,7 @@ private:
     std::vector<uint8_t> bytes_;
 };
 
-// A sample of 64 bytes of a saw wave.
+// Returns a sample of `length` bytes of a saw wave.
 std::vector<int8_t> Saw(size_t length = 64)
 {
     std::vector<int8_t> pcm;
@@ -455,6 +451,7 @@ void TestDecoding()
         {
             const bool ok = DecodeEvent(rom, a, format, e);
             a += e.size;
+
             return ok;
         };
 
@@ -475,6 +472,7 @@ void TestDecoding()
     Cart cart(Format::kChannelByte);
     const uint32_t at = cart.Place({0x0D, 0x00}, 1);
     Event e;
+
     SUPERGBAMIDI_CHECK(!DecodeEvent(cart.ToRom(), at, Format::kChannelByte, e));
 }
 
@@ -508,6 +506,7 @@ void TestDetection()
     overrides.tune_count = 1;
     DriverInfo one;
     std::string error;
+
     SUPERGBAMIDI_CHECK(DetectDriver(rom, overrides, one, error));
     SUPERGBAMIDI_CHECK_EQ(one.tune_count, 1);
 
@@ -517,11 +516,12 @@ void TestDetection()
     const auto bare_bank = bare.Bank({{0, bare.Sample(Saw())}});
     bare.Tune({Track(Format::kChannelByte).Program(1, 0).On(1, 60, 100).Wait(10).Off(1, 60).End()}, bare_bank);
     const Rom bare_rom = bare.ToRom();
+    DriverOverrides table;
+    table.tune_table = kTuneTable;
     DriverInfo none;
+
     SUPERGBAMIDI_CHECK(!DetectDriver(bare_rom, DriverOverrides(), none, error));
-    overrides = DriverOverrides();
-    overrides.tune_table = kTuneTable;
-    SUPERGBAMIDI_CHECK(DetectDriver(bare_rom, overrides, none, error));
+    SUPERGBAMIDI_CHECK(DetectDriver(bare_rom, table, none, error));
     SUPERGBAMIDI_CHECK(none.format == Format::kChannelByte);
     SUPERGBAMIDI_CHECK_EQ(none.tune_count, 1);
     SUPERGBAMIDI_CHECK(!none.warnings.empty());
@@ -542,11 +542,11 @@ void TestTiming()
 {
     // At 500,000 us a quarter and 480 ticks a quarter, 480 ticks are 30 frames of 1/60 s. The driver takes only 1/256
     // us off the first track's time in the first frame, before the tempo is known, so that track runs a frame late.
-    const Format f = Format::kChannelByte;
-    Cart cart(f);
+    const Format kFormat = Format::kChannelByte;
+    Cart cart(kFormat);
     const auto bank = cart.Bank({{0, cart.Sample(Saw(), 32)}});
-    cart.Tune({Track(f).Tempo(500000).Program(0, 0).Wait(480).On(0, 60, 100).Wait(10).Off(0, 60).End(),
-               Track(f).Program(1, 0).Wait(480).On(1, 62, 100).Wait(10).Off(1, 62).End()},
+    cart.Tune({Track(kFormat).Tempo(500000).Program(0, 0).Wait(480).On(0, 60, 100).Wait(10).Off(0, 60).End(),
+               Track(kFormat).Program(1, 0).Wait(480).On(1, 62, 100).Wait(10).Off(1, 62).End()},
               bank);
     const Rom rom = cart.ToRom();
     const DriverInfo info = Detect(rom);
@@ -567,18 +567,19 @@ void TestTiming()
 void TestSlots()
 {
     // A channel has 6 slots. A seventh note takes a slot whose note is releasing, and an eighth, with every slot's note
-    // on, is left out. A note off releases only the first slot that plays its key.
-    const Format f = Format::kChannelByte;
-    Cart cart(f);
+    // on, is left out. Two notes of one key take the slots of two released notes, and a note off for the key releases
+    // only the first.
+    const Format kFormat = Format::kChannelByte;
+    Cart cart(kFormat);
     const auto bank = cart.Bank({{0, cart.Sample(Saw(), 32, 11025, 60, {99, 99, 99, 50})}});
-    Track t(f);
+    Track t(kFormat);
     t.Tempo(500000).Program(2, 0);
     for (int k = 60; k < 66; k++)
     {
         t.On(2, k, 100);
     }
     t.Wait(48).Off(2, 61).Wait(48).On(2, 70, 100).On(2, 71, 100).Wait(48);
-    t.On(2, 72, 100).On(2, 72, 100).Wait(48).Off(2, 72);
+    t.Off(2, 62).Off(2, 63).On(2, 72, 100).On(2, 72, 100).Wait(48).Off(2, 72);
     cart.Tune({t.End()}, bank);
     const Rom rom = cart.ToRom();
     const DriverInfo info = Detect(rom);
@@ -593,7 +594,7 @@ void TestSlots()
         }
     }
 
-    std::vector<int> slots, dropped;
+    std::vector<int> slots, dropped, released;
     for (const Action& a : actions)
     {
         if (a.kind == Action::kNoteOn)
@@ -604,24 +605,30 @@ void TestSlots()
         {
             dropped.push_back(a.a);
         }
+        if (a.kind == Action::kNoteOff && a.a == 72)
+        {
+            released.push_back(a.slot);
+        }
     }
 
-    // Keys 60-65 take slots 12-17, key 70 takes 61's slot once it's releasing, and 71 is dropped.
-    const std::vector<int> kSlots = {12, 13, 14, 15, 16, 17, 13};
-    SUPERGBAMIDI_CHECK(std::vector<int>(slots.begin(), slots.begin() + std::min<size_t>(slots.size(), 7)) == kSlots);
-    SUPERGBAMIDI_CHECK(dropped.size() >= 1 && dropped[0] == 71);
+    // Keys 60-65 take slots 12-17, key 70 takes 61's slot once it's releasing, and 71 is dropped. The two 72s take 62's
+    // and 63's slots, and the note off releases the first.
+    SUPERGBAMIDI_CHECK(slots == std::vector<int>({12, 13, 14, 15, 16, 17, 13, 14, 15}));
+    SUPERGBAMIDI_CHECK(dropped == std::vector<int>({71}));
+    SUPERGBAMIDI_CHECK(released == std::vector<int>({14}));
+    SUPERGBAMIDI_CHECK(seq.GetSlot(15).state == kSlotOn);
 }
 
 void TestEnvelope()
 {
     // An instant attack and decay, full sustain, and a release of 5 frames (index 95), which falls in a straight line
     // in level: 0x80000 less 3 << 4 of the division's remainder, then 104848 a frame.
-    const Format f = Format::kChannelByte;
-    Cart cart(f);
+    const Format kFormat = Format::kChannelByte;
+    Cart cart(kFormat);
     const uint32_t sample = cart.Sample(Saw(), 32, 11025, 60, {99, 99, 99, 95});
     const auto bank = cart.Bank({{0, sample}});
-    cart.Tune({Track(f).Tempo(500000).Wait(960).End(),
-               Track(f).Program(1, 0).On(1, 60, 100).Wait(80).Off(1, 60).Wait(480).End()},
+    cart.Tune({Track(kFormat).Tempo(500000).Wait(960).End(),
+               Track(kFormat).Program(1, 0).On(1, 60, 100).Wait(80).Off(1, 60).Wait(480).End()},
               bank);
     const Rom rom = cart.ToRom();
     const DriverInfo info = Detect(rom);
@@ -647,7 +654,9 @@ void TestEnvelope()
     // The SoundFont envelope: the release stretched to 3 times its 5 frames, and the rest at their defaults.
     Instrument inst;
     SUPERGBAMIDI_CHECK(ReadInstrument(rom, sample, inst));
+
     const Sf2Envelope env = EnvelopeFor(info, inst);
+
     SUPERGBAMIDI_CHECK_EQ(env.attack, -12000);
     SUPERGBAMIDI_CHECK_EQ(env.decay, -12000);
     SUPERGBAMIDI_CHECK_EQ(env.sustain, 0);
@@ -657,12 +666,16 @@ void TestEnvelope()
     // 51 + 183/256 out of 128, reaches it in the decay's time.
     inst.decay = 30;
     inst.sustain = 0;
+
     SUPERGBAMIDI_CHECK_EQ(EnvelopeFor(info, inst).decay, int(std::lround(1200 * std::log2(6 * 70 / kFrameRate))));
     SUPERGBAMIDI_CHECK_EQ(EnvelopeFor(info, inst).sustain, 1440);
+
     inst.sustain = 40;
+
     const Sf2Envelope sustained = EnvelopeFor(info, inst);
-    const double level = (51 * 256 + 183) / 32768.0;
-    SUPERGBAMIDI_CHECK_EQ(sustained.sustain, int(std::lround(-200 * std::log10(level))));
+
+    const double kLevel = (51 * 256 + 183) / 32768.0;
+    SUPERGBAMIDI_CHECK_EQ(sustained.sustain, int(std::lround(-200 * std::log10(kLevel))));
     SUPERGBAMIDI_CHECK_EQ(sustained.decay,
                           int(std::lround(1200 * std::log2(1000.0 / sustained.sustain * 70 / kFrameRate))));
 }
@@ -671,25 +684,26 @@ void TestPitch()
 {
     // A bend of 0x1000 with a range of 2 semitones is a semitone. Vibrato adds (modulation + 1) times the sine times
     // the instrument's depth.
-    const Format f = Format::kChannelNibble;
-    Cart cart(f);
+    const Format kFormat = Format::kChannelNibble;
+    Cart cart(kFormat);
     const uint32_t inst = cart.Sample(Saw(), 32, 11025, 60, {99, 99, 99, 99}, 0, 2, 0x111111, 400);
     const auto bank = cart.Bank({{0, inst}});
-    cart.Tune({Track(f).Tempo(500000).Wait(960).End(), Track(f)
-                                                           .Program(1, 0)
-                                                           .Bend(1, 0x3000)
-                                                           .On(1, 60, 100)
-                                                           .Wait(64)
-                                                           .Bend(1, 0x2000)
-                                                           .Control(1, kCtrlModulation, 10)
-                                                           .Wait(480)
-                                                           .End()},
+    cart.Tune({Track(kFormat).Tempo(500000).Wait(960).End(), Track(kFormat)
+                                                                 .Program(1, 0)
+                                                                 .Bend(1, 0x3000)
+                                                                 .On(1, 60, 100)
+                                                                 .Wait(64)
+                                                                 .Bend(1, 0x2000)
+                                                                 .Control(1, kCtrlModulation, 10)
+                                                                 .Wait(480)
+                                                                 .End()},
               bank);
     const Rom rom = cart.ToRom();
     const DriverInfo info = Detect(rom);
 
     Sequencer seq(rom, info, 0);
     seq.Step();
+
     SUPERGBAMIDI_CHECK_EQ(seq.PitchOffset(1), int64_t(1) << 32);
 
     // 64 ticks are 4 frames. On that frame the vibrato runs for the first time, to phase 0x111111: index 0x11 of the
@@ -708,28 +722,34 @@ void TestPitch()
 void TestLoops()
 {
     // A track loops between controllers 102 and 103. The conversion plays the loop twice, and marks it.
-    const Format f = Format::kChannelByte;
-    Cart cart(f);
+    const Format kFormat = Format::kChannelByte;
+    Cart cart(kFormat);
     const auto bank = cart.Bank({{5, cart.Sample(Saw(), 32)}});
-    cart.Tune(
-        {Track(f).Tempo(500000).Wait(480).Control(0, kCtrlLoopStart, 0).Wait(960).Control(0, kCtrlLoopEnd, 0).End(),
-         Track(f)
-             .Program(1, 5)
-             .Wait(480)
-             .Control(1, kCtrlLoopStart, 0)
-             .On(1, 60, 100)
-             .Wait(480)
-             .Off(1, 60)
-             .Wait(480)
-             .Control(1, kCtrlLoopEnd, 0)
-             .End()},
-        bank);
+    cart.Tune({Track(kFormat)
+                   .Tempo(500000)
+                   .Wait(480)
+                   .Control(0, kCtrlLoopStart, 0)
+                   .Wait(960)
+                   .Control(0, kCtrlLoopEnd, 0)
+                   .End(),
+               Track(kFormat)
+                   .Program(1, 5)
+                   .Wait(480)
+                   .Control(1, kCtrlLoopStart, 0)
+                   .On(1, 60, 100)
+                   .Wait(480)
+                   .Off(1, 60)
+                   .Wait(480)
+                   .Control(1, kCtrlLoopEnd, 0)
+                   .End()},
+              bank);
     const Rom rom = cart.ToRom();
     const DriverInfo info = Detect(rom);
 
     ConvertOptions opt;
     opt.out_dir = Utf8(g_temp);
     opt.base_name = "loops";
+
     const SongSummary r = ConvertSong(rom, info, 0, opt, nullptr);
 
     SUPERGBAMIDI_CHECK(r.ok && !r.silent);
@@ -759,10 +779,180 @@ void TestLoops()
     SUPERGBAMIDI_CHECK(std::fabs(r.seconds - 2.5 * kTempoScale) < 1e-9);
 }
 
+void TestLoopStarts()
+{
+    // One track loops 960 ticks from the start, and the other 480 ticks from tick 480. The loop goes from tick 480,
+    // where both tracks are looping, for the longer loop's 960 ticks, and the tune plays it twice.
+    const Format kFormat = Format::kChannelByte;
+    Cart cart(kFormat);
+    const auto bank = cart.Bank({{5, cart.Sample(Saw(), 32)}});
+    cart.Tune({Track(kFormat)
+                   .Tempo(500000)
+                   .Program(0, 5)
+                   .Control(0, kCtrlLoopStart, 0)
+                   .On(0, 60, 100)
+                   .Wait(480)
+                   .Off(0, 60)
+                   .Wait(480)
+                   .Control(0, kCtrlLoopEnd, 0)
+                   .End(),
+               Track(kFormat)
+                   .Program(1, 5)
+                   .Wait(480)
+                   .Control(1, kCtrlLoopStart, 0)
+                   .On(1, 64, 100)
+                   .Wait(240)
+                   .Off(1, 64)
+                   .Wait(240)
+                   .Control(1, kCtrlLoopEnd, 0)
+                   .End()},
+              bank);
+    const Rom rom = cart.ToRom();
+    const DriverInfo info = Detect(rom);
+    ConvertOptions opt;
+    opt.out_dir = Utf8(g_temp);
+    opt.base_name = "loop_starts";
+
+    const SongSummary r = ConvertSong(rom, info, 0, opt, nullptr);
+
+    // The loop goes from 0.5 s to 1.5 s of song time, which the GBA plays a little slower, and the tune ends at 2.5 s.
+    SUPERGBAMIDI_CHECK(r.ok && !r.silent);
+    SUPERGBAMIDI_CHECK(std::fabs(r.loop_start - 0.5 * kTempoScale) < 1e-9);
+    SUPERGBAMIDI_CHECK(std::fabs(r.loop_end - 1.5 * kTempoScale) < 1e-9);
+    SUPERGBAMIDI_CHECK(std::fabs(r.seconds - 2.5 * kTempoScale) < 1e-9);
+}
+
+void TestLoopLengths()
+{
+    // One track loops 720 ticks and the other 960, both from the start. The loop lasts until both are back where they
+    // started, 2880 ticks or 3 s of song time, and the tune plays it twice.
+    const Format kFormat = Format::kChannelByte;
+    Cart cart(kFormat);
+    const auto bank = cart.Bank({{5, cart.Sample(Saw(), 32)}});
+    cart.Tune({Track(kFormat)
+                   .Tempo(500000)
+                   .Program(0, 5)
+                   .Control(0, kCtrlLoopStart, 0)
+                   .On(0, 60, 100)
+                   .Wait(360)
+                   .Off(0, 60)
+                   .Wait(360)
+                   .Control(0, kCtrlLoopEnd, 0)
+                   .End(),
+               Track(kFormat)
+                   .Program(1, 5)
+                   .Control(1, kCtrlLoopStart, 0)
+                   .On(1, 64, 100)
+                   .Wait(480)
+                   .Off(1, 64)
+                   .Wait(480)
+                   .Control(1, kCtrlLoopEnd, 0)
+                   .End()},
+              bank);
+    const Rom rom = cart.ToRom();
+    const DriverInfo info = Detect(rom);
+    ConvertOptions opt;
+    opt.out_dir = Utf8(g_temp);
+    opt.base_name = "loop_lengths";
+
+    const SongSummary r = ConvertSong(rom, info, 0, opt, nullptr);
+
+    // The GBA plays song time a little slower.
+    SUPERGBAMIDI_CHECK(r.ok && !r.silent);
+    SUPERGBAMIDI_CHECK(std::fabs(r.loop_start) < 1e-9);
+    SUPERGBAMIDI_CHECK(std::fabs(r.loop_end - 3 * kTempoScale) < 1e-9);
+    SUPERGBAMIDI_CHECK(std::fabs(r.seconds - 6 * kTempoScale) < 1e-9);
+}
+
+void TestTrackWithoutLoop()
+{
+    // In a looping tune, the loop starts no earlier than the last command of a track without a loop, and a track that
+    // ends in a long delay doesn't lengthen the tune. Track 0 sets the tempo and waits 9600 ticks, track 1 loops 960
+    // ticks from the start, and track 2 plays a note from tick 480 to tick 960 and ends. The loop goes from tick 960 to
+    // tick 1920, and the tune ends at tick 2880.
+    const Format kFormat = Format::kChannelByte;
+    Cart cart(kFormat);
+    const auto bank = cart.Bank({{5, cart.Sample(Saw(), 32)}});
+    cart.Tune({Track(kFormat).Tempo(500000).Wait(9600).End(),
+               Track(kFormat)
+                   .Program(1, 5)
+                   .Control(1, kCtrlLoopStart, 0)
+                   .On(1, 60, 100)
+                   .Wait(480)
+                   .Off(1, 60)
+                   .Wait(480)
+                   .Control(1, kCtrlLoopEnd, 0)
+                   .End(),
+               Track(kFormat).Program(2, 5).Wait(480).On(2, 64, 100).Wait(480).Off(2, 64).End()},
+              bank);
+    const Rom rom = cart.ToRom();
+    const DriverInfo info = Detect(rom);
+    ConvertOptions opt;
+    opt.out_dir = Utf8(g_temp);
+    opt.base_name = "without_loop";
+
+    const SongSummary r = ConvertSong(rom, info, 0, opt, nullptr);
+
+    // At 960 ticks a second of song time, which the GBA plays a little slower.
+    SUPERGBAMIDI_CHECK(r.ok && !r.silent);
+    SUPERGBAMIDI_CHECK(std::fabs(r.loop_start - 1.0 * kTempoScale) < 1e-9);
+    SUPERGBAMIDI_CHECK(std::fabs(r.loop_end - 2.0 * kTempoScale) < 1e-9);
+    SUPERGBAMIDI_CHECK(std::fabs(r.seconds - 3.0 * kTempoScale) < 1e-9);
+}
+
+void TestHourLimit()
+{
+    // A tune asked to play its loop of 50 s a hundred times stops where the model gives up, after 216000 frames
+    // (60:16.42). The loop starts half a second in, so the limit falls in the middle of a note: the tune's length, its
+    // MIDI file and that note all end there.
+    const Format kFormat = Format::kChannelByte;
+    Cart cart(kFormat);
+    const auto bank = cart.Bank({{5, cart.Sample(Saw(), 32)}});
+    cart.Tune({Track(kFormat)
+                   .Tempo(500000)
+                   .Program(1, 5)
+                   .Wait(480)
+                   .Control(1, kCtrlLoopStart, 0)
+                   .On(1, 60, 100)
+                   .Wait(48000)
+                   .Off(1, 60)
+                   .Control(1, kCtrlLoopEnd, 0)
+                   .End()},
+              bank);
+    const Rom rom = cart.ToRom();
+    const DriverInfo info = Detect(rom);
+    ConvertOptions opt;
+    opt.out_dir = Utf8(g_temp);
+    opt.base_name = "hour";
+    opt.loops = 100;
+
+    const SongSummary r = ConvertSong(rom, info, 0, opt, nullptr);
+
+    const auto cut_off = [](const std::string& w)
+    {
+        return w.find("cut off after an hour") != std::string::npos;
+    };
+    SUPERGBAMIDI_CHECK(r.ok && std::any_of(r.warnings.begin(), r.warnings.end(), cut_off));
+    SUPERGBAMIDI_CHECK(r.seconds > 3610 && r.seconds < 3620);
+
+    const MidiEvents m = ReadMidi(r.midi_path);
+    uint32_t last = 0;
+    for (const auto& track : m.tracks)
+    {
+        for (const auto& e : track)
+        {
+            last = std::max(last, e.first);
+        }
+    }
+    const auto offs = m.Find(0x81);
+    SUPERGBAMIDI_CHECK(last / 960.0 * kTempoScale < 3620);
+    SUPERGBAMIDI_CHECK(!offs.empty() && offs.back().first / 960.0 * kTempoScale > 3610);
+}
+
 void TestConversion()
 {
-    const Format f = Format::kChannelNibble;
-    Cart cart(f);
+    const Format kFormat = Format::kChannelNibble;
+    Cart cart(kFormat);
     const uint32_t lead = cart.Sample(Saw(), 4, 11025, 57, {50, 60, 40, 95}, 150, 2);
     const uint32_t low = cart.Sample(Saw(100), 0, 8000, 48);
     const uint32_t high = cart.Sample(Saw(80), 40, 16000, 72);
@@ -771,8 +961,8 @@ void TestConversion()
     const uint32_t kick = cart.Sample(Saw(50), 0, 11025, 36);
     const uint32_t kit = cart.Split(kInstDrumKit, {{{35, 36}, kick}});
     const auto bank = cart.Bank({{1, lead}, {2, split}, {127, kit}});
-    cart.Tune({Track(f).Tempo(500000).Wait(960).End(),
-               Track(f)
+    cart.Tune({Track(kFormat).Tempo(500000).Wait(960).End(),
+               Track(kFormat)
                    .Program(0, 1)
                    .Control(0, kCtrlVolume, 100)
                    .On(0, 60, 64)
@@ -785,8 +975,8 @@ void TestConversion()
                    .Off(0, 64)
                    .Off(0, 64)
                    .End(),
-               Track(f).Program(4, 2).On(4, 50, 100).On(4, 70, 100).Wait(240).Off(4, 50).Off(4, 70).End(),
-               Track(f).On(9, 36, 127).Program(9, 127).Wait(240).Off(9, 36).End()},
+               Track(kFormat).Program(4, 2).On(4, 50, 100).On(4, 70, 100).Wait(240).Off(4, 50).Off(4, 70).End(),
+               Track(kFormat).On(9, 36, 127).Program(9, 127).Wait(240).Off(9, 36).End()},
               bank);
     const Rom rom = cart.ToRom();
     const DriverInfo info = Detect(rom);
@@ -794,6 +984,7 @@ void TestConversion()
     ConvertOptions opt;
     opt.out_dir = Utf8(g_temp);
     opt.base_name = "convert";
+
     const SongSummary r = ConvertSong(rom, info, 0, opt, nullptr);
 
     SUPERGBAMIDI_CHECK(r.ok && !r.silent);
@@ -837,9 +1028,26 @@ void TestConversion()
     }
     SUPERGBAMIDI_CHECK(range);
 
-    // The drum channel's note comes before its program change, at the same tick, and gets that program.
+    // The drum channel's note comes before its program change, at the same tick, and gets that program, so the MIDI
+    // file puts the change first.
     const auto drums = m.Find(0x99);
     SUPERGBAMIDI_CHECK(drums.size() == 1 && drums[0].second[1] == 36);
+    int change = -1, note = -1;
+    for (const auto& t : m.tracks)
+    {
+        for (size_t i = 0; i < t.size(); i++)
+        {
+            if (change < 0 && t[i].second[0] == 0xC9 && t[i].second[1] == 127)
+            {
+                change = int(i);
+            }
+            if (note < 0 && t[i].second[0] == 0x99)
+            {
+                note = int(i);
+            }
+        }
+    }
+    SUPERGBAMIDI_CHECK(change >= 0 && change < note);
 
     // The SoundFont: a preset for each program, and the drum channel's in bank 128 too.
     const Sf2Records sf = ReadSf2(r.sf2_path);
@@ -878,15 +1086,37 @@ void TestConversion()
     SUPERGBAMIDI_CHECK_EQ(drum_zone.at(sf2gen::kScaleTuning), 0);
 
     // The lead's loop of 4 bytes is repeated to 32, and followed by 8 points that repeat its start.
+    int leads = 0;
     for (size_t s = 0; s + 1 < sf.Count("shdr", 46); s++)
     {
         const uint8_t* h = sf.Record("shdr", 46, s);
         if (Le32(h + 36) == 11025 && h[40] == 57)
         {
+            leads++;
             SUPERGBAMIDI_CHECK_EQ(Le32(h + 32) - Le32(h + 28), 32);
             SUPERGBAMIDI_CHECK_EQ(Le32(h + 24) - Le32(h + 32), 8);
         }
     }
+    SUPERGBAMIDI_CHECK_EQ(leads, 1);
+}
+
+// An instrument of a type the driver doesn't name plays as a drum kit, so its SoundFont instrument has a zone for its
+// drum.
+void TestOtherDrumKitType()
+{
+    const Format kFormat = Format::kChannelNibble;
+    Cart cart(kFormat);
+    const uint32_t kick = cart.Sample(Saw(50), 0, 11025, 36);
+    const uint32_t kit = cart.Split(0x24, {{{35, 36}, kick}});
+    cart.Tune({Track(kFormat).End()}, cart.Bank({{1, kit}}));
+    const Rom rom = cart.ToRom();
+    const DriverInfo info = Detect(rom);
+    SoundfontBuilder sf(rom, info);
+
+    const int instrument = sf.InstrumentFor(kit);
+
+    SUPERGBAMIDI_CHECK(instrument >= 0);
+    SUPERGBAMIDI_CHECK(instrument >= 0 && sf.File().instruments[size_t(instrument)].zones.size() == 2);
 }
 
 void TestPrograms()
@@ -894,13 +1124,13 @@ void TestPrograms()
     // Track 1 plays a note on channel 0 and then changes the channel's program on the same tick, so the driver plays
     // the note with the old program. Track 2 gives channel 1 a new program on the tick that track 3 plays a note on it,
     // and the driver runs track 2's commands first, so that note plays with the new program.
-    const Format f = Format::kChannelNibble;
-    Cart cart(f);
+    const Format kFormat = Format::kChannelNibble;
+    Cart cart(kFormat);
     const auto bank = cart.Bank({{1, cart.Sample(Saw(), 32)}, {2, cart.Sample(Saw(), 32, 8000)}});
-    cart.Tune({Track(f).Tempo(500000).Wait(960).End(),
-               Track(f).Program(0, 1).Wait(240).On(0, 60, 100).Program(0, 2).Wait(240).Off(0, 60).End(),
-               Track(f).Program(1, 1).Wait(240).Program(1, 2).Wait(240).End(),
-               Track(f).Wait(240).On(1, 62, 100).Wait(240).Off(1, 62).End()},
+    cart.Tune({Track(kFormat).Tempo(500000).Wait(960).End(),
+               Track(kFormat).Program(0, 1).Wait(240).On(0, 60, 100).Program(0, 2).Wait(240).Off(0, 60).End(),
+               Track(kFormat).Program(1, 1).Wait(240).Program(1, 2).Wait(240).End(),
+               Track(kFormat).Wait(240).On(1, 62, 100).Wait(240).Off(1, 62).End()},
               bank);
     const Rom rom = cart.ToRom();
     const DriverInfo info = Detect(rom);
@@ -916,15 +1146,22 @@ void TestPrograms()
     SUPERGBAMIDI_CHECK_EQ(m.tracks.size(), 3);
     if (m.tracks.size() == 3)
     {
-        std::vector<uint8_t> statuses;
-        for (const auto& e : m.tracks[1])
+        const auto statuses_at_240 = [&m](size_t track, uint8_t note_on, uint8_t program)
         {
-            if (e.first == 240 && (e.second[0] == 0x90 || e.second[0] == 0xC0))
+            std::vector<uint8_t> statuses;
+            for (const auto& e : m.tracks[track])
             {
-                statuses.push_back(e.second[0]);
+                if (e.first == 240 && (e.second[0] == note_on || e.second[0] == program))
+                {
+                    statuses.push_back(e.second[0]);
+                }
             }
-        }
-        SUPERGBAMIDI_CHECK(statuses == std::vector<uint8_t>({0x90, 0xC0}));
+
+            return statuses;
+        };
+
+        SUPERGBAMIDI_CHECK(statuses_at_240(1, 0x90, 0xC0) == std::vector<uint8_t>({0x90, 0xC0}));
+        SUPERGBAMIDI_CHECK(statuses_at_240(2, 0x91, 0xC1) == std::vector<uint8_t>({0xC1, 0x91}));
     }
 
     std::vector<std::pair<uint32_t, int>> channel1;
@@ -940,12 +1177,13 @@ void TestSharedKey()
 {
     // Track 2 plays key 60 on channel 0, and track 1 plays it again 3 frames later, while track 2's note still plays.
     // In the driver, track 1's note off releases the older note, and track 2's the newer one.
-    const Format f = Format::kChannelNibble;
-    Cart cart(f);
+    const Format kFormat = Format::kChannelNibble;
+    Cart cart(kFormat);
     const auto bank = cart.Bank({{1, cart.Sample(Saw(), 32)}});
-    cart.Tune({Track(f).Tempo(500000).Wait(960).End(), Track(f).Wait(48).On(0, 60, 100).Wait(48).Off(0, 60).End(),
-               Track(f).Program(0, 1).On(0, 60, 90).Wait(144).Off(0, 60).End()},
-              bank);
+    cart.Tune(
+        {Track(kFormat).Tempo(500000).Wait(960).End(), Track(kFormat).Wait(48).On(0, 60, 100).Wait(48).Off(0, 60).End(),
+         Track(kFormat).Program(0, 1).On(0, 60, 90).Wait(144).Off(0, 60).End()},
+        bank);
     const Rom rom = cart.ToRom();
     const DriverInfo info = Detect(rom);
     ConvertOptions opt;
@@ -985,11 +1223,11 @@ void TestSharedKey()
 void TestTrackChoice()
 {
     // Only the chosen tracks' notes are written, and a tune with none of them is skipped.
-    const Format f = Format::kChannelByte;
-    Cart cart(f);
+    const Format kFormat = Format::kChannelByte;
+    Cart cart(kFormat);
     const auto bank = cart.Bank({{0, cart.Sample(Saw(), 32)}});
-    cart.Tune({Track(f).Tempo(500000).Program(0, 0).On(0, 60, 100).Wait(100).Off(0, 60).End(),
-               Track(f).Program(1, 0).On(1, 62, 100).Wait(100).Off(1, 62).End()},
+    cart.Tune({Track(kFormat).Tempo(500000).Program(0, 0).On(0, 60, 100).Wait(100).Off(0, 60).End(),
+               Track(kFormat).Program(1, 0).On(1, 62, 100).Wait(100).Off(1, 62).End()},
               bank);
     const Rom rom = cart.ToRom();
     const DriverInfo info = Detect(rom);
@@ -998,6 +1236,7 @@ void TestTrackChoice()
     opt.out_dir = Utf8(g_temp);
     opt.base_name = "tracks";
     opt.track_mask = 1 << 1;
+
     const SongSummary r = ConvertSong(rom, info, 0, opt, nullptr);
 
     SUPERGBAMIDI_CHECK(r.ok && !r.silent && r.tracks == 1);
@@ -1005,20 +1244,22 @@ void TestTrackChoice()
     SUPERGBAMIDI_CHECK(m.Find(0x90).empty() && m.Find(0x91).size() == 1);
 
     opt.track_mask = 1 << 5;
+
     SUPERGBAMIDI_CHECK(ConvertSong(rom, info, 0, opt, nullptr).silent);
 }
 
 void TestDump()
 {
-    const Format f = Format::kChannelByte;
-    Cart cart(f);
+    const Format kFormat = Format::kChannelByte;
+    Cart cart(kFormat);
     const auto bank = cart.Bank({{0, cart.Sample(Saw(), 32)}});
-    cart.Tune({Track(f).Tempo(500000).Program(0, 0).On(0, 60, 100).Wait(100).Off(0, 60).End()}, bank);
+    cart.Tune({Track(kFormat).Tempo(500000).Program(0, 0).On(0, 60, 100).Wait(100).Off(0, 60).End()}, bank);
     const Rom rom = cart.ToRom();
     const DriverInfo info = Detect(rom);
 
     const std::string path = Utf8(TempPath("dump.txt"));
     std::string error;
+
     SUPERGBAMIDI_CHECK(DumpSong(rom, info, 0, path, error));
 
     const std::vector<uint8_t> text = ReadAll(path);
@@ -1073,7 +1314,12 @@ void RunTests()
     TestEnvelope();
     TestPitch();
     TestLoops();
+    TestLoopStarts();
+    TestLoopLengths();
+    TestTrackWithoutLoop();
+    TestHourLimit();
     TestConversion();
+    TestOtherDrumKitType();
     TestPrograms();
     TestSharedKey();
     TestTrackChoice();

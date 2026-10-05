@@ -16,6 +16,7 @@
 namespace supergbamidi::rare
 {
 
+// The number of MIDI channels that the tracks play on.
 constexpr int kChannels = 16;
 
 // The states of a note slot.
@@ -46,7 +47,6 @@ struct Slot
     int32_t level_step = 0;
     int32_t sustain = 0;
     uint32_t instrument = 0; // the instrument it plays
-    uint32_t pitch_scale = 0x10000;
 };
 
 // A channel's settings.
@@ -54,7 +54,6 @@ struct ChannelState
 {
     uint32_t instrument = 0; // the instrument its last program change chose, or 0
     int program = -1;
-    uint8_t volume = 0x7F; // controller 7
     uint32_t bend = 0x2000;
     uint32_t modulation = 0; // controller 1
     uint32_t vibrato_phase = 0;
@@ -72,19 +71,14 @@ struct Action
         kProgram,
         kVolume,
         kBend,
-        kModulation,
         kTempo,
-        kLoopStart,
-        kLoopEnd,
-        kTrackEnd,
-        kMono, // a = 1 for mono, 0 for poly
     };
 
     Kind kind = kNoteOn;
     uint8_t track = 0;
     uint8_t channel = 0;
     uint8_t a = 0, b = 0;    // key and velocity, program, controller value
-    uint32_t value = 0;      // tempo, pitch bend
+    uint32_t value = 0;      // tempo
     uint64_t tick = 0;       // the track's tick count when it happened, counting every pass through a loop
     uint32_t frame = 0;      // the frame it happened on
     int slot = -1;           // kNoteOn: the slot the note plays in; kNoteOff: the slot it released, or -1
@@ -93,6 +87,7 @@ struct Action
     uint32_t instrument = 0; // kNoteOn, kProgram: the channel's instrument
 };
 
+// Plays a tune one frame at a time, as the driver's per-frame routine does.
 class Sequencer
 {
 public:

@@ -16,23 +16,20 @@ constexpr int kMaxCommandsPerFrame = 100000;
 // The level below which a decay stops a note.
 constexpr int32_t kAudibleLevel = 0x1000;
 
-// The level at which a note's envelope starts its attack: half of it, the other half being the step.
+// The full level divided by 16. The driver works out the attack's and the decay's steps from it with its 16-bit
+// division, then multiplies them by 16.
 constexpr uint32_t kAttackRange = 0x8000;
 
-// The driver's 16-bit division: `dividend` / `divisor` and its remainder.
+// A quotient and remainder from the driver's 16-bit division.
 struct Quotient
 {
     uint32_t quotient;
     uint32_t remainder;
 };
 
+// Returns `dividend` / `divisor` and its remainder, as the driver's 16-bit division works them out.
 Quotient Divide(uint32_t dividend, uint32_t divisor)
 {
-    if (divisor == 0)
-    {
-        return {0xFFFF, dividend};
-    }
-
     return {(dividend / divisor) & 0xFFFF, dividend % divisor};
 }
 
@@ -183,18 +180,12 @@ bool Sequencer::RunTrack(int t)
         case kCmdBend:
             channels_[e.channel].bend = e.value;
             a.kind = Action::kBend;
-            a.value = e.value;
             actions_.push_back(a);
             break;
 
         case kCmdEnd:
             // The driver reads the end again every frame, and counts the track as ended each time.
             track.position -= e.size;
-            if (!track.done)
-            {
-                a.kind = Action::kTrackEnd;
-                actions_.push_back(a);
-            }
             track.done = true;
             return true;
 
@@ -220,7 +211,6 @@ int64_t Sequencer::DelayTime(uint32_t command, uint32_t ticks) const
     const uint32_t fraction = Divide(remainder << 16, per_quarter).quotient;
     const uint32_t low = (quotient << 8) | (fraction >> 8);
     const uint32_t high = command == kCmdDelay1 ? 0 : quotient >> 24;
-
     return int64_t((uint64_t(high) << 32) | low);
 }
 
@@ -261,8 +251,8 @@ void Sequencer::NoteOn(int t, const Event& e)
     }
 
     // A drum kit plays the instrument for the key at its root key, and a key split at the key. Any type of instrument
-    // but a sample is read as a drum kit. The driver reads these words even where they aren't instruments, as it does
-    // for a channel without a program, which reads zeros here.
+    // but a sample or a key split is read as a drum kit. The driver reads these words even where they aren't
+    // instruments, as it does for a channel without a program, which reads zeros here.
     const uint32_t top = channels_[e.channel].instrument;
     const uint32_t type = rom_.U32(top);
     uint32_t voice = top;
@@ -294,7 +284,6 @@ void Sequencer::NoteOn(int t, const Event& e)
 
     Slot& s = slots_[size_t(index)];
     s.velocity = uint8_t(e.b + 1);
-    s.pitch_scale = 0x10000;
     s.loop_mode = uint8_t(rom_.U32(voice + 4));
     s.key = e.a;
     s.pitch_key = pitch_key;
@@ -338,51 +327,47 @@ void Sequencer::NoteOff(int t, const Event& e)
 void Sequencer::Control(int t, const Event& e, Track& track)
 {
     ChannelState& c = channels_[e.channel];
-    Action a;
-    a.track = uint8_t(t);
-    a.channel = e.channel;
-    a.a = e.b;
-    a.tick = track.tick;
     switch (e.a)
     {
     case kCtrlModulation:
         c.modulation = e.b;
-        a.kind = Action::kModulation;
         break;
 
     case kCtrlVolume:
-        c.volume = e.b;
-        a.kind = Action::kVolume;
+        {
+            // The model doesn't work out the voices' levels, so it only passes the volume on to the conversion.
+            Action a;
+            a.kind = Action::kVolume;
+            a.track = uint8_t(t);
+            a.channel = e.channel;
+            a.a = e.b;
+            a.tick = track.tick;
+            actions_.push_back(a);
+        }
         break;
 
     case kCtrlLoopStart:
         track.loop = track.position;
-        a.kind = Action::kLoopStart;
         break;
 
     case kCtrlLoopEnd:
         if (track.loop == 0)
         {
             Warn("track " + std::to_string(t) + " ends a loop that it didn't start; the end is ignored");
-            return;
+            break;
         }
 
         track.position = track.loop;
-        a.kind = Action::kLoopEnd;
         break;
 
     case kCtrlMonoOn:
     case kCtrlPolyOn:
         c.mono = e.a == kCtrlMonoOn;
-        a.kind = Action::kMono;
-        a.a = c.mono ? 1 : 0;
         break;
 
     default:
-        return;
+        break;
     }
-
-    actions_.push_back(a);
 }
 
 void Sequencer::Program(int t, const Event& e)
@@ -458,6 +443,7 @@ void Sequencer::UpdateEnvelope(Slot& s)
             s.phase = 1;
         }
         [[fallthrough]];
+
     case 1:
         if (s.state == kSlotReleased)
         {
@@ -502,6 +488,7 @@ void Sequencer::UpdateEnvelope(Slot& s)
             s.phase = 3;
         }
         [[fallthrough]];
+
     case 3:
         {
             if (s.state == kSlotReleased)
@@ -606,8 +593,7 @@ void Sequencer::MixVoice(Slot& s)
     // The mixer stops a sample without a loop at its end. It doesn't keep the position it reaches: Advance() moves it.
     Instrument inst;
     ReadInstrument(rom_, s.instrument, inst);
-    const uint32_t step = uint32_t((uint64_t(s.pitch_scale) * s.step) >> 16);
-    const uint64_t moved = s.fraction + uint64_t(step) * uint32_t(info_.samples_per_frame);
+    const uint64_t moved = s.fraction + uint64_t(s.step) * uint32_t(info_.samples_per_frame);
     const uint32_t position = s.position + uint32_t(moved >> 23);
     const bool loops = s.loop_mode == kLoopForward || s.loop_mode == kLoopForwardB;
     if (int32_t(position) >= int32_t(inst.end) && !loops)
@@ -619,9 +605,8 @@ void Sequencer::MixVoice(Slot& s)
 void Sequencer::Advance(Slot& s)
 {
     // Each frame moves every voice on by the frame's samples, whether it was mixed or not.
-    const uint32_t raw = s.step ? s.step : PitchStep(s);
+    const uint32_t step = s.step ? s.step : PitchStep(s);
     s.step = 0;
-    const uint32_t step = uint32_t((uint64_t(s.pitch_scale) * raw) >> 16);
     const uint64_t moved =
         ((uint64_t(s.position) << 23) | s.fraction) + uint64_t(step) * uint32_t(info_.samples_per_frame);
     s.fraction = uint32_t(moved & 0x7FFFFF);
@@ -679,7 +664,6 @@ uint32_t Sequencer::PitchStep(const Slot& s) const
     }
 
     const uint32_t rate = uint32_t((uint64_t(info_.rate_scale) * voice.rate) >> 14);
-
     return uint32_t((uint64_t(ratio) * rate) >> 24);
 }
 
@@ -718,7 +702,6 @@ int64_t Sequencer::PitchOffset(int channel) const
     }
 
     const int32_t scaled = int32_t(uint32_t(c.modulation + 1) * uint32_t(sine));
-
     return bend + int64_t(scaled) * inst.vibrato_depth;
 }
 

@@ -2,6 +2,8 @@
 
 #include "midi.h"
 
+#include <algorithm>
+#include <cmath>
 #include <utility>
 
 #include "files.h"
@@ -10,6 +12,8 @@ namespace supergbamidi
 {
 namespace
 {
+
+constexpr double kPi = 3.14159265358979323846;
 
 // Appends `v` as a variable-length quantity: 7 bits a byte, the most significant first, with the top bit set on all but
 // the last.
@@ -49,6 +53,31 @@ uint8_t Clamp7(int v)
 }
 
 } // namespace
+
+void LevelsToControllers(double left, double right, int& cc10, int& cc11)
+{
+    const double gl = left / 128.0, gr = right / 128.0;
+    const double amp = std::sqrt(gl * gl + gr * gr);
+    if (amp <= 0)
+    {
+        cc11 = 0;
+        return;
+    }
+
+    // Equal levels are centred. The formula puts them at exactly 63.5, so rounding them with it would depend on atan2()
+    // returning exactly the double nearest pi/4.
+    if (left == right)
+    {
+        cc10 = 64;
+    }
+    else
+    {
+        cc10 = std::clamp(int(std::lround(std::atan2(gr, gl) / (kPi / 2) * 127)), 0, 127);
+    }
+
+    const double kLoudestCentred = std::sqrt(2.0) * 127.0 / 128.0; // amplitude of the loudest centred voice
+    cc11 = std::clamp(int(std::lround(127 * std::sqrt(amp / kLoudestCentred))), 0, 127);
+}
 
 void MidiTrack::AddEvent(uint32_t tick, int order, std::vector<uint8_t> bytes)
 {

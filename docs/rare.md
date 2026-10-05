@@ -10,7 +10,7 @@ come from that game. Other games put the driver and its data elsewhere, and
 
 The tune data is close to a Standard MIDI File: tracks of MIDI-like commands
 with delays in ticks, a tempo in microseconds per quarter note, MIDI channels,
-programs, controllers and pitch bends. The driver plays it with sampled
+programs, controllers and pitch bends. The driver plays the tunes with sampled
 instruments only. It doesn't use the Game Boy's PSG channels.
 
 ## Games and revisions
@@ -29,7 +29,7 @@ channel in its high nibble. The revisions differ in a few other details:
 | *Donkey Kong Country 2* (`B2DE`) | channel nibble | 6 | 5 | stored |
 | *Banjo-Pilot* (`BAJE`) | channel nibble | 5 | 4 | stored |
 
-Everything else in this document holds for all of them.
+The rest of this document applies to all these revisions.
 
 ## Architecture
 
@@ -52,8 +52,8 @@ The game calls the per-frame routine once a frame. The routine runs these steps:
 The output is mono. Timer 0 runs at the mix rate, and DMA1 feeds the samples
 to FIFO A, which plays on both sides at full volume. At each VBlank the game
 calls a routine that swaps the two halves of the output buffer and restarts
-DMA1. The init sets a mix rate of 13379 Hz, which makes 224 samples a frame,
-one frame of the GBA's display (59.7275 Hz).
+DMA1. The init sets a mix rate of 13379 Hz, or 224 samples per display frame
+(59.7275 Hz).
 
 In `A5NE` the routines are:
 
@@ -299,7 +299,8 @@ record has the same layout:
 A note on picks a slot from the channel's slots. In mono mode it always takes
 the first slot, cutting off the note playing there. Otherwise it takes the
 first free slot, or if there's none, the first slot whose note is released. If
-every slot's note is on, the driver drops the new note.
+every slot holds a note that hasn't been released, the driver drops the new
+note.
 
 The note starts at the sample's first byte, with its envelope in phase 0 at a
 level of 0, and the slot keeps the instrument and the key it plays at.

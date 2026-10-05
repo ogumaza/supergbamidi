@@ -21,6 +21,7 @@ constexpr double kCpuHz = 16777216.0;
 // revision, an entry of the sample table points at the PCM, and gives the length and the sample's rate.
 struct SampleInfo
 {
+    // Returns true if the sample loops: its loop start is inside it.
     bool Looped() const
     {
         return loop_start >= 0 && loop_start < length;

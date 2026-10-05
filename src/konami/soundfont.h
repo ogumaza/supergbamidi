@@ -23,8 +23,8 @@ namespace supergbamidi::konami
 // voice at level 2v.
 constexpr int kPsgLevelPerVolume = 2;
 
-// The fixed level that wave notes play at. Wave samples are the driver's pre-scaled wave RAM images (see
-// WaveSample), stored at half scale so any row fits without clipping.
+// The fixed level that wave notes play at. Wave samples are the driver's pre-scaled wave RAM images (see WaveSample),
+// stored at half scale so any row fits without clipping.
 constexpr int kWaveRowLevel = 2 * kPsgLevelPerVolume * 15;
 
 // Builds and caches SoundFont samples from a ROM. The converter adds presets and instruments to the same file.
@@ -40,6 +40,7 @@ public:
     // Keeps references to `rom` and `info`, which have to outlive the builder.
     SoundfontBuilder(const Rom& rom, const DriverInfo& info);
 
+    // Returns the SoundFont that the builder adds samples to.
     Sf2File& File()
     {
         return file_;
@@ -76,6 +77,7 @@ public:
     int WaveKey(int wave, int note) const;
 
 private:
+    // The root key of a DirectSound sample, and whether a clear pitch was found for it.
     struct Pitch
     {
         int key = 60;

@@ -17,7 +17,10 @@ namespace sf2gen
 
 enum : uint16_t
 {
+    kPan = 17,
+    kDelayVolEnv = 33,
     kAttackVolEnv = 34,
+    kHoldVolEnv = 35,
     kDecayVolEnv = 36,
     kSustainVolEnv = 37,
     kReleaseVolEnv = 38,
@@ -42,7 +45,7 @@ namespace sf2src
 enum : uint16_t
 {
     kNoteOnVelocity = 2,
-    kController = 0x80, // the low 7 bits are a MIDI controller number
+    kController = 0x80, // a MIDI controller, whose number is in the low 7 bits
     kNegative = 0x100,  // from the maximum down to the minimum
     kConcave = 0x400,
 };

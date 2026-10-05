@@ -2,8 +2,8 @@
 
 // Frame-accurate models of the Konami GBA sequencer.
 //
-// Each model follows the driver's per-frame VBlank routine closely enough to reproduce the outputs sent to the PSG
-// and mixer. Driver revisions have separate models.
+// Each model follows the driver's per-frame VBlank routine closely enough to reproduce the outputs sent to the PSG and
+// mixer. Driver revisions have separate models.
 
 #pragma once
 
@@ -20,8 +20,8 @@
 namespace supergbamidi::konami
 {
 
-// One track's requests to its sound channel in one frame. This is the driver's 12-byte per-track output record,
-// plus the note's base pitch.
+// One track's requests to its sound channel in one frame. This is the driver's 12-byte per-track output record, plus
+// the note's base pitch.
 struct TrackOutput
 {
     // Returns true if the track asks its channel for anything this frame.
@@ -34,22 +34,23 @@ struct TrackOutput
                               // or in Dungeon Dice Monsters an entry of a frequency or sample period table, or a period
     uint8_t b2 = 0;           // PSG duty/length byte, wave number, or DS sample low byte
     uint8_t vol = 0;          // volume
-    uint8_t trig = 0;         // PSG: (re)trigger the channel; DS: refresh volume/pan
+    uint8_t trig = 0;         // PSG: a (re)trigger of the channel; DS: a refresh of its volume and pan
     uint8_t flags = 0;        // kOut* bits below
     uint16_t key = 0;         // DS sample index, or in Dungeon Dice Monsters the square channels' envelope (NRx2 bits)
     uint8_t pan_r = 0;        // Ultimate Masters: pan level of the right side (0..63)
     uint8_t pan_l = 0;        // Ultimate Masters: pan level of the left side (0..63)
-    uint8_t pan = 0xFF;       // WCT 2004: pan byte, left level << 4 | right level (0..15 each)
+    uint8_t pan = 0xFF;       // WCT 2004: pan byte, left level << 4 | right level (0..15 each), or in Eternal Duelist
+                              // the NR51 bits of a PSG track
     uint8_t pan_start = 0xFF; // WCT 2004: the track's pan byte as the frame started
     int16_t note_pitch = 0;   // the note itself without bend/vibrato (1/32 semitones)
-    bool active = false;      // track is running this frame
+    bool active = false;      // true if the track runs this frame
 };
 
-constexpr uint8_t kOutNoteOn = 0x80;  // DS: start a new note
-constexpr uint8_t kOutStop = 0x40;    // DS: stop the voice
-constexpr uint8_t kOutPitch = 0x20;   // pitch changed (bend / vibrato)
-constexpr uint8_t kOutPan = 0x08;     // pan changed
-constexpr uint8_t kOutPsgNote = 0x01; // PSG note or volume retrigger
+constexpr uint8_t kOutNoteOn = 0x80;  // DS: the start of a new note
+constexpr uint8_t kOutStop = 0x40;    // DS: a stop of the voice
+constexpr uint8_t kOutPitch = 0x20;   // a pitch change (bend or vibrato)
+constexpr uint8_t kOutPan = 0x08;     // a pan change
+constexpr uint8_t kOutPsgNote = 0x01; // a PSG note or a volume retrigger
 
 // An echo bus: its settings and the voices routed to it.
 struct EchoBus
@@ -105,10 +106,12 @@ public:
         return looped_last_frame_;
     }
 
-    // Returns the frame a loop goes back to, or 0 if it has none. That's the frame where the looping track passed its
-    // loop point.
+    // Returns the frame a loop goes back to, or 0 if it has none. A loop sends every track back to its loop point at
+    // once, so that's the earliest frame on which a track passed its loop point, where a player that loops leaves out
+    // none of the loop's notes, or 0 if the track that loops the song has no loop point and goes back to its start.
     int LoopStartFrame() const;
 
+    // Returns echo bus `bus` (0-2): its settings and the voices routed to it.
     const EchoBus& Echo(int bus) const
     {
         return echo_[bus];
@@ -127,7 +130,7 @@ public:
         return loaded_wave_;
     }
 
-    // Counts wave loads in the Dungeon Dice Monsters revision, including reloads of the current wave.
+    // Returns the number of wave loads in the Dungeon Dice Monsters revision, including reloads of the current wave.
     int WaveLoads() const
     {
         return wave_loads_;
@@ -165,6 +168,7 @@ protected:
     // Returns the pitch of the note that `track` plays, without bend or vibrato.
     virtual int16_t NotePitch(int track) const = 0;
 
+    // Adds warning `what` about `track`'s data at `addr`, headed by the frame, the track and the address.
     void Warn(int track, uint32_t addr, const std::string& what);
 
     // Records the first frame on which `track` passes its loop point, for LoopStartFrame().
@@ -178,7 +182,6 @@ protected:
     uint8_t psg_volume_ = 0x77;
     int loaded_wave_ = 0;
     int wave_loads_ = 0;
-    uint8_t frac_ = 0; // the fraction of a frame left over from the last delay, shared by all tracks
     bool stopped_ = false;
 
 private:
@@ -204,6 +207,7 @@ protected:
     int16_t NotePitch(int track) const override;
 
 private:
+    // The state of one of the song's tracks.
     struct Track
     {
         uint8_t flags = 0;  // 0x80 active, 0x40 restart on loop, 0x20 vibrato, 0x01 started
@@ -252,6 +256,7 @@ protected:
     int16_t NotePitch(int track) const override;
 
 private:
+    // The state of one of the song's tracks.
     struct Track
     {
         uint8_t flags = 0;  // 0x80 active, 0x40 restart on loop, 0x20 vibrato, 0x01 started
@@ -267,7 +272,7 @@ private:
         uint8_t decay_rate = 0;   // F5
         uint8_t attack = 0;       // attack countdown, 0xFF at a PSG note
         uint8_t decay = 0;        // decay countdown, 0xFF at a PSG note
-        uint8_t pan = 0xFF;       // left level << 4 | right level
+        uint8_t pan = 0xFF;       // left level << 4 | right level, or in Eternal Duelist a PSG track's NR51 bits
         uint16_t ret = 0;         // position to return to after a call, 0 if there's none
         uint16_t saved_start = 0; // start to return to after a call
         uint8_t count = 0;        // commands left in a call
@@ -296,8 +301,8 @@ private:
 };
 
 // Dungeon Dice Monsters sequencer. Pitches index the PSG frequency table (which also holds noise settings) or the
-// sample period table, in 1/16 semitones. Playback matches a song requested without a fade-in: master volume stays
-// at 16.
+// sample period table, in 1/16 semitones. Playback matches a song requested without a fade-in: master volume stays at
+// 16.
 class DungeonDiceSequencer : public Sequencer
 {
 public:
@@ -311,6 +316,7 @@ protected:
     int16_t NotePitch(int track) const override;
 
 private:
+    // The state of one of the song's tracks.
     struct Track
     {
         uint8_t flags = 0;        // 0x80 active, 0x40 restart on loop, 0x20 vibrato, 0x04 fade, 0x01 started

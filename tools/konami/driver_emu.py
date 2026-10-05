@@ -35,7 +35,7 @@ import numpy as np
 from unicorn import UC_ARCH_ARM, UC_HOOK_CODE, UC_HOOK_INTR, UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE, UC_MODE_ARM, Uc
 from unicorn.arm_const import UC_ARM_REG_CPSR, UC_ARM_REG_LR, UC_ARM_REG_R0, UC_ARM_REG_SP
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # for gbarom.py, in tools/
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # for gbarom.py and psg_model.py, in tools/
 import psg_model
 from gbarom import ROM_BASE, load_rom
 

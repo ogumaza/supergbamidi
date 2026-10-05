@@ -10,6 +10,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <random>
 #include <string>
 #include <system_error>
@@ -22,6 +23,7 @@
 #include "rom.h"
 #include "sf2.h"
 #include "test_util.h"
+#include "thumb.h"
 
 namespace fs = std::filesystem;
 
@@ -137,6 +139,7 @@ void TestInflate()
 
     std::vector<uint8_t> out;
     std::string err;
+
     SUPERGBAMIDI_CHECK(ZlibDecompress(kStored, sizeof kStored, out, err));
     SUPERGBAMIDI_CHECK(std::string(out.begin(), out.end()) == kText);
     SUPERGBAMIDI_CHECK(ZlibDecompress(kFixed, sizeof kFixed, out, err));
@@ -177,6 +180,7 @@ void TestMidiWriter()
 
     const std::string path = Utf8(TempPath("test.mid"));
     std::string err;
+
     SUPERGBAMIDI_CHECK(midi.Write(path, err));
 
     // At the same tick, meta events come first, then note-offs, bank selects, program changes, controllers, pitch bends
@@ -231,6 +235,7 @@ void TestSf2Writer()
 
     const std::string path = Utf8(TempPath("test.sf2"));
     std::string err;
+
     SUPERGBAMIDI_CHECK(sf.Write(path, err));
 
     const std::vector<uint8_t> f = ReadAll(path);
@@ -280,11 +285,13 @@ void TestGsfLoading()
 
     Rom rom;
     std::string err;
+
     SUPERGBAMIDI_CHECK(rom.Load(Utf8(dir / "set-01.minigsf"), err));
     SUPERGBAMIDI_CHECK(rom.FromGsf());
     SUPERGBAMIDI_CHECK(rom.GsfLibrary() == Utf8(dir / "set.gsflib"));
     SUPERGBAMIDI_CHECK_EQ(rom.U32(kRomBase + 0x100), 0x12345678); // from the library
     SUPERGBAMIDI_CHECK_EQ(rom.U8(kRomBase + 0xF00), 0x5A);        // from the mini-GSF
+
     SUPERGBAMIDI_CHECK(rom.Load(Utf8(dir / "set.gsflib"), err));
     SUPERGBAMIDI_CHECK(rom.GsfLibrary().empty());
 
@@ -298,37 +305,92 @@ void TestGsfLoading()
     SUPERGBAMIDI_CHECK_EQ(rom.U32(kRomBase + 0x100), 0x12345678);
 
     WriteGsf(dir / "orphan.minigsf", kRomBase + 0xF00, {0x5A}, "_lib=missing.gsflib\n");
+
     SUPERGBAMIDI_CHECK(!rom.Load(Utf8(dir / "orphan.minigsf"), err));
     SUPERGBAMIDI_CHECK(err.find("missing.gsflib") != std::string::npos);
 
     // A folder dropped on the program by mistake.
     SUPERGBAMIDI_CHECK(!rom.Load(Utf8(dir), err));
     SUPERGBAMIDI_CHECK(err.find("is a folder") != std::string::npos);
+
+    // A zipped ROM, which has to be taken out of its archive first.
+    std::vector<uint8_t> zip(0x200, 0);
+    std::memcpy(zip.data(), "PK\x03\x04", 4);
+    std::string write_error;
+    SUPERGBAMIDI_CHECK(WriteFile(Utf8(dir / "game.zip"), zip, write_error));
+
+    SUPERGBAMIDI_CHECK(!rom.Load(Utf8(dir / "game.zip"), err));
+
+    SUPERGBAMIDI_CHECK(err.find("is an archive") != std::string::npos);
     fs::remove_all(dir, ec);
 }
 
-// A game with neither driver gets an error that names the drivers looked for.
+// A game with none of the drivers gets an error that names the drivers looked for.
 void TestNoDriver()
 {
     Rom rom;
     rom.Assign(std::vector<uint8_t>(0x1000, 0));
-    Overrides konami_only, rare_only;
+    Overrides konami_only, rare_only, quintet_only, rd2_only, mp2k_only;
     konami_only.driver = Driver::kKonami;
     rare_only.driver = Driver::kRare;
-    std::string any, konami, rare;
+    quintet_only.driver = Driver::kQuintet;
+    rd2_only.driver = Driver::kRd2;
+    mp2k_only.driver = Driver::kMp2k;
+    std::string any, konami, rare, quintet, rd2, mp2k;
 
     const bool found_any = OpenMusic(rom, Overrides(), any) != nullptr;
     const bool found_konami = OpenMusic(rom, konami_only, konami) != nullptr;
     const bool found_rare = OpenMusic(rom, rare_only, rare) != nullptr;
+    const bool found_quintet = OpenMusic(rom, quintet_only, quintet) != nullptr;
+    const bool found_rd2 = OpenMusic(rom, rd2_only, rd2) != nullptr;
+    const bool found_mp2k = OpenMusic(rom, mp2k_only, mp2k) != nullptr;
 
-    SUPERGBAMIDI_CHECK(!found_any && !found_konami && !found_rare);
+    SUPERGBAMIDI_CHECK(!found_any && !found_konami && !found_rare && !found_quintet && !found_rd2 && !found_mp2k);
     SUPERGBAMIDI_CHECK(any ==
-                       "no Konami or Rare sound driver found: this game's music uses another engine, or a driver "
-                       "version supergbamidi doesn't know");
+                       "no Konami, Rare, Quintet, Nintendo R&D2 or MP2K sound driver found: this game's music uses "
+                       "another engine, or a driver version supergbamidi doesn't know");
     SUPERGBAMIDI_CHECK(konami ==
                        "no Konami sound driver found: this game's music uses another engine, or a driver version "
                        "supergbamidi doesn't know");
     SUPERGBAMIDI_CHECK(rare == "no Rare sound driver found (try --song-table)");
+    SUPERGBAMIDI_CHECK(quintet == "no Quintet sound driver found (try --song-table)");
+    SUPERGBAMIDI_CHECK(rd2 == "no Nintendo R&D2 sound driver found (try --song-table)");
+    SUPERGBAMIDI_CHECK(mp2k == "no MP2K sound driver found (try --song-table)");
+}
+
+// A song's loop lasts until every track's loop is back where it started: loops of 3 and 4 bars make one of 12, and a
+// loop that divides the longest leaves it as it is. A loop more than 8 times the longest isn't used: 72 ticks for loops
+// of 8 and 9 is, but 90 for loops of 9 and 10 isn't, and the longest loop is the song's.
+void TestLoopLength()
+{
+    SUPERGBAMIDI_CHECK_EQ(LoopLength({7}), uint64_t(7));
+    SUPERGBAMIDI_CHECK_EQ(LoopLength({960, 480}), uint64_t(960));
+    SUPERGBAMIDI_CHECK_EQ(LoopLength({9216, 12288}), uint64_t(36864));
+    SUPERGBAMIDI_CHECK_EQ(LoopLength({8, 9}), uint64_t(72));
+    SUPERGBAMIDI_CHECK_EQ(LoopLength({9, 10}), uint64_t(10));
+    SUPERGBAMIDI_CHECK_EQ(LoopLength({6138, 6144}), uint64_t(6144));
+}
+
+// RunThumb() runs ldmia and stmia: one routine loads two words from the ROM with ldmia and adds them, and another
+// stores its arguments on the stack with stmia and loads the second one back. A routine that stores a byte at the top
+// of the address space, which isn't on the stack, gets no result.
+void TestRunThumb()
+{
+    // The first routine is ldr r1, =words; ldmia r1!, {r0, r2}; adds r0, r0, r2; bx lr, followed by the words' address,
+    // 5 and 7. The second, at 0x14, is sub sp, #8; mov r3, sp; stmia r3!, {r0, r1}; ldr r0, [sp, #4]; add sp, #8;
+    // bx lr. The third, at 0x20, is movs r0, #0; subs r0, #1; strb r0, [r0]; ldrb r0, [r0]; bx lr.
+    Rom rom;
+    rom.Assign({0x01, 0x49, 0x05, 0xC9, 0x80, 0x18, 0x70, 0x47, 0x0C, 0x00, 0x00, 0x08, 0x05, 0x00,
+                0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x82, 0xB0, 0x6B, 0x46, 0x03, 0xC3, 0x01, 0x98,
+                0x02, 0xB0, 0x70, 0x47, 0x00, 0x20, 0x01, 0x38, 0x00, 0x70, 0x00, 0x78, 0x70, 0x47});
+
+    const std::optional<uint32_t> sum = RunThumb(rom, kRomBase, {0, 0, 0, 0});
+    const std::optional<uint32_t> second = RunThumb(rom, kRomBase + 0x14, {3, 9, 0, 0});
+    const std::optional<uint32_t> top = RunThumb(rom, kRomBase + 0x20, {0, 0, 0, 0});
+
+    SUPERGBAMIDI_CHECK(sum && *sum == 12);
+    SUPERGBAMIDI_CHECK(second && *second == 9);
+    SUPERGBAMIDI_CHECK(!top);
 }
 
 // Creates a unique directory in the system's temp folder so concurrent test runs don't share files. Returns false on
@@ -367,8 +429,13 @@ int Run()
     TestSf2Writer();
     TestGsfLoading();
     TestNoDriver();
+    TestLoopLength();
+    TestRunThumb();
     konami::RunTests();
     rare::RunTests();
+    quintet::RunTests();
+    mp2k::RunTests();
+    rd2::RunTests();
 
     std::error_code ec;
     fs::remove_all(g_temp, ec);

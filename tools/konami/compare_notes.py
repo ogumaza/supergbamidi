@@ -43,7 +43,7 @@ from pathlib import Path
 
 from unicorn import UC_HOOK_MEM_WRITE
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # for gbarom.py, in tools/
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # for gbarom.py and psg_model.py, in tools/
 from compare_trace import parse_range
 from driver_emu import DriverEmulator
 from gbarom import ROM_BASE, load_rom
@@ -290,7 +290,7 @@ def run_driver(rom, song, frames):
     emu.play(song)
     starts.clear()
     out = []
-    for f in range(frames):
+    for _ in range(frames):
         emu.frame()
         triggers, writes = set(), set()
         for _, address, size, value in emu.io_writes:

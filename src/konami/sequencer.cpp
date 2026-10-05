@@ -10,11 +10,11 @@ namespace supergbamidi::konami
 namespace
 {
 
-// Stop a track if it runs this many commands without a delay.
+// The number of commands a track can run without a delay before it's stopped.
 constexpr int kMaxCommandsPerFrame = 4096;
 
-// The tempo that the driver scales every delay by: frames = (delay * tempo + frac) >> 8. It starts at 0x100, and no
-// command changes it.
+// The tempo that the driver scales every delay by: frames = (delay * tempo + frac) >> 8, where frac is the low byte of
+// the previous result. The tempo starts at 0x100, and no command changes it, so frac stays 0.
 constexpr uint32_t kTempo = 0x100;
 
 // The first quarter of the driver's vibrato waveform, trunc(4096 * sin(2 * pi * i / 256)) for i = 0 to 64; the rest
@@ -35,7 +35,7 @@ int VibratoSine(uint8_t phase)
 }
 
 // Routes DirectSound voice `voice` to echo bus `bus` - 1, or takes it off buses 0 and 1 if `bus` is 0, as F9 does in
-// both revisions.
+// the Ultimate Masters and WCT 2004 revisions.
 void RouteEcho(std::array<EchoBus, 3>& echo, int voice, int bus)
 {
     if (voice > 11)
@@ -93,7 +93,21 @@ bool Sequencer::AnyTrackActive() const
 
 int Sequencer::LoopStartFrame() const
 {
-    return loop_track_ >= 0 ? std::max(0, loop_frame_[size_t(loop_track_)]) : 0;
+    if (loop_track_ < 0 || loop_frame_[size_t(loop_track_)] < 0)
+    {
+        return 0;
+    }
+
+    int start = loop_frame_[size_t(loop_track_)];
+    for (int frame : loop_frame_)
+    {
+        if (frame >= 0)
+        {
+            start = std::min(start, frame);
+        }
+    }
+
+    return start;
 }
 
 void Sequencer::Warn(int track, uint32_t addr, const std::string& what)
@@ -164,8 +178,8 @@ const std::array<TrackOutput, kTracks>& Sequencer::Step()
         }
     }
 
-    // Clear output from a hung frame. Doing this where the loop is detected triggers a false array-bounds warning
-    // in GCC 13 at -O3.
+    // Clear output from a hung frame. Doing this where the loop is detected triggers a false array-bounds warning in
+    // GCC 13 at -O3.
     if (hung)
     {
         out_.fill(TrackOutput());
@@ -239,17 +253,15 @@ void UltimateMastersSequencer::ResetTracks()
         t.bend = 0;
     }
 
-    // The square channels restart at 50% duty, and the delay fraction the tracks share starts from 0.
+    // The square channels restart at 50% duty.
     tracks_[0].b2 = 0x80;
     tracks_[1].b2 = 0x80;
-    frac_ = 0;
 }
 
 Sequencer::Result UltimateMastersSequencer::StepTrack(int track)
 {
     Track& t = tracks_[track];
     TrackOutput& o = out_[track];
-
     if (!(t.flags & 0x80))
     {
         return Result::kContinue;
@@ -327,9 +339,7 @@ Sequencer::Result UltimateMastersSequencer::StepTrack(int track)
             continue;
         }
 
-        const uint32_t scaled = kTempo * delay + frac_;
-        frac_ = uint8_t(scaled & 0xFF);
-        t.delay = uint16_t(scaled >> 8);
+        t.delay = uint16_t((kTempo * delay) >> 8);
         PerFrame(track);
         return Result::kContinue;
     }
@@ -495,8 +505,8 @@ UltimateMastersSequencer::Next UltimateMastersSequencer::RunCommand(int track, c
 
     default:
         {
-            // A command past the end of the ROM decodes as an unknown one, and the others belong to the WCT 2004
-            // revision.
+            // Opcodes 90-9F, F4-F6 and FA-FC, notes of sample numbers above EF and commands past the end of the ROM
+            // decode as unknown ones, and the other ops belong to the older revisions.
             char buf[80];
             std::snprintf(buf, sizeof buf, "unsupported opcode %02X; track stopped", c.opcode);
             Warn(track, c.addr, rom_.Contains(c.addr) ? buf : "track runs past the end of the ROM; track stopped");
@@ -512,7 +522,6 @@ void UltimateMastersSequencer::PerFrame(int track)
 {
     Track& t = tracks_[track];
     TrackOutput& o = out_[track];
-
     if (t.flags & 0x20)
     {
         int vib = 0;
@@ -608,10 +617,9 @@ void Wct2004Sequencer::ResetTracks()
         }
     }
 
-    // The square channels restart at 50% duty, and the delay fraction the tracks share starts from 0.
+    // The square channels restart at 50% duty.
     tracks_[0].b2 = 0x80;
     tracks_[1].b2 = 0x80;
-    frac_ = 0;
 }
 
 Sequencer::Result Wct2004Sequencer::StepTrack(int track)
@@ -682,8 +690,8 @@ Sequencer::Result Wct2004Sequencer::StepTrack(int track)
                 return next == Next::kRestart ? Result::kRestart : Result::kContinue;
             }
 
-            // Count each command in the call and return after the last. Eternal Duelist retains the return position
-            // and keeps counting, so every 256 commands it jumps back there again.
+            // Count each command in the call and return after the last. Eternal Duelist retains the return position and
+            // keeps counting, so every 256 commands it jumps back there again.
             if (next == Next::kReadDelay && t.ret != 0)
             {
                 t.count--;
@@ -717,9 +725,7 @@ Sequencer::Result Wct2004Sequencer::StepTrack(int track)
             continue;
         }
 
-        const uint32_t scaled = kTempo * delay + frac_;
-        frac_ = uint8_t(scaled & 0xFF);
-        t.delay = uint16_t(scaled >> 8);
+        t.delay = uint16_t((kTempo * delay) >> 8);
         PerFrame(track);
         return Result::kContinue;
     }
@@ -765,9 +771,9 @@ Wct2004Sequencer::Next Wct2004Sequencer::RunCommand(int track, const Command& c,
 
     case Op::kCall:
         {
-            // The call plays commands from the track's data, from its start in the song table, with the delay
-            // before each. 9F plays `count` commands. The other opcodes also set the duty byte or the wave, as 00-8F
-            // do, and that counts as the call's first command.
+            // The call plays commands from the track's data, from its start in the song table, with the delay before
+            // each. 9F plays `count` commands. The other opcodes also set the duty byte or the wave, as 00-8F do, and
+            // that counts as the call's first command.
             t.saved_start = t.start;
             t.ret = uint16_t(pos);
             t.start = header_.offsets[track];
@@ -823,8 +829,8 @@ Wct2004Sequencer::Next Wct2004Sequencer::RunCommand(int track, const Command& c,
         break;
 
     case Op::kPairVolumes:
-        // Put the high nibble in the next track's output record to set its voice's volume. That track has already
-        // run this frame. After the last track, this would overwrite the driver's variables.
+        // Put the high nibble in the next track's output record to set its voice's volume. That track has already run
+        // this frame. After the last track, this would overwrite the driver's variables.
         t.vol = uint8_t(c.value & 15);
         if (track + 1 < header_.tracks)
         {
@@ -904,7 +910,7 @@ Wct2004Sequencer::Next Wct2004Sequencer::RunCommand(int track, const Command& c,
 
     case Op::kDuty:
     case Op::kWave:
-        // A wave also goes into the wave channel's RAM at once, at the track's volume.
+        // A wave also goes into the wave channel's RAM at once, at the track's volume, which supergbamidi leaves out.
         t.b2 = uint8_t(c.value);
         o.b2 = t.b2;
         break;
@@ -912,7 +918,7 @@ Wct2004Sequencer::Next Wct2004Sequencer::RunCommand(int track, const Command& c,
     default:
         {
             // A command past the end of the ROM decodes as an unknown one, and the others belong to the Ultimate
-            // Masters revision.
+            // Masters and Dungeon Dice Monsters revisions.
             char buf[80];
             std::snprintf(buf, sizeof buf, "unsupported opcode %02X; track stopped", c.opcode);
             Warn(track, c.addr, rom_.Contains(c.addr) ? buf : "track runs past the end of the ROM; track stopped");
@@ -928,7 +934,6 @@ void Wct2004Sequencer::PerFrame(int track)
 {
     Track& t = tracks_[track];
     TrackOutput& o = out_[track];
-
     if (t.flags & 0x20)
     {
         int vib = 0;
@@ -946,7 +951,6 @@ void Wct2004Sequencer::PerFrame(int track)
         // Eternal Duelist's flag of 1 replaces the flags the commands set, a note's start included.
         o.pitch = int16_t(t.pitch + vib);
         o.b2 = t.b2;
-        o.vol = t.vol;
         o.key = t.b2;
         o.flags = eternal_duelist_ ? kOutPsgNote : o.flags | kOutPitch;
     }
@@ -1241,9 +1245,9 @@ DungeonDiceSequencer::Next DungeonDiceSequencer::RunCommand(int track, const Com
         break;
 
     case Op::kCall:
-        // The call plays commands from the track's data, from its start in the song table, with the delay before
-        // each. F5 starts with the command in its last byte, which counts as the call's first, and the delay after the
-        // call is read from that byte too.
+        // The call plays commands from the track's data, from its start in the song table, with the delay before each.
+        // F5 starts with the command in its last byte, which counts as the call's first, and the delay after the call
+        // is read from that byte too.
         t.saved_start = t.start;
         t.ret = uint16_t(pos);
         t.start = header_.offsets[track];
@@ -1265,8 +1269,8 @@ DungeonDiceSequencer::Next DungeonDiceSequencer::RunCommand(int track, const Com
 
     case Op::kSampleBend:
         {
-            // The bend is from the note's pitch, or from note 24, a sample's rate, after a sample map note. A note
-            // that starts this frame starts at the pitch, and otherwise the track's pitch becomes the period, which the
+            // The bend is from the note's pitch, or from note 24, a sample's rate, after a sample map note. A note that
+            // starts this frame starts at the pitch, and otherwise the track's pitch becomes the period, which the
             // output stage hands to the voice's FIFO at once.
             Track* u = c.opcode & 1 ? NextTrack(track, c) : &t;
             if (!u)
@@ -1380,8 +1384,8 @@ DungeonDiceSequencer::Next DungeonDiceSequencer::RunCommand(int track, const Com
 
 void DungeonDiceSequencer::DutyOrWave(int track, uint8_t op)
 {
-    // 00-6F are the duty byte itself. Above that, the low nibble loads a wave into the wave RAM at once, or sets a
-    // duty of 0-3 from C up.
+    // 00-6F are the duty byte itself. Above that, the low nibble loads a wave into the wave RAM at once, or sets a duty
+    // of 0-3 from C up.
     uint8_t value = op;
     if (op > 0x6F)
     {

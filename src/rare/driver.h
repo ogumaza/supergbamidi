@@ -41,7 +41,7 @@ struct DriverInfo
     uint32_t rate_scale = 0x01397FC3;         // the pitch scale for the mix rate: 2^38 / mix_rate
     int voice_limit = 8;                      // maximum voices mixed per frame
     int slots_per_channel = 6;                // the notes a channel can play at once
-    uint32_t pitch_table = 0;                 // 128 words: 2^(n/12) for n = -64..63, in 9.23 fixed point
+    uint32_t pitch_table = 0;                 // 2^(n/12) for n = -64..63 in 9.23 fixed point, at n = 0
     uint32_t sine_table = 0;                  // 257 words: the vibrato's sine
     std::array<uint8_t, 100> fade_table = {}; // the length of each decay and release, from the driver's table
     std::vector<std::string> log;             // detection results for --info

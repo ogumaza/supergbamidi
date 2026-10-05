@@ -13,7 +13,8 @@ same channel and key that starts within a frame of it. For each pair, the script
   - the sample: the SoundFont zone that the note's program and key choose has to play the driver's sample;
   - the pitch on every frame of the note, from the zone's root key, tuning and sample rate and the channel's pitch bend,
     against the step the driver moves the sample on by;
-  - the release, which has to come within a frame of the MIDI note's end.
+  - the release, which has to come within a frame of the MIDI note's end, unless the MIDI file ends the note earlier
+    because the key starts again there.
 
 A MIDI note that the driver doesn't play, or a driver note that the MIDI file doesn't have, counts as a difference. MIDI
 events land on their own ticks, where the driver plays them at the start of the frame that reaches them, so a frame's
@@ -32,7 +33,6 @@ import driver_emu
 from gbarom import load_rom
 
 FRAME_RATE = 16777216 / 280896
-SLOT_SIZE = 0x28
 
 
 def read_midi(path):
@@ -175,7 +175,8 @@ def read_sf2(path):
     for p in range(len(phdr) - 1):
         program, bank, bag = struct.unpack('<HHH', phdr[p][20:26])
         instrument = gens(pbag, pgen, bag)[41]
-        first, last = struct.unpack('<H', inst[instrument][20:22])[0], struct.unpack('<H', inst[instrument + 1][20:22])[0]
+        first = struct.unpack('<H', inst[instrument][20:22])[0]
+        last = struct.unpack('<H', inst[instrument + 1][20:22])[0]
         zones = []
         for z in range(first, last):
             g = gens(ibag, igen, z)
@@ -205,8 +206,9 @@ def value_at(changes, ch, t, default):
 
 
 def driver_notes(rom, song, frames):
-    """Runs the driver and returns its notes: dicts of slot, channel, key, velocity, start and release frames, sample
-    address, and the step on each frame."""
+    """Runs the driver and returns its notes, each channel's volume on each frame and the mixer's rate in Hz. The notes
+    are dicts of channel, key, velocity, start and release frames (the end, for a note the driver didn't release),
+    whether the driver released the note, its sample's address, and the step on each frame."""
     emu = driver_emu.DriverEmulator(rom)
     emu.play(song)
     count = 16 * emu.addr.slots_per_channel
@@ -229,15 +231,14 @@ def driver_notes(rom, song, frames):
                                  prev.key != v.key or restarted)
             note = current[v.index]
             if note and (not active or begins):
-                note['end'] = f
                 if note['release'] is None:
                     note['release'] = f
                 current[v.index] = None
             if begins:
                 sample = struct.unpack('<I', rom[v.instrument - 0x08000000 + 16:v.instrument - 0x08000000 + 20])[0] \
                     if 0x08000000 <= v.instrument < 0x08000000 + len(rom) else 0
-                note = dict(slot=v.index, channel=v.channel, key=v.key, velocity=v.velocity - 1, start=f,
-                            release=None, end=None, released=False, sample=sample, steps={})
+                note = dict(channel=v.channel, key=v.key, velocity=v.velocity - 1, start=f, release=None,
+                            released=False, sample=sample, steps={})
                 notes.append(note)
                 current[v.index] = note
             else:
@@ -253,11 +254,9 @@ def driver_notes(rom, song, frames):
         if not emu.playing():
             break
     for note in notes:
-        if note['end'] is None:
-            note['end'] = f + 1
         if note['release'] is None:
-            note['release'] = note['end']
-    return notes, volume
+            note['release'] = f + 1
+    return notes, volume, emu.rate()
 
 
 def check_song(rom, midi_path, sf2_path, frames_limit, report):
@@ -266,8 +265,7 @@ def check_song(rom, midi_path, sf2_path, frames_limit, report):
     presets = read_sf2(sf2_path)
     frames = min(frames_limit, int(length * FRAME_RATE))
     song = int(re.search(r'_(\d+)\.mid$', str(midi_path)).group(1))
-    played, volume = driver_notes(rom, song, frames)
-    mix_rate = 16777216 / 1254
+    played, volume, mix_rate = driver_notes(rom, song, frames)
 
     midi = [dict(channel=n[0], key=n[1], velocity=n[2], on=n[3] * FRAME_RATE,
                  off=(n[4] if n[4] is not None else length) * FRAME_RATE, program=n[5], matched=False) for n in notes]
@@ -358,14 +356,16 @@ def check_song(rom, midi_path, sf2_path, frames_limit, report):
         # The release, unless the note ended by itself first, or the MIDI note ended first because the key was played
         # again.
         release = max(d['release'] for d in voices)
-        if any(d['released'] for d in voices) and abs(m['off'] - release) > 1.5 and m['off'] > release - 1.5:
+        cut = m['off'] < release - 1.5 and any(o is not m and abs(o['on'] - m['off']) <= 1.5
+                                               for o in by_key[(channel, key)])
+        if any(d['released'] for d in voices) and abs(m['off'] - release) > 1.5 and not cut:
             problems.append('%s: released on frame %d, the MIDI note ends at %.1f' % (where, release, m['off']))
 
     # The driver can start and finish a short sample without a loop inside one frame, between two looks at it. A note
     # that comes just before its channel's first program change, on the same tick, plays the instrument the channel had
     # in the song before, which the driver run here doesn't have.
     first_program = {}
-    for t, ch, program in programs:
+    for t, ch, _ in programs:
         first_program.setdefault(ch, t)
     for m in midi:
         if m['matched'] or m['on'] >= frames - 2 or m['off'] - m['on'] <= 1:

@@ -236,8 +236,8 @@ void TestDecoding()
     std::copy(kStream.begin(), kStream.end(), d.begin());
     Rom rom;
     rom.Assign(d);
-
     uint32_t delay = 0;
+
     SUPERGBAMIDI_CHECK_EQ(ReadDelay(rom, kRomBase + 0, Revision::kUltimateMasters, delay), 1);
     SUPERGBAMIDI_CHECK_EQ(delay, 5);
     SUPERGBAMIDI_CHECK_EQ(ReadDelay(rom, kRomBase + 1, Revision::kUltimateMasters, delay), 2);
@@ -274,6 +274,7 @@ void TestDecoding()
     // F2 bends by its byte less 0x40. A byte above 7F takes the next one too: F2 xh ll bends by 0xhll - 0x400.
     Rom bends;
     bends.Assign({0xF2, 0x50, 0xF2, 0x84, 0x61, 0xF2, 0x90, 0x00});
+
     c = DecodeCommand(bends, kRomBase + 0, 4, Revision::kUltimateMasters);
     SUPERGBAMIDI_CHECK(c.op == Op::kPitchBend && c.value == 0x10 && c.length == 2);
     c = DecodeCommand(bends, kRomBase + 2, 4, Revision::kUltimateMasters);
@@ -360,6 +361,28 @@ void TestLoopStart()
     // The loop goes back to the frame where track 5 passed its loop point.
     SUPERGBAMIDI_CHECK_EQ(looped_at, 11);
     SUPERGBAMIDI_CHECK_EQ(seq.LoopStartFrame(), 5);
+}
+
+void TestLoopStartEarliest()
+{
+    // As in TestLoopStart, but track 0 also passes a loop point, at frame 4: duty 25%, PSG note (vol 3, note 24), wait
+    // 4, loop point, rest, end. The loop goes back to frame 4, the earlier of the two.
+    Image m = SyntheticImage();
+    m.Bytes(kSongBase + 0x07, {0xFE});
+    m.Bytes(kSongBase + 0x8B, {0xFF, 0x01, 0x00});
+    m.Bytes(kSongBase + 0x40, {0x00, 0x81, 0x00, 0xD3, 0x18, 0x04, 0xF3, 0x00, 0xE0, 0x00, 0xFE});
+    const Rom rom = m.ToRom();
+    UltimateMastersSequencer seq(rom, SongsAt(kSongTable), 0);
+
+    int looped_at = -1;
+    for (int f = 0; f < 20 && looped_at < 0; f++)
+    {
+        seq.Step();
+        looped_at = seq.LoopedLastFrame() ? f : -1;
+    }
+
+    SUPERGBAMIDI_CHECK_EQ(looped_at, 11);
+    SUPERGBAMIDI_CHECK_EQ(seq.LoopStartFrame(), 4);
 }
 
 void TestBendKept()
@@ -626,13 +649,16 @@ void TestSilentSongs()
 
     // Song 1 plays no notes, so nothing is written for it.
     SongSummary sum = ConvertSong(rom, info, 1, opt, nullptr);
+
     SUPERGBAMIDI_CHECK(sum.ok && sum.silent);
     SUPERGBAMIDI_CHECK_EQ(sum.tracks, 0);
     SUPERGBAMIDI_CHECK(sum.midi_path.empty() && sum.sf2_path.empty());
 
     // Song 0 has notes, but none on track 15.
     opt.track_mask = 1u << 15;
+
     sum = ConvertSong(rom, info, 0, opt, nullptr);
+
     SUPERGBAMIDI_CHECK(sum.ok && sum.silent);
     SUPERGBAMIDI_CHECK(fs::is_empty(dir));
     fs::remove_all(dir, ec);
@@ -951,11 +977,12 @@ void TestLoopWithoutDelay()
     fs::create_directories(dir, ec);
     ConvertOptions opt;
     opt.out_dir = Utf8(dir);
+    ConvertOptions looped = opt;
+    looped.loops = 10;
 
     const SongSummary at_start = ConvertSong(rom, info, 2, opt, nullptr);
-    opt.loops = 10;
-    const SongSummary at_start_looped = ConvertSong(rom, info, 2, opt, nullptr);
-    const SongSummary later = ConvertSong(rom, info, 3, opt, nullptr);
+    const SongSummary at_start_looped = ConvertSong(rom, info, 2, looped, nullptr);
+    const SongSummary later = ConvertSong(rom, info, 3, looped, nullptr);
 
     auto hangs = [](const SongSummary& s)
     {
@@ -1114,6 +1141,7 @@ void TestDetectionScan()
     // Without the driver's code to go by, the tables are found in the data.
     DriverInfo info;
     std::string err;
+
     SUPERGBAMIDI_CHECK(DetectDriver(ScanRom(), DriverOverrides(), info, err));
 
     SUPERGBAMIDI_CHECK_EQ(info.song_table, kScanSongTable);
@@ -1233,8 +1261,8 @@ void TestSongTableFromOtherCode()
     SUPERGBAMIDI_CHECK(std::count(info.log.begin(), info.log.end(), "song table 0x08000100 (from play-song code)") ==
                        1);
 
-    // With a byte between its two songs, it isn't, although both songs parse and play notes. The data scan doesn't
-    // take it either.
+    // With a byte between its two songs, it isn't, although both songs parse and play notes. The data scan doesn't take
+    // it either.
     Image gap = ScanImage(1);
     gap.Halfwords(kCode, kCodeHalfwords);
     gap.Put32(kCode + 0x10, kScanSongTable);
@@ -1276,14 +1304,15 @@ void TestMixerRate()
     SUPERGBAMIDI_CHECK(info.mix_rate == 16384.0);
     SUPERGBAMIDI_CHECK(info.warnings.empty());
 
-    // A setting whose rate is out of range (256 Hz) isn't used, and the warning says so.
+    // A setting whose rate is out of range (256 Hz) isn't used, and the driver's usual rate, 16777216 / 798 Hz, is
+    // assumed, with a warning.
     m.Put32(kTimerTable, 0);
 
     const bool found_slow = DetectDriver(m.ToRom(), DriverOverrides(), info, err);
 
     SUPERGBAMIDI_CHECK(found_slow);
     SUPERGBAMIDI_CHECK_EQ(info.timer_table, kTimerTable);
-    SUPERGBAMIDI_CHECK_EQ(info.mix_rate, 21024);
+    SUPERGBAMIDI_CHECK(info.mix_rate == 16777216.0 / 798);
     SUPERGBAMIDI_CHECK(
         info.warnings ==
         std::vector<std::string>{"mixer rate in the timer table is outside 4000-65536 Hz, assuming 21024 Hz"});
@@ -1359,6 +1388,7 @@ void TestRevisionDetection()
 
         Result r;
         r.found = DetectDriver(m.ToRom(), ov, r.info, r.error);
+
         return r;
     };
 
@@ -1522,6 +1552,7 @@ void TestWct2004Sequencer()
     DriverInfo info = SongsAt(kTable);
     info.revision = Revision::kWct2004;
     Wct2004Sequencer seq(rom, info, 0);
+    Wct2004Sequencer stopping(rom, info, 1);
 
     std::vector<std::array<TrackOutput, kTracks>> frames;
     int looped_at = -1;
@@ -1555,7 +1586,6 @@ void TestWct2004Sequencer()
     SUPERGBAMIDI_CHECK(frames[32][5].pan == 0x8F && frames[32][5].pan_start == 0x8F);
     SUPERGBAMIDI_CHECK_EQ(frames[32][0].vol, 2);
 
-    Wct2004Sequencer stopping(rom, info, 1);
     for (int f = 0; f < 4; f++)
     {
         stopping.Step();
@@ -1595,7 +1625,7 @@ void TestWct2004Panning()
 
     const SongSummary sum = ConvertSong(rom, info, 0, opt, nullptr);
 
-    // Each square's note-ons (key), and the pan (CC10) each starts with.
+    // Each square's note-ons (key), and the pan (CC10) each starts with, the default of 64 if its track has none yet.
     std::map<std::string, std::vector<std::pair<int, int>>> notes;
     std::map<std::string, int> pan;
     for (const MidiEvent& e : ReadEvents(sum.midi_path))
@@ -1606,7 +1636,7 @@ void TestWct2004Panning()
         }
         if ((e.status & 0xF0) == 0x90 && e.data2 > 0)
         {
-            notes[e.track].emplace_back(e.data1, pan[e.track]);
+            notes[e.track].emplace_back(e.data1, pan.count(e.track) ? pan[e.track] : 64);
         }
     }
 
@@ -1731,8 +1761,8 @@ void TestEternalDuelistSequencer()
         }
     }
 
-    // Square 1's F0 goes into its record at once. A note at the volume that's playing only changes the pitch, and a
-    // new volume retriggers the channel.
+    // Square 1's F0 goes into its record at once. A note at the volume that's playing only changes the pitch, and a new
+    // volume retriggers the channel.
     SUPERGBAMIDI_CHECK(seq.Valid() && frames[0][9].active);
     SUPERGBAMIDI_CHECK(frames[0][0].pan == 0x10 && frames[0][0].trig == 1);
     SUPERGBAMIDI_CHECK(frames[4][0].flags == kOutPsgNote && frames[4][0].trig == 0 && frames[4][0].pitch == 0x480);
@@ -1755,11 +1785,11 @@ void TestEternalDuelistSequencer()
 
 void TestEternalDuelistConversion()
 {
-    // Song 0 of the Eternal Duelist revision. Square 1: PSG note (vol 8, note 0x30), wait 4, notes 0x10 and 0x50 at
-    // the same volume, 4 frames each, rest, wait 4, end. Wave: wave 2, note (vol 8, note 0x20), wait 4, note 0x24 at
-    // the same volume, wait 4, rest, wait 4, end. Voice 0: note (vol 8, sample 5), wait 8, note (vol 8, sample 5, +7),
-    // a bend of 0 in the same frame, wait 4, rest, wait 4, end. Voice 1 does the same, but its second note plays
-    // sample 6, at semitone 0. An Eternal Duelist command reader is at kCode, and the tables are given by hand.
+    // Song 0 of the Eternal Duelist revision. Square 1: PSG note (vol 8, note 0x30), wait 4, notes 0x10 and 0x50 at the
+    // same volume, 4 frames each, rest, wait 4, end. Wave: wave 2, note (vol 8, note 0x20), wait 4, note 0x24 at the
+    // same volume, wait 4, rest, wait 4, end. Voice 0: note (vol 8, sample 5), wait 8, note (vol 8, sample 5, +7), a
+    // bend of 0 in the same frame, wait 4, rest, wait 4, end. Voice 1 does the same, but its second note plays sample
+    // 6, at semitone 0. An Eternal Duelist command reader is at kCode, and the tables are given by hand.
     Image m = SyntheticImage();
     constexpr uint32_t kCode = kRomBase + 0x800;
     constexpr uint32_t kWaveTable = kRomBase + 0x900;
@@ -1938,9 +1968,9 @@ void TestDungeonDiceSequencer()
 {
     // Song 0. Square 1: NR50 53, note (vol 8, note 0x20), wait 4, vibrato at depth 2 and note 0x21, wait 12, fade out,
     // wait 6, end. Noise: note (vol 4, note 0x48), wait 1, end. Voice 0: note (vol 12, map entry 1) and a note on voice
-    // 1 (vol 6, map entry 2), wait 4, fade voice 1 out, wait 8, a bend of +16 from sample 5's rate, wait 4, note
-    // 0x1C of the track's sample (vol 9) and a bend of +2 in the same frame, wait 4, end. Square 2: wait 2, loop point
-    // with a wait of 0 and duty 75% for the loop, wait 2, note (vol 7, note 0x10), wait 18, loop the song.
+    // 1 (vol 6, map entry 2), wait 4, fade voice 1 out, wait 8, a bend of +16 from sample 5's rate, wait 4, note 0x1C
+    // of the track's sample (vol 9) and a bend of +2 in the same frame, wait 4, end. Square 2: wait 2, loop point with
+    // a wait of 0 and duty 75% for the loop, wait 2, note (vol 7, note 0x10), wait 18, loop the song.
     Image m(0x1000);
     constexpr uint32_t kTable = kRomBase + 0x100;
     constexpr uint32_t kBase = kRomBase + 0x200;
@@ -1959,8 +1989,8 @@ void TestDungeonDiceSequencer()
         m.Put16(kPeriods + 2 * p, uint16_t(0x4000 - p));
     }
 
-    // Song 1. Square 1: a call of 1 command from the fragment after the end, with duty byte 10 first, which is also
-    // the wait after the call, note (vol 9, note 0x20), then 260 duty bytes of 07, each followed by a wait of 1, and a
+    // Song 1. Square 1: a call of 1 command from the fragment after the end, with duty byte 10 first, which is also the
+    // wait after the call, note (vol 9, note 0x20), then 260 duty bytes of 07, each followed by a wait of 1, and a
     // stop. The fragment: wait 3, note (vol 5, note 0x24), wait 6.
     constexpr uint32_t kBase1 = kRomBase + 0x280;
     std::vector<uint8_t> calls = {0x00, 0xF5, 0x00, 0x00, 0x01, 0x10, 0xE9, 0x20, 0x01};
@@ -2028,8 +2058,8 @@ void TestDungeonDiceSequencer()
     SUPERGBAMIDI_CHECK(frames[4][5].vol == 6 && frames[5][5].vol == 4 && frames[7][5].vol == 1);
     SUPERGBAMIDI_CHECK(frames[8][5].vol == 0 && frames[8][5].trig == 1);
 
-    // A bend without a new note outputs the period for pitch 24 * 16 + 1 + 16 with flag 40. A bend in the same frame
-    // as a new note starts that note at the bent pitch.
+    // A bend without a new note outputs the period for pitch 24 * 16 + 1 + 16 with flag 40. A bend in the same frame as
+    // a new note starts that note at the bent pitch.
     SUPERGBAMIDI_CHECK(frames[12][4].flags == 0x40 && frames[12][4].pitch == 0x4000 - 0x191);
     SUPERGBAMIDI_CHECK(frames[16][4].flags == 1 && frames[16][4].pitch == 0x1C1 + 2 && frames[16][4].vol == 9);
 
@@ -2170,6 +2200,45 @@ void TestDungeonDiceDetection()
     SUPERGBAMIDI_CHECK(std::abs(s.Rate(0) - 16777216.0 / 1677) < 1e-6);
 }
 
+// Without the code that loads the PSG frequency table, detection still finds the driver, and warns that the square,
+// wave and noise notes can't play as they should.
+void TestDungeonDiceNoFrequencyTable()
+{
+    Image m = DungeonDiceImage();
+    m.Halfwords(kRomBase + 0x1080, {0, 0, 0, 0, 0, 0});
+    const Rom rom = m.ToRom();
+    DriverInfo info;
+    std::string error;
+
+    const bool found = DetectDriver(rom, DriverOverrides(), info, error);
+
+    SUPERGBAMIDI_CHECK(found && info.psg_freq_table == 0);
+    SUPERGBAMIDI_CHECK(info.warnings.size() == 1 &&
+                       info.warnings[0] ==
+                           "PSG frequency table not found, so square notes are left out, wave notes "
+                           "play at the wrong pitch and noise notes use default settings");
+}
+
+// Detection recognises code that works the song table's address out as the play-song routine does, in other registers.
+// This table isn't laid out the way the data scan's checks expect, so detection then goes on to the scan.
+void TestDungeonDiceSongTableFallback()
+{
+    Image m = DungeonDiceImage();
+    CodeWithLiterals(m, kRomBase + 0x1000, {0x00AA, 0x1952, 0x0092, 0x4900, 0x1889, 0x884C, 0x0420, 0x880D, 0x4328},
+                     {{3, kDdmTable}});
+    const Rom rom = m.ToRom();
+    DriverInfo info;
+    std::string error;
+
+    DetectDriver(rom, DriverOverrides(), info, error);
+
+    const auto recognised = [](const std::string& line)
+    {
+        return line.find("found code like the play-song routine") == 0;
+    };
+    SUPERGBAMIDI_CHECK(std::any_of(info.log.begin(), info.log.end(), recognised));
+}
+
 void TestDungeonDiceConversion()
 {
     const Rom rom = DungeonDiceImage().ToRom();
@@ -2229,8 +2298,8 @@ void TestDungeonDiceConversion()
     // Noise note 0x4A is the third noise setting, on key 38.
     SUPERGBAMIDI_CHECK(notes["Noise"].size() == 1 && notes["Noise"][0][1] == 38);
 
-    // Voice 0's note at pitch 28 * 16 + 1 plays 4 semitones above its note at the sample's rate, and F2 bends it
-    // up a semitone, the most the range of 2 semitones needs.
+    // Voice 0's note at pitch 28 * 16 + 1 plays 4 semitones above its note at the sample's rate, and F2 bends it up a
+    // semitone, the most the range of 2 semitones needs.
     SUPERGBAMIDI_CHECK_EQ(notes["Voice 0"].size(), 2);
     if (notes["Voice 0"].size() == 2)
     {
@@ -2398,15 +2467,18 @@ void TestOverrides()
     std::string err;
     DriverOverrides ov;
     ov.song_table = kRomBase + 0x100000;
+
     SUPERGBAMIDI_CHECK(!DetectDriver(rom, ov, info, err));
     SUPERGBAMIDI_CHECK(err == "the song table address 0x08100000 is outside the ROM (0x08000000-0x08000FFF)");
 
     ov.song_table = kSongTable;
     ov.sample_table = 0x02000000;
+
     SUPERGBAMIDI_CHECK(!DetectDriver(rom, ov, info, err));
     SUPERGBAMIDI_CHECK(err == "the sample table address 0x02000000 is outside the ROM (0x08000000-0x08000FFF)");
 
     ov.sample_table = kSampleTable;
+
     SUPERGBAMIDI_CHECK(DetectDriver(rom, ov, info, err));
 
     // The song table ends quietly at an entry that doesn't point into the ROM, which is no song at all.
@@ -2461,6 +2533,7 @@ void RunTests()
     TestDecoding();
     TestSequencer();
     TestLoopStart();
+    TestLoopStartEarliest();
     TestBendKept();
     TestConversion();
     TestSilentSongs();
@@ -2488,6 +2561,8 @@ void RunTests()
     TestDungeonDiceDecoding();
     TestDungeonDiceSequencer();
     TestDungeonDiceDetection();
+    TestDungeonDiceNoFrequencyTable();
+    TestDungeonDiceSongTableFallback();
     TestDungeonDiceConversion();
     TestDetectionFromCode();
     TestSampleTableChoice();

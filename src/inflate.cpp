@@ -291,6 +291,7 @@ private:
         }
     }
 
+    // Returns the fixed codes, built from the code lengths that RFC 1951 gives them.
     static FixedCodes BuildFixedCodes()
     {
         FixedCodes codes;

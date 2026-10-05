@@ -1,9 +1,8 @@
 -- SPDX-License-Identifier: MIT
 
--- Drop the ROMs (.gba) or GSF rips (.gsflib, .minigsf) of GBA games with
--- Konami's or Rare's sound driver on this app to convert their music to MIDI
--- files and SoundFonts. Each file's results go in a folder beside it, with
--- the same name.
+-- Drop the ROMs (.gba) or GSF rips (.gsflib, .minigsf) of GBA games on this
+-- app to convert their music to MIDI files and SoundFonts. Each file's results
+-- go in a folder beside it, with the same name.
 --
 -- The command-line tool is inside the app, in Contents/Resources.
 

@@ -51,7 +51,6 @@ public:
     bool HasSong(int song) const override
     {
         SongHeader h;
-
         return ReadSongHeader(rom_, info_.song_table, song, info_.revision, h) && h.base != 0;
     }
 
@@ -69,6 +68,11 @@ public:
     SongReport ConvertSong(int song, const ConvertSettings& settings) override
     {
         return Report(konami::ConvertSong(rom_, info_, song, OptionsFor(settings), shared_.get()));
+    }
+
+    bool SupportsVoiceChannels() const override
+    {
+        return false;
     }
 
     // Each song's presets go in the bank numbered after it.
@@ -91,10 +95,10 @@ public:
         return konami::DumpSong(rom_, info_, song, path, error);
     }
 
-    // Writes the track output records that the driver builds on its stack every frame, one line for each track:
-    // frame, track, pitch, b2, vol, trig, flags, key and two pan fields. These are the record's bytes 8 and 9 in the
-    // Ultimate Masters revision, and 10 and 11 in the WCT 2004 and Rave Master revisions. The Eternal Duelist and
-    // Dungeon Dice Monsters revisions' records have no pan, and 0 there.
+    // Writes the track output records that the driver builds on its stack every frame, one line for each track: frame,
+    // track, pitch, b2, vol, trig, flags, key and two pan fields. These are the record's bytes 8 and 9 in the Ultimate
+    // Masters revision, and 10 and 11 in the WCT 2004 and Rave Master revisions. The Eternal Duelist and Dungeon Dice
+    // Monsters revisions' records have no pan, and 0 there.
     bool Trace(int song, long long frames, std::FILE* out, std::vector<std::string>& warnings) const override
     {
         const std::unique_ptr<Sequencer> sequencer = Sequencer::Create(rom_, info_, song);

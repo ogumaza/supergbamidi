@@ -23,7 +23,6 @@ inline std::filesystem::path PathFromUtf8(const std::string& s)
 inline std::string Utf8(const std::filesystem::path& p)
 {
     const std::u8string s = p.u8string();
-
     return std::string(s.begin(), s.end());
 }
 

@@ -25,11 +25,10 @@ namespace supergbamidi::konami
 namespace
 {
 
-constexpr double kPi = 3.14159265358979323846;
-constexpr int kVelocity = 127;   // loudness is carried by CC11, see LevelsToControllers()
+constexpr int kVelocity = 127;   // every note's velocity, as CC11 carries the loudness (see LevelsToControllers())
 constexpr int kTailFrames = 120; // frames the last notes ring for when every track ends without stopping the song
 
-// The driver's PSG frequency table has an entry for each 1/32 semitone of notes 0 to 104.
+// The number of entries in the driver's PSG frequency table: one for each 1/32 semitone of notes 0 to 104.
 constexpr int kPsgFreqEntries = 105 * 32;
 
 // Returns the pitch that frequency register value `x` (0-2047) plays, to the nearest 1/32 semitone from PSG note 0. A
@@ -170,6 +169,7 @@ enum class Kind
 // A track event for MIDI conversion.
 struct Event
 {
+    // The kinds of event.
     enum Type
     {
         kNoteOn,
@@ -177,8 +177,9 @@ struct Event
         kLevels,
         kBend,
         kEcho
-    } type;
+    };
 
+    Type type;
     uint32_t frame;
     Kind kind = Kind::kSample;
     int param = 0; // duty, wave row (wave << 4 | volume), noise note or sample index
@@ -271,8 +272,8 @@ public:
         }
     }
 
-    // Adds the events of frame `f` of a PSG channel in the WCT 2004 revision to `out`, from the record that the output
-    // stage hands the channel and the sides it plays on.
+    // Adds the events of frame `f` of a PSG channel in the WCT 2004, Rave Master and Eternal Duelist revisions to
+    // `out`, from the record that the output stage hands the channel and the sides it plays on.
     void PsgFrame(uint32_t f, const TrackOutput& o, bool left, bool right, std::vector<Event>& out)
     {
         if (left != left_ || right != right_)
@@ -305,7 +306,7 @@ private:
     {
         int pitch = 0;       // 1/32 semitones from note 0
         int note = 0;        // the note that a trigger starts
-        bool restart = true; // a trigger restarts a square channel
+        bool restart = true; // true if a trigger restarts a square channel
     };
 
     // Returns the levels of a PSG channel at volume v, on the sides it plays on.
@@ -316,8 +317,8 @@ private:
     }
 
     // Returns the frequency written for square or wave output `o`. The frequency table approximates equal temperament
-    // and sets the channel's restart bit. Out-of-range pitches read whatever data lies outside the table; note FF,
-    // used as note -1, is one such case.
+    // and sets the channel's restart bit. Out-of-range pitches read whatever data lies outside the table; note FF, used
+    // as note -1, is one such case.
     PsgFrequency Frequency(const TrackOutput& o) const
     {
         PsgFrequency fr{o.pitch, o.note_pitch >> 5, true};
@@ -421,8 +422,8 @@ private:
             {
                 // Wave channel. Volume 0 mutes it, and a trigger loads the wave pre-scaled to the volume. The driver
                 // writes only the low 11 bits of the frequency, so it never restarts the channel. The older revisions
-                // load the wave on every output, from the record's wave number, which a bend or a legato note leaves
-                // at 0. MIDI can only play a new wave as a new note.
+                // load the wave on every output, from the record's wave number, which a bend or a legato note leaves at
+                // 0. MIDI can only play a new wave as a new note.
                 const int row = (o.b2 << 4) + o.vol; // the driver's wave-table row
                 const bool reload = info_.revision != Revision::kUltimateMasters && on_ && row != row_;
                 if (o.vol == 0)
@@ -647,7 +648,7 @@ private:
         {
             const uint32_t a = info_.wave_volume_table + 2 * uint32_t(o.vol);
             const uint16_t nr32 = info_.wave_volume_table && rom_.Contains(a, 2) ? rom_.U16(a) : (o.vol ? 0x2000 : 0);
-            constexpr double kShares[4] = {0, 1, 0.5, 0.25}; // of the wave's output, by NR32 bits 13-14
+            constexpr double kShares[4] = {0, 1, 0.5, 0.25}; // the output level for each value of NR32 bits 13-14
             wave_share_ = nr32 & 0x8000 ? 0.75 : kShares[(nr32 >> 13) & 3];
             register_ = FrequencyEntry(o.pitch) & 0x7FF;
             new_note |= o.trig && (o.flags & 1);
@@ -679,17 +680,17 @@ private:
         PlayDungeonDice(f, Kind::kNoise, noise_note_, 0, new_note, ScaledLevels(level, state), out);
     }
 
-    // Returns the pitch offset of `period` from the sample's native period `own`, in 1/32 semitones. A timer period
-    // of 0 means 65536 cycles.
+    // Returns the pitch offset of `period` from the sample's native period `own`, in 1/32 semitones. A timer period of
+    // 0 means 65536 cycles.
     static int PeriodPitch(uint32_t own, uint32_t period)
     {
         return int(std::lround(384.0 * std::log2(double(own) / (period ? period : 0x10000))));
     }
 
-    // Mirrors the Dungeon Dice Monsters voice update. Every frame sets the voice's level from its track's volume.
-    // A flagged record starts a note at the sample's rate or the rate from the sample period table; volume 0
-    // stops the voice. Flag 0x40 instead treats the record's pitch as a timer period and changes the playing note's
-    // rate. On hardware this also changes the other voice sharing the FIFO, which supergbamidi doesn't model.
+    // Mirrors the Dungeon Dice Monsters voice update. Every frame sets the voice's level from its track's volume. A
+    // flagged record starts a note at the sample's rate or the rate from the sample period table; volume 0 stops the
+    // voice. Flag 0x40 instead treats the record's pitch as a timer period and changes the playing note's rate. On
+    // hardware this also changes the other voice sharing the FIFO, which supergbamidi doesn't model.
     void SampleDungeonDice(uint32_t f, const TrackOutput& o, std::vector<Event>& out,
                            std::vector<std::string>& warnings)
     {
@@ -704,7 +705,7 @@ private:
                 out.push_back(e);
             }
         }
-        else if (o.flags && !(o.flags & 0x80))
+        else if (o.flags)
         {
             NoteOff(f, out);
             const SampleInfo s = info_.Sample(rom_, o.b2);
@@ -766,6 +767,8 @@ private:
     int row_ = -1;   // the wave-table row of the wave note that's playing
     int noise_ = -1; // the NR43 value of the noise note that's playing
     Levels levels_;  // older revisions: the levels of the sample note that's playing
+    int echo_ = 0;
+    std::set<int> skipped_; // invalid samples whose notes were skipped, with a warning the first time
 
     // PSG channel state and current sound after the Dungeon Dice Monsters driver's register writes.
     bool sounding_ = false;
@@ -775,8 +778,6 @@ private:
     int wave_loads_ = 0;    // FrameState::wave_loads, as the channel last saw it
     int noise_note_ = 0;    // the noise note, which gives the noise setting
     int sound_ = -1;        // the duty, wave row or noise note of the note that's playing
-    int echo_ = 0;
-    std::set<int> skipped_; // invalid samples whose notes were skipped, with a warning the first time
 };
 
 // Preset and key assigned to a note on a sample or noise track.
@@ -1077,34 +1078,6 @@ Timing EstimateTiming(std::vector<uint32_t> onsets)
     return t;
 }
 
-// Sets CC10 and CC11 for the levels `left` and `right` (full scale 128). CC11 carries the loudness: under the SF2
-// default modulator a controller value c scales amplitude by (c/127)^2. CC10 carries the ratio between the sides, for a
-// constant-power pan law. When both levels are 0, only CC11 changes.
-void LevelsToControllers(double left, double right, int& cc10, int& cc11)
-{
-    const double gl = left / 128.0, gr = right / 128.0;
-    const double amp = std::sqrt(gl * gl + gr * gr);
-    if (amp <= 0)
-    {
-        cc11 = 0;
-        return;
-    }
-
-    // Equal levels are centred. The formula puts them at exactly 63.5, so rounding them with it would depend on atan2()
-    // returning exactly the double nearest pi/4.
-    if (left == right)
-    {
-        cc10 = 64;
-    }
-    else
-    {
-        cc10 = std::clamp(int(std::lround(std::atan2(gr, gl) / (kPi / 2) * 127)), 0, 127);
-    }
-
-    const double kLoudestCentred = std::sqrt(2.0) * 127.0 / 128.0; // amplitude of the loudest centred voice
-    cc11 = std::clamp(int(std::lround(127 * std::sqrt(amp / kLoudestCentred))), 0, 127);
-}
-
 // The older revisions' PSG output in one frame: the record that their output stage hands each PSG channel, and the
 // sides each channel plays on.
 struct Wct2004Psg
@@ -1113,10 +1086,10 @@ struct Wct2004Psg
     std::array<bool, kPsgTracks> left{}, right{};
 };
 
-// Returns the older revisions' PSG output in every frame of `sim`. A PSG track panned to anything but the centre or
-// one side plays its right side on its own channel, and its left side on the next channel, which plays a copy of the
-// track's output instead of its own track's. The pan's two levels scale the volume of each side. In the Eternal
-// Duelist revision, a PSG track's pan is a set of NR51 bits, and NR51 is the OR of the four tracks' bits.
+// Returns the older revisions' PSG output in every frame of `sim`. A PSG track panned to anything but the centre or one
+// side plays its right side on its own channel, and its left side on the next channel, which plays a copy of the
+// track's output instead of its own track's. The pan's two levels scale the volume of each side. In the Eternal Duelist
+// revision, a PSG track's pan is a set of NR51 bits, and NR51 is the OR of the four tracks' bits.
 std::vector<Wct2004Psg> Wct2004PsgOutput(const Rom& rom, const DriverInfo& info, const Simulation& sim)
 {
     auto centre_or_one_side = [](uint8_t pan)
@@ -1147,8 +1120,9 @@ std::vector<Wct2004Psg> Wct2004PsgOutput(const Rom& rom, const DriverInfo& info,
             {
                 TrackOutput& r = p.records[t];
 
-                // When square 1 goes back to the centre or one side, square 2 is silenced, unless its own track plays
-                // something.
+                // When square 1 goes back to the centre or one side, and square 2's track plays nothing this frame,
+                // square 2 takes square 1's record at volume 0: a retrigger silences it, and a pitch change moves it to
+                // square 1's pitch.
                 if (t == 0 && !p.records[1].Any() && centre_or_one_side(r.pan) && !centre_or_one_side(r.pan_start))
                 {
                     p.records[1] = r;
@@ -1719,6 +1693,7 @@ SongSummary Run(const Rom& rom, const DriverInfo& info, int song, const ConvertO
     MidiFile midi(uint16_t(timing.ppqn));
     const std::string title = rom.Title() + " #" + TwoDigits(song);
     WriteConductor(midi.AddTrack(), title, timing, rom, info, song, sim);
+
     for (int t = 0; t < kTracks; t++)
     {
         if (!usage.used[size_t(t)])

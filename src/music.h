@@ -21,6 +21,9 @@ enum class Driver
     kAny, // whichever the game has
     kKonami,
     kRare,
+    kQuintet,
+    kRd2,
+    kMp2k,
 };
 
 // Settings that override detection, from the command line. 0 means detect.
@@ -38,6 +41,7 @@ struct ConvertSettings
 {
     int loops = 2;                // times a looping song's loop is played
     uint16_t track_mask = 0xFFFF; // tracks to include (bit t = track t)
+    bool voice_channels = false;  // a MIDI channel for each of the driver's sound channels, where it can
     std::string out_dir = ".";
     std::string base_name = "song";
 };
@@ -47,7 +51,7 @@ struct SongReport
 {
     bool ok = false;        // converted, or skipped for playing no notes
     bool silent = false;    // no notes on the chosen tracks, so nothing was written
-    uint32_t address = 0;   // the song's data in the ROM: a Konami song's sequence data, or a Rare tune's header
+    uint32_t address = 0;   // the song's data in the ROM: its header, or a Konami song's sequence data
     double seconds = 0;     // duration including the requested number of loop passes
     double loop_start = -1; // seconds; -1 if the song doesn't loop
     double loop_end = -1;
@@ -82,6 +86,10 @@ public:
     // SoundFont instead of one of its own.
     virtual SongReport ConvertSong(int song, const ConvertSettings& settings) = 0;
 
+    // Returns true if ConvertSong() can give each of the driver's sound channels a MIDI channel, as
+    // ConvertSettings::voice_channels asks.
+    virtual bool SupportsVoiceChannels() const = 0;
+
     // Starts a shared SoundFont for all subsequent calls to ConvertSong().
     virtual void ShareSoundfont() = 0;
 
@@ -91,15 +99,27 @@ public:
     // Writes a text listing of every command of a song. Returns false and sets `error` if it can't.
     virtual bool DumpSong(int song, const std::string& path, std::string& error) const = 0;
 
-    // Writes the state of the driver model to `out` after each of the first `frames` frames of a song, in the format
-    // of the driver's tools/*/driver_emu.py trace, and adds the song's problems to `warnings`. Returns false if the
-    // song can't be played.
+    // Writes the state of the driver model to `out` after each of the first `frames` frames of a song, in the format of
+    // the driver's tools/*/driver_emu.py trace, and adds the song's problems to `warnings`. Returns false if the song
+    // can't be played.
     virtual bool Trace(int song, long long frames, std::FILE* out, std::vector<std::string>& warnings) const = 0;
 };
 
 // Finds the sound driver of the game in `rom`, which has to outlive the result, and reads its tables. Returns null and
-// sets `error` if the game has neither driver, or the tables of the one it has can't be read.
+// sets `error` if the game has none of the drivers, or the tables of the first one it finds can't be read.
 std::unique_ptr<Music> OpenMusic(const Rom& rom, const Overrides& overrides, std::string& error);
+
+// Finds every sound driver that `overrides` allows in the game in `rom`, in the order OpenMusic() looks for them, since
+// a game can have more than one. Leaves out drivers whose tables can't be read.
+std::vector<std::unique_ptr<Music>> OpenAllMusic(const Rom& rom, const Overrides& overrides);
+
+// The most times as long as the longest of its tracks' loops that a song's loop can be.
+constexpr uint64_t kMaxLoopFactor = 8;
+
+// Returns the length of a song's loop from its looping tracks' loop lengths, which are above 0: the shortest length
+// that each of them divides, so that every track is back where its loop started, or the longest of them if that would
+// be more than kMaxLoopFactor times as long.
+uint64_t LoopLength(const std::vector<uint64_t>& lengths);
 
 // Each driver's part of OpenMusic(), which looks for that driver only. It returns null and sets `error` if the driver's
 // tables can't be read, or returns null and leaves `error` empty if the game shows no sign of the driver.
@@ -117,4 +137,24 @@ std::unique_ptr<Music> OpenMusic(const Rom& rom, const Overrides& overrides, std
 
 } // namespace rare
 
+namespace quintet
+{
+
+std::unique_ptr<Music> OpenMusic(const Rom& rom, const Overrides& overrides, std::string& error);
+
+} // namespace quintet
+
+namespace rd2
+{
+
+std::unique_ptr<Music> OpenMusic(const Rom& rom, const Overrides& overrides, std::string& error);
+
+} // namespace rd2
+
+namespace mp2k
+{
+
+std::unique_ptr<Music> OpenMusic(const Rom& rom, const Overrides& overrides, std::string& error);
+
+} // namespace mp2k
 } // namespace supergbamidi

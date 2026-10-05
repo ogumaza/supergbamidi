@@ -29,7 +29,8 @@ struct Sf2Envelope
 // releases fall in a straight line in level, where a SoundFont's fall in a straight line in decibels.
 Sf2Envelope EnvelopeFor(const DriverInfo& info, const Instrument& inst);
 
-// Builds SoundFont samples and instruments from the ROM, reusing any already built. The converter adds the presets.
+// A builder of SoundFont samples and instruments from the ROM, which reuses any already built. The converter adds the
+// presets.
 class SoundfontBuilder
 {
 public:

@@ -61,7 +61,6 @@ bool ReadTuneHeader(const Rom& rom, uint32_t address, TuneHeader& header)
 bool DecodeEvent(const Rom& rom, uint32_t address, Format format, Event& event)
 {
     event = Event();
-    event.address = address;
     if (!rom.Contains(address))
     {
         return false;
@@ -178,8 +177,15 @@ TrackLayout ScanTrack(const Rom& rom, uint32_t address, Format format)
         if (e.command == kCmdDelay1 || e.command == kCmdDelay2 || e.command == kCmdDelay3)
         {
             tick += e.value;
+            continue;
         }
-        else if (e.command == kCmdControl && e.a == kCtrlLoopStart)
+        if (e.command == kCmdEnd)
+        {
+            break;
+        }
+
+        layout.last_command = tick;
+        if (e.command == kCmdControl && e.a == kCtrlLoopStart)
         {
             layout.loop_start = tick;
             loop_started = true;
@@ -189,10 +195,6 @@ TrackLayout ScanTrack(const Rom& rom, uint32_t address, Format format)
             layout.loops = true;
             layout.loop_end = tick;
             return layout;
-        }
-        else if (e.command == kCmdEnd)
-        {
-            break;
         }
     }
 
@@ -209,7 +211,6 @@ bool ReadInstrument(const Rom& rom, uint32_t address, Instrument& inst)
         return false;
     }
 
-    inst.address = address;
     inst.type = rom.U32(address);
     inst.loop_mode = rom.U32(address + 4);
     inst.rate = rom.U32(address + 8);
@@ -244,7 +245,7 @@ bool SampleValid(const Rom& rom, const Instrument& inst)
 
 uint32_t SplitInstrument(const Rom& rom, const Instrument& split, int key)
 {
-    if (!split.IsSplit() || key < 0 || key > 127 || !rom.Contains(split.key_map, 128))
+    if (key < 0 || key > 127 || !rom.Contains(split.key_map, 128))
     {
         return 0;
     }

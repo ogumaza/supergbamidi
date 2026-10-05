@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-// The program's name and version for output and messages.
+// The program's name, for output and messages.
 
 #pragma once
 

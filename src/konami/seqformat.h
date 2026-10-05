@@ -62,11 +62,11 @@ uint32_t SongEntrySize(Revision r);
 enum class Op
 {
     kDelay,        // not a command: the delay that follows every command
-    kDuty,         // 00-8F  set PSG duty/length byte (square) or wave number (wave)
+    kDuty,         // 00-8F  the PSG duty/length byte (square) or wave number (wave)
     kNote,         // A0-BF  DirectSound note: [vol] sample [semitone]
-    kVolume,       // C0-CF  change volume (DS: live volume change, PSG: retrigger)
+    kVolume,       // C0-CF  a volume change (DS: a live volume change, PSG: a retrigger)
     kPsgNote,      // D0-DF  PSG note: [vol] note
-    kRest,         // E0-EF  silence the track
+    kRest,         // E0-EF  a rest, which silences the track
     kPan,          // F0 xx
     kVibrato,      // F1 xx  vibrato depth (Eternal Duelist: F4-FC xx as well)
     kPitchBend,    // F2 xx or F2 8x xx  bend in 1/32 semitones (see DecodeCommand)
@@ -76,7 +76,7 @@ enum class Op
     kEchoRoute,    // F9 xx  high nibble = DS voice 0-11, low nibble = echo bus + 1 (0 = off buses 0 and 1)
     kEndTrack,     // FE     end of track, restarted by a song loop (WCT 2004: FD)
     kEndTrackHard, // FD     end of track, never restarted
-    kJump,         // FF 00 = stop song, FF nn = loop all tracks back to their loop points (WCT 2004: FF, FE)
+    kJump,         // FF 00 = song stop, FF nn = song loop, back to each track's loop point (WCT 2004: FF, FE)
     kPanLevels,    // WCT 2004 F0 xy: left level x, right level y (0-F each)
     kAttack,       // WCT 2004 F4 xx: the attack rate of PSG notes
     kDecay,        // WCT 2004 F5 xx: the decay rate of PSG notes
@@ -84,15 +84,15 @@ enum class Op
     kVolumeScale,  // WCT 2004 FA xx: volume scale from a setting that the game gives the driver
     kNop,          // WCT 2004 FB, FC
     kWave,         // WCT 2004 00-8F with a low nibble of 4 or more: wave (nibble - 4), loaded at once
-    kCall,         // WCT 2004 9x lo hi nn: play nn commands from offset hilo of the track's data
+    kCall,         // WCT 2004 9x lo hi nn: a call of nn commands from offset hilo of the track's data
     kPsgPan,       // Eternal Duelist F0 xx on a PSG track: the track's NR51 bits
     kPairVolumes,  // Eternal Duelist F0 xy on a sample track: volume y, and x for the next track's voice
     kSampleAtNote, // Dungeon Dice Monsters 9x nn: the track's sample at note nn, at volume x
     kNextNote,     // Dungeon Dice Monsters Ax nn: kNote, played by the next track
     kSetVolume,    // Dungeon Dice Monsters Dx: volume x, without starting a note
     kPsgVolume,    // Dungeon Dice Monsters F0 xx: the PSG's volume on each side (NR50)
-    kSampleBend,   // Dungeon Dice Monsters F1 xx (the next track) or F2 xx: bend the note by xx - 32 sixteenths
-    kFade,         // Dungeon Dice Monsters F8 (this track) or F9 (the next track): fade out over 4 frames
+    kSampleBend,   // Dungeon Dice Monsters F1 xx (the next track) or F2 xx: a bend of the note by xx - 32 sixteenths
+    kFade,         // Dungeon Dice Monsters F8 (this track) or F9 (the next track): a fade-out over 4 frames
     kRelease,      // Dungeon Dice Monsters FB: kFade, with the square channels' envelope (a rest during vibrato)
     kUnknown,
 };

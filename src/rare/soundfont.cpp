@@ -19,8 +19,8 @@ constexpr int kInstant = -12000;
 // The greatest attenuation, in centibels.
 constexpr int kSilent = 1440;
 
-// Loops shorter than this many points are repeated until they're at least this long, since some players can't play a
-// very short loop.
+// The shortest loop a sample gets, in points. A shorter one is repeated until it's at least this long, since some
+// players can't play a very short loop.
 constexpr uint32_t kMinLoop = 32;
 
 // The points after a loop's end that repeat its start, for players that read past the end when they interpolate.
@@ -44,7 +44,6 @@ int Timecents(double seconds)
 double FadeSeconds(int frames)
 {
     const double stretch = std::clamp(3.0 + 3.0 * (frames - 5) / 11.0, 3.0, 6.0);
-
     return stretch * frames / kFrameRate;
 }
 
@@ -54,7 +53,6 @@ uint32_t SustainLevel(uint32_t sustain)
     const uint32_t value = std::min<uint32_t>(sustain, 99);
     const uint32_t whole = (value << 7) / 99;
     const uint32_t part = (((value << 7) % 99) << 8) / 99;
-
     return (whole << 8) | part;
 }
 

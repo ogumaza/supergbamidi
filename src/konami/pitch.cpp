@@ -19,7 +19,8 @@ constexpr int kBufferSize = 4096;
 // YIN's absolute threshold: the period is at the first dip of the difference function below it.
 constexpr double kThreshold = 0.12;
 
-// If no dip reaches kThreshold, accept the deepest dip up to this value. Otherwise treat the sample as unpitched.
+// The highest value the deepest dip can have when no dip reaches kThreshold. A sample whose deepest dip is higher has
+// no clear pitch.
 constexpr double kMaxDip = 0.3;
 
 // Estimates the fundamental frequency of `x`, sampled at `rate` Hz, with YIN (de Cheveigne & Kawahara, 2002), the

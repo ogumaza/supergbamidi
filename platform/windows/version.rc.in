@@ -17,7 +17,7 @@ BEGIN
     BEGIN
         BLOCK "040904B0"
         BEGIN
-            VALUE "FileDescription", "MIDI and SoundFont converter for Konami and Rare GBA games"
+            VALUE "FileDescription", "MIDI and SoundFont converter for GBA game music"
             VALUE "FileVersion", "@PROJECT_VERSION@"
             VALUE "InternalName", "@PROJECT_NAME@"
             VALUE "LegalCopyright", "Copyright (c) 2026 the @PROJECT_NAME@ authors. MIT License."

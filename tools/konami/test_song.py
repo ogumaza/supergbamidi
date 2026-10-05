@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 
-"""Copy a ROM and replace song 0 with a test song covering commands and outputs unused by the original songs.
+"""Copy a ROM and replace song 0 with a test song for commands and outputs the original songs may not use.
 
     test_song.py ROM OUT.gba
 

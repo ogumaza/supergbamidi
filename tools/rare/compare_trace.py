@@ -40,7 +40,7 @@ def compare(job):
     tool, rom_path, song, frames = job
     driver = driver_lines(rom_path, song, frames)
     model = model_lines(tool, rom_path, song, frames)
-    for i, (a, b) in enumerate(zip(driver, model)):
+    for a, b in zip(driver, model):
         if a != b:
             return 'frame %s differs:\n    driver       %s\n    supergbamidi %s' % (a.split()[0], a, b)
     if len(driver) != len(model):

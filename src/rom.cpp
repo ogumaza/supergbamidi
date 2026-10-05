@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cstring>
 #include <filesystem>
+#include <string_view>
 #include <system_error>
 
 #include "files.h"
@@ -72,6 +73,22 @@ std::vector<std::pair<std::string, std::string>> ParseTags(const uint8_t* p, siz
     return tags;
 }
 
+// Returns true if `file` starts with the signature of a ZIP, 7-Zip, RAR or gzip archive.
+bool IsArchive(const std::vector<uint8_t>& file)
+{
+    static constexpr std::string_view kSignatures[] = {
+        {"PK\x03\x04", 4}, {"7z\xBC\xAF\x27\x1C", 6}, {"Rar!\x1A\x07", 6}, {"\x1F\x8B", 2}};
+    for (std::string_view signature : kSignatures)
+    {
+        if (file.size() >= signature.size() && std::memcmp(file.data(), signature.data(), signature.size()) == 0)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 } // namespace
 
 bool Rom::Load(const std::string& path, std::string& error)
@@ -92,6 +109,13 @@ bool Rom::Load(const std::string& path, std::string& error)
     if (!ReadFile(path, file))
     {
         error = "can't read " + path;
+        return false;
+    }
+
+    // An archive would otherwise be read as a ROM that has no driver supergbamidi knows.
+    if (IsArchive(file))
+    {
+        error = path + " is an archive: extract the ROM or GSF files from it first";
         return false;
     }
 

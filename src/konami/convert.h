@@ -41,8 +41,8 @@ struct SongSummary
 // Works out a song's length, loop and tracks the way ConvertSong() does, without writing anything.
 SongSummary InspectSong(const Rom& rom, const DriverInfo& info, int song, const ConvertOptions& opt);
 
-// Converts one song. If `shared` is supplied, adds instruments to it with bank = song; otherwise writes a separate
-// SF2 next to the MIDI file.
+// Converts one song. If `shared` is supplied, adds instruments to it with bank = song; otherwise writes a separate SF2
+// next to the MIDI file.
 SongSummary ConvertSong(const Rom& rom, const DriverInfo& info, int song, const ConvertOptions& opt,
                         SoundfontBuilder* shared);
 
