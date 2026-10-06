@@ -53,11 +53,10 @@ struct Plan
     uint64_t end = 0;
 };
 
-// Plans a tune: a looping tune plays its loop `loops` times, and a tune without one goes on until its last track has
-// ended. The tracks of a tune may loop at different points and lengths, and each goes on looping in its own way, so the
-// loop starts where every looping track has started its loop, and where every track without a loop has played its
-// last command other than a delay or the end, and lasts until every looping track is back where its loop started, if
-// that isn't too long (see LoopLength()).
+// Plans the conversion: looping tunes play `loops` passes; other tunes run until the last track ends. Tracks can have
+// different loop points and lengths. The overall loop starts once all looping tracks have entered their loops and all
+// other tracks have played their last command other than a delay or end. It ends when all looping tracks return to
+// their loop starts, subject to the length limit in LoopLength().
 Plan PlanTune(const Rom& rom, const DriverInfo& info, const TuneHeader& header, int loops)
 {
     Plan plan;
@@ -121,6 +120,12 @@ public:
         return tempo_ != 0;
     }
 
+    // Returns the time of `tick`, in 1/256 microseconds at the driver's speed, at the tempo now set.
+    int64_t TickTime(uint64_t tick) const
+    {
+        return time_ + int64_t((tick - std::min(tick, tick_)) * tempo_ * 256 / per_quarter_);
+    }
+
     // Starts a tempo of `tempo` microseconds a quarter note at `tick`.
     void SetTempo(uint64_t tick, uint32_t tempo)
     {
@@ -146,6 +151,7 @@ struct PitchChange
     uint64_t tick;
     int channel;
     int64_t offset;
+    uint32_t frame;
 };
 
 // Results of running a tune through the model: track actions, channel pitch changes and warnings.
@@ -153,12 +159,89 @@ struct Simulation
 {
     std::vector<Action> actions;
     std::vector<PitchChange> pitches;
+    std::vector<uint64_t> frame_starts; // with frame timing, the tick each frame starts at
     std::vector<std::string> warnings;
     std::optional<uint64_t> cut_off; // the tick where the model gave up, at the frame limit
 };
 
-// Runs the model until the plan's end or until the driver has stopped the tune, for an hour at most.
-Simulation Simulate(const Rom& rom, const DriverInfo& info, int song, const TuneHeader& header, const Plan& plan)
+// Returns the tempo changes in `actions` as (tick, tempo), in the order of their ticks.
+std::vector<std::pair<uint64_t, uint32_t>> TempoChanges(const std::vector<Action>& actions)
+{
+    std::vector<std::pair<uint64_t, uint32_t>> tempos;
+    for (const Action& a : actions)
+    {
+        if (a.kind == Action::kTempo)
+        {
+            tempos.emplace_back(a.tick, a.value);
+        }
+    }
+
+    const auto by_tick = [](const auto& a, const auto& b)
+    {
+        return a.first < b.first;
+    };
+    std::stable_sort(tempos.begin(), tempos.end(), by_tick);
+
+    return tempos;
+}
+
+// Returns the tick at which each frame from 0 to `frames` starts, as TickClock gives it, following the tempo changes in
+// `actions` in the order of their ticks. The tempo track can play a tick a frame later than other tracks, so a tempo
+// change can come in a frame that starts after its tick.
+std::vector<uint64_t> FrameStarts(const std::vector<Action>& actions, uint32_t per_quarter, uint32_t frames)
+{
+    const std::vector<std::pair<uint64_t, uint32_t>> tempos = TempoChanges(actions);
+    TickClock clock(per_quarter);
+    std::vector<uint64_t> starts;
+    size_t next = 0;
+    for (uint32_t f = 0; f <= frames; f++)
+    {
+        while (next < tempos.size() &&
+               (!clock.Known() || clock.TickTime(tempos[next].first) <= int64_t(f) * kFrameTime))
+        {
+            clock.SetTempo(tempos[next].first, tempos[next].second);
+            next++;
+        }
+        starts.push_back(clock.FrameTick(f));
+    }
+
+    return starts;
+}
+
+// Returns the tick at which the first frame that reaches `tick` starts.
+uint64_t OnFrame(const std::vector<uint64_t>& starts, uint64_t tick)
+{
+    const auto it = std::lower_bound(starts.begin(), starts.end(), tick);
+    return it == starts.end() ? starts.back() : *it;
+}
+
+// Returns the tick at which the frame that plays `tick` starts: the last frame that starts at or before it, as on every
+// track but the tempo track. `starts` holds what FrameStarts() gives for `actions`.
+uint64_t PlayingFrame(const std::vector<Action>& actions, uint32_t per_quarter, const std::vector<uint64_t>& starts,
+                      uint64_t tick)
+{
+    // The frame that plays the tick is the one its time falls in, with the tempo changes up to it, as FrameStarts()
+    // follows them.
+    TickClock clock(per_quarter);
+    for (const auto& [at, tempo] : TempoChanges(actions))
+    {
+        if (clock.Known() && at > tick)
+        {
+            break;
+        }
+
+        clock.SetTempo(at, tempo);
+    }
+
+    const uint64_t frame = uint64_t(clock.TickTime(tick) / kFrameTime);
+    return starts[size_t(std::min<uint64_t>(frame, starts.size() - 1))];
+}
+
+// Runs the model until the plan's end or until the driver has stopped the tune, for an hour at most. With
+// `frame_timing`, each action but a tempo change, and each pitch change, goes at the start of the frame the driver
+// plays it in, and the note ons at or after the end are left out.
+Simulation Simulate(const Rom& rom, const DriverInfo& info, int song, const TuneHeader& header, const Plan& plan,
+                    bool frame_timing)
 {
     Simulation sim;
     Sequencer seq(rom, info, song);
@@ -197,7 +280,7 @@ Simulation Simulate(const Rom& rom, const DriverInfo& info, int song, const Tune
             last[size_t(ch)] = offset;
             const bool vibrato = seq.Channel(ch).modulation != 0;
             const int64_t at = command_tick[size_t(ch)];
-            sim.pitches.push_back({!vibrato && at >= 0 ? uint64_t(at) : frame_tick, ch, offset});
+            sim.pitches.push_back({!vibrato && at >= 0 ? uint64_t(at) : frame_tick, ch, offset, f});
         }
 
         // Stop once every track has read up to the end, and the frames have reached it. A track counts the ticks of a
@@ -220,6 +303,31 @@ Simulation Simulate(const Rom& rom, const DriverInfo& info, int song, const Tune
         sim.cut_off = clock.FrameTick(frames);
     }
     sim.warnings.insert(sim.warnings.end(), seq.Warnings().begin(), seq.Warnings().end());
+
+    if (frame_timing)
+    {
+        // The notes at or after the end, which start the loop's next pass, can come in the frame that plays the end,
+        // whose start is before it. They aren't converted, as without frame timing.
+        const uint64_t end = sim.cut_off ? std::min(plan.end, *sim.cut_off) : plan.end;
+        const auto after_end = [end](const Action& a)
+        {
+            return (a.kind == Action::kNoteOn || a.kind == Action::kNoteDropped) && a.tick >= end;
+        };
+        sim.actions.erase(std::remove_if(sim.actions.begin(), sim.actions.end(), after_end), sim.actions.end());
+
+        sim.frame_starts = FrameStarts(sim.actions, header.ticks_per_quarter, frames);
+        for (Action& a : sim.actions)
+        {
+            if (a.kind != Action::kTempo)
+            {
+                a.tick = sim.frame_starts[std::min(a.frame, frames)];
+            }
+        }
+        for (PitchChange& p : sim.pitches)
+        {
+            p.tick = sim.frame_starts[std::min(p.frame, frames)];
+        }
+    }
 
     return sim;
 }
@@ -254,6 +362,7 @@ std::vector<Note> CollectNotes(const Simulation& sim, const Plan& plan, uint16_t
     {
         keys.fill(-1);
     }
+    std::array<std::array<int, 128>, kChannels> latest = owner; // each key's last note, which may have ended
     std::vector<int> slot_note(size_t(slot_count), -1), slot_level(size_t(slot_count), 0);
 
     // A track can play a note just before it gives the channel its first program, at the same tick. The game plays the
@@ -347,6 +456,15 @@ std::vector<Note> CollectNotes(const Simulation& sim, const Plan& plan, uint16_t
                 close(held, on);
             }
 
+            // A note lasts at least a tick, even one that the driver releases in the frame it starts in, whose release
+            // frame timing puts on its start's tick. So where the key's last note ends after this one's start, this one
+            // starts as it ends, or a tick later if that note is in a later track, as above.
+            int& previous = latest[a.channel][a.a & 0x7F];
+            if (previous >= 0 && notes[size_t(previous)].off > on)
+            {
+                on = notes[size_t(previous)].off + (notes[size_t(previous)].track > a.track ? 1 : 0);
+            }
+
             Note n;
             n.track = a.track;
             n.channel = a.channel;
@@ -359,6 +477,7 @@ std::vector<Note> CollectNotes(const Simulation& sim, const Plan& plan, uint16_t
             n.frame = a.frame;
             notes.push_back(n);
             held = int(notes.size()) - 1;
+            previous = held;
             slot_note[size_t(a.slot)] = held;
         }
         else if (a.kind == Action::kNoteOff)
@@ -538,11 +657,11 @@ struct ProgramChange
     int program;
 };
 
-// Makes the MIDI file play each note with the program that the driver plays it with. A player takes a tick's events
-// track by track, and in a track program changes before note ons, where the driver runs each track's commands of a
-// frame in turn. So where a track gives a channel a new program on the tick of one of its notes after the note, or a
-// track before it in the file does on the same tick, the note would play with the new program. Such a note goes before
-// its track's program changes on its tick, or gets a program change of its own.
+// Preserves the driver's program for each note despite differences in event ordering. A player takes a tick's events
+// track by track, and within a track, program changes before note-ons, where the driver runs each track's commands of a
+// frame in order. So a program change on a note's channel and tick, after the note in its track or on an earlier track
+// in the file, would give the note the wrong program. Such a note moves before its track's program changes on its tick,
+// or gets a program change of its own.
 void MatchPrograms(std::vector<Note>& notes, std::vector<ProgramChange>& programs)
 {
     auto in_file_order = [](const ProgramChange& a, const ProgramChange& b)
@@ -697,12 +816,45 @@ bool WriteMidi(const std::string& path, const std::string& title, const std::str
         }
     }
 
+    // A player that jumps back to the loop's start keeps the bends that the loop's end left, as the game does until the
+    // loop's first bend or program change on the channel sets its pitch. So each channel's bend is written again there,
+    // unless it changes there or before, or the loop starts with the tune.
+    std::array<uint64_t, kChannels> loop_set;
+    loop_set.fill(plan.end);
+    for (const Action& a : sim.actions)
+    {
+        if ((a.kind == Action::kBend || a.kind == Action::kProgram) && a.tick >= plan.loop_start)
+        {
+            loop_set[size_t(a.channel)] = std::min(loop_set[size_t(a.channel)], a.tick);
+        }
+    }
+
+    std::array<int64_t, kChannels> loop_offset = {};
     for (const PitchChange& p : sim.pitches)
     {
+        if (p.tick < plan.loop_start)
+        {
+            loop_offset[size_t(p.channel)] = p.offset;
+        }
+        else if (p.tick <= loop_set[size_t(p.channel)])
+        {
+            loop_set[size_t(p.channel)] = plan.end;
+        }
+
         if (home[size_t(p.channel)] && range[size_t(p.channel)] > 0 && p.tick < plan.end)
         {
             home[size_t(p.channel)]->PitchBend(uint32_t(p.tick), p.channel,
                                                BendValue(p.offset, range[size_t(p.channel)]));
+        }
+    }
+
+    for (int ch = 0; ch < kChannels; ch++)
+    {
+        if (plan.loops && plan.loop_start > 0 && loop_set[size_t(ch)] < plan.end && home[size_t(ch)] &&
+            range[size_t(ch)] > 0)
+        {
+            home[size_t(ch)]->PitchBend(uint32_t(loop_set[size_t(ch)]), ch,
+                                        BendValue(loop_offset[size_t(ch)], range[size_t(ch)]));
         }
     }
 
@@ -729,17 +881,27 @@ SongSummary Run(const Rom& rom, const DriverInfo& info, int song, const ConvertO
     }
 
     Plan plan = PlanTune(rom, info, header, opt.loops);
-    const Simulation sim = Simulate(rom, info, song, header, plan);
+    const Simulation sim = Simulate(rom, info, song, header, plan, opt.frame_timing);
 
     // A tune that the model gave up on ends where it stopped.
     if (sim.cut_off)
     {
         plan.end = std::min(plan.end, *sim.cut_off);
     }
+    Summarize(sim, plan, header.ticks_per_quarter, sum);
+
+    // With frame timing, the loop's start and end go at the start of the frames that play them, as their events do, so
+    // that each pass's first events fall on the same side of the marker. The end goes at the start of the first frame
+    // that reaches it, after the frame that plays it.
+    if (opt.frame_timing)
+    {
+        plan.loop_start = PlayingFrame(sim.actions, header.ticks_per_quarter, sim.frame_starts, plan.loop_start);
+        plan.loop_end = PlayingFrame(sim.actions, header.ticks_per_quarter, sim.frame_starts, plan.loop_end);
+        plan.end = OnFrame(sim.frame_starts, plan.end);
+    }
 
     sum.warnings = sim.warnings;
     const std::vector<Note> notes = CollectNotes(sim, plan, opt.track_mask, kChannels * info.slots_per_channel);
-    Summarize(sim, plan, header.ticks_per_quarter, sum);
 
     std::set<int> tracks;
     for (const Note& n : notes)

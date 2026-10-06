@@ -91,6 +91,9 @@ struct TrackLayout
     uint64_t last_command = 0; // the tick of a track without a loop's last command other than a delay or the end
 };
 
+// The most commands of a track that ScanTrack() and detection read before they give up on finding its end.
+constexpr int kMaxTrackCommands = 1000000;
+
 // Reads the loop and end of the track at `address`. A loop ends at the first loop end controller after a loop start.
 TrackLayout ScanTrack(const Rom& rom, uint32_t address, Format format);
 

@@ -5,9 +5,11 @@
 
     compare_notes.py ROM SUPERGBAMIDI FOLDER [--songs 0-22] [--frames 12000]
 
-FOLDER holds supergbamidi's conversion of ROM: NAME_NN.mid and NAME_NN.sf2 for each song. For every song, the driver
-runs under driver_emu.py for as long as the MIDI file lasts, and the script works out from its register writes what each
-of the 6 channels plays in each frame. The MIDI file and the SoundFont have to play the same, channel by channel:
+FOLDER holds supergbamidi's conversion of ROM: NAME_NN.mid and NAME_NN.sf2 for each song, or NAME_quintet_NN.mid and
+NAME_quintet_NN.sf2 if detection finds another of the game's drivers first. For every song, the driver runs under
+driver_emu.py for as long as the MIDI file lasts, or until all of its channels have ended, and the script works out from
+its register writes what each of the 6 channels plays in each frame. The MIDI file and the SoundFont have to play the
+same, channel by channel:
 
   - the frames in which the channel sounds;
   - its pitch: on a square or wave channel, the frequency setting against the one the note's key stands for in the
@@ -16,6 +18,9 @@ of the 6 channels plays in each frame. The MIDI file and the SoundFont have to p
   - its level on each side, which CC10 and CC11 carry, to within 1.5 dB;
   - its waveform: a square's duty, the wave channel's 32 or 64 steps, or the bytes of a PCM sample.
 
+A MIDI note on a channel that the driver doesn't have, or one that starts after all of the driver's channels have
+ended, counts as a difference.
+
 The noise channel's drums are rendered into the SoundFont from the driver's writes to its registers, so for it the sides
 are checked, and the volume that the drum's sample has at each frame against the channel's. While the channel's
 envelope runs, a step either way is allowed, since the envelope steps on a clock that isn't tied to the frames.
@@ -23,7 +28,10 @@ envelope runs, a step either way is allowed, since the envelope steps on a clock
 MIDI notes land on their own ticks, where the driver plays them at the start of the frame that reaches them, and each
 frame's changes come as far into the frame as the note's start. So each frame of the driver is compared with that
 stretch of the MIDI file, or failing that, with the MIDI file anywhere from half a frame before the frame to half a
-frame after the next. SUPERGBAMIDI is used for its --info report, which names the driver's tables.
+frame after the next. The MIDI file is timed as a player plays it, at tempos of whole microseconds a quarter note,
+which can put a note a little ahead of the driver's frames or behind them, so a note that starts that close to a
+frame's start may belong to the end of the frame before. SUPERGBAMIDI is used for its --info report, which names the
+driver's tables.
 """
 import argparse
 import bisect
@@ -34,12 +42,16 @@ import subprocess
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # for gbarom.py, in tools/
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # for conversion.py and gbarom.py, in tools/
+import conversion
 import driver_emu
 from compare_trace import parse_range
 from gbarom import ROM_BASE, load_rom
 
 FRAME_RATE = 16777216 / 280896
+# The MIDI file's tempos are whole microseconds a quarter note, up to half a microsecond off the exact ones, so by a
+# note's start, the file can be ahead of the driver or behind it by this many seconds for each quarter note before it.
+TEMPO_ROUNDING = 0.5e-6
 LEVEL_TOLERANCE_DB = 1.5
 PITCH_TOLERANCE_CENTS = 5
 # The points around a frame, in frames from its start, at which the MIDI file's state is looked up if the notes around
@@ -110,8 +122,9 @@ def signed(v):
 
 
 def read_midi(path):
-    """Returns the notes as dicts of channel, key, on and off seconds, bank and program, each channel's changes of CC10,
-    CC11 and pitch bend as {(channel, 10, 11 or 'bend'): (times, values)}, the bend ranges and the length in seconds."""
+    """Returns the notes as dicts of channel, key, on and off seconds, bank, program and drift (the most seconds by
+    which the tempos' rounding can have moved the start), each channel's changes of CC10, CC11 and pitch bend as
+    {(channel, 10, 11 or 'bend'): (times, values)}, the bend ranges and the length in seconds."""
     data = Path(path).read_bytes()
     division = struct.unpack('>H', data[12:14])[0]
     events = []
@@ -183,7 +196,8 @@ def read_midi(path):
     for tick, _, _, kind, ch, a, b in events:
         t = seconds(tick)
         if kind == 'on':
-            note = dict(channel=ch, key=a, on=t, off=None, bank=bank.get(ch, 0), program=program.get(ch, 0))
+            note = dict(channel=ch, key=a, on=t, off=None, bank=bank.get(ch, 0), program=program.get(ch, 0),
+                        drift=tick / division * TEMPO_ROUNDING)
             open_notes[(ch, a)] = note
             notes.append(note)
         elif kind == 'off' and (ch, a) in open_notes:
@@ -191,9 +205,9 @@ def read_midi(path):
         elif kind == 'program':
             program[ch] = a
         elif kind == 'cc' and a == 0:
-            bank[ch] = b << 7 | (bank.get(ch, 0) & 0x7F)
-        elif kind == 'cc' and a == 32:
-            bank[ch] = (bank.get(ch, 0) & ~0x7F) | b
+            # supergbamidi gives the SoundFont's bank number in CC0 alone, as FluidSynth reads it by default, and sets
+            # CC32 to 0.
+            bank[ch] = b
         elif kind == 'cc' and a in (10, 11):
             times, values = changes.setdefault((ch, a), ([], []))
             times.append(t)
@@ -221,7 +235,8 @@ def value_at(changes, key, t, default):
 
 def driver_tables(tool, rom_path):
     """Returns the frequency and PCM pitch tables' addresses from supergbamidi's --info report."""
-    text = subprocess.run([tool, '--info', rom_path], capture_output=True, encoding='utf-8', check=True).stdout
+    text = subprocess.run([tool, '--driver', 'quintet', '--info', rom_path], capture_output=True, encoding='utf-8',
+                          check=True).stdout
     frequency = int(re.search(r'frequency table 0x([0-9A-F]+)', text).group(1), 16)
     pcm = int(re.search(r'PCM pitch table 0x([0-9A-F]+)', text).group(1), 16)
     return frequency, pcm
@@ -497,10 +512,9 @@ def check_frame(c, want, have, info):
     return abs(cents) <= PITCH_TOLERANCE_CENTS, cents
 
 
-def check_song(rom, info, midi_path, sf2_path, frames_limit, report):
+def check_song(rom, info, song, midi_path, sf2_path, frames_limit, report):
     notes, changes, ranges, length = read_midi(midi_path)
     soundfont = SoundFont(sf2_path)
-    song = int(re.search(r'_(\d+)\.mid$', str(midi_path)).group(1))
     frames = min(frames_limit, int(length * FRAME_RATE))
     driver = driver_frames(rom, song, frames)
     by_channel = {}
@@ -520,9 +534,11 @@ def check_song(rom, info, midi_path, sf2_path, frames_limit, report):
         i = bisect.bisect_right(starts.get(c, []), (f + 2) / FRAME_RATE) - 1
         while i >= 0 and ch[i]['off'] * FRAME_RATE > f - 1:
             on, off = ch[i]['on'] * FRAME_RATE, ch[i]['off'] * FRAME_RATE
-            # A start within a rounding error of a frame's start may come at the end of the frame before.
-            into = max(0.0, on - math.floor(on + 0.001))
-            for offset in (into, 1.0) if into < 0.001 else (into,):
+            # A start within a rounding error of a frame's start, or as near as the tempos' rounding can have moved it,
+            # may come at the end of the frame before.
+            boundary = round(on)
+            near = abs(on - boundary) < 0.001 + ch[i]['drift'] * FRAME_RATE
+            for offset in (on - boundary, on - boundary + 1) if near else (on - math.floor(on),):
                 low, high = max(f + offset, on), min(f + 1 + offset, off)
                 if low < high:
                     out.append((low + high) / 2 - f)
@@ -545,9 +561,11 @@ def check_song(rom, info, midi_path, sf2_path, frames_limit, report):
         if len(zones) > 1:
             delay = 2 ** (signed(zones[1]['g'].get(33, 0x10000 - 12000)) / 1200)
             zone = zones[1] if t - note['on'] >= delay - 1e-6 else zones[0]
+        # A controller that the file doesn't set has the value that a player starts the channel with, so that a note
+        # on a channel without CC11 sounds, as it does in a player.
         bend = (value_at(changes, (c, 'bend'), t, 8192) - 8192) / 8192 * ranges.get(c, 2)
         state = dict(note=note, zone=zone, cc10=value_at(changes, (c, 10), t, 64),
-                     cc11=value_at(changes, (c, 11), t, 0), bend=bend, continued=t - note['on'] > 1.5 / FRAME_RATE)
+                     cc11=value_at(changes, (c, 11), t, 127), bend=bend, continued=t - note['on'] > 1.5 / FRAME_RATE)
         if c == 3:
             state['volume'] = sample_volume(zone, note['key'], t - note['on'])
         return state
@@ -581,6 +599,21 @@ def check_song(rom, info, midi_path, sf2_path, frames_limit, report):
                 have = midi_state(c, (f + 0.5) / FRAME_RATE)
                 problems.append('frame %d, %s: the driver plays %s, the MIDI file %s' % (
                     f, CHANNEL_NAMES[c], describe(want), describe_midi(have)))
+
+        # The driver starts no more notes once all of its channels have ended, and the frames above stop there, so a
+        # note that starts after the last of them plays nothing in the game. A start within a rounding error of a
+        # frame's start belongs to that frame, and the tempos' rounding can have moved a start past the last frame.
+        for n in by_channel.get(c, []):
+            on = n['on'] * FRAME_RATE
+            if len(driver) - 0.001 + n['drift'] * FRAME_RATE < on < frames - 1:
+                problems.append('frame %.1f, %s: the MIDI file starts key %d after the driver stopped in frame %d' % (
+                    on, CHANNEL_NAMES[c], n['key'], len(driver) - 1))
+
+    # The driver has 6 channels, so notes on any other MIDI channel would be checked against nothing.
+    for extra in sorted(ch for ch in by_channel if ch >= 6):
+        count = len(by_channel[extra])
+        problems.append('MIDI channel %d plays %d note%s, but the driver has 6 channels' % (
+            extra + 1, count, '' if count == 1 else 's'))
     report(song, checked, problems, worst)
     return not problems
 
@@ -621,6 +654,9 @@ def main():
     p.add_argument('-v', '--verbose', action='store_true', help='list every difference, not just the first ten')
     a = p.parse_args()
     rom = load_rom(a.rom)
+    files = conversion.midi_files(a.folder, 'quintet')
+    if not files:
+        raise SystemExit('found no MIDI files to check in %s' % a.folder)
     frequency_table, pcm_table = driver_tables(a.supergbamidi, a.rom)
     def table(address, count, form):
         return list(struct.unpack('<%d%s' % (count, form), rom[address - ROM_BASE:address - ROM_BASE + 2 * count]))
@@ -635,14 +671,17 @@ def main():
         for line in problems if a.verbose else problems[:10]:
             print('    ' + line)
 
-    midis = sorted((int(m.group(1)), path) for path in Path(a.folder).glob('*.mid')
-                   for m in [re.search(r'_(\d+)$', path.stem)] if m)
-    for song, midi in midis:
+    for song, midi in files:
         if wanted is not None and song not in wanted:
             continue
         total += 1
-        if not check_song(rom, info, midi, midi.with_suffix('.sf2'), a.frames, report):
+        if not check_song(rom, info, song, midi, midi.with_suffix('.sf2'), a.frames, report):
             failed += 1
+    # supergbamidi writes no files for a song that plays no notes.
+    for song in sorted((wanted or set()) - {s for s, _ in files}):
+        print('song %d: no MIDI file to check' % song)
+    if not total:
+        raise SystemExit('found none of the songs to check')
     print('%d of %d songs match the driver' % (total - failed, total))
     raise SystemExit(1 if failed else 0)
 

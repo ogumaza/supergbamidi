@@ -33,6 +33,10 @@ constexpr double kTickCounter = 150;
 // The tempo before a song sets one, in the driver's units: quarter notes a minute at 60 frames a second.
 constexpr int kDefaultTempo = 150;
 
+// The reverb level whose feedback comes closest to the echo of Camelot's mixer: 53/128 of each side's output from four
+// frames before.
+constexpr int kCamelotEcho = 53;
+
 // The MIDI channel that General MIDI players keep for drums, and the bank they look in for its programs.
 constexpr int kDrumChannel = 9;
 constexpr int kDrumBank = 128;
@@ -64,11 +68,10 @@ struct Plan
     uint64_t end = 0;
 };
 
-// Plans a song: a looping song plays its loop `loops` times, and a song without one goes on until its last track has
-// ended. The tracks of a song may loop at different points and lengths, and each goes on looping in its own way, so the
-// loop starts where every looping track has started its loop, and where every track without a loop has played its
-// last command and released its notes, and lasts until every looping track is back where its loop started, if that
-// isn't too long (see LoopLength()). Only the tracks its music player has room for count.
+// Plans the conversion: looping songs play `loops` passes; other songs run until the last track ends. Tracks can have
+// different loop points and lengths. The overall loop starts once all looping tracks have entered their loops and all
+// other tracks have played their last command and released their notes. It ends when all looping tracks return to their
+// loop starts, subject to the length limit in LoopLength(). Only tracks that fit in the music player count.
 Plan PlanSong(const Rom& rom, const SongHeader& header, int track_count, int loops)
 {
     Plan plan;
@@ -110,6 +113,7 @@ Plan PlanSong(const Rom& rom, const SongHeader& header, int track_count, int loo
 struct Simulation
 {
     std::vector<Action> actions;
+    std::vector<uint64_t> tick_ends; // the player's tick count after each frame
     std::vector<std::string> warnings;
     std::optional<uint64_t> cut_off; // the tick where the model gave up, at the frame limit
 };
@@ -119,11 +123,17 @@ Simulation Simulate(const Rom& rom, const DriverInfo& info, int song, const Plan
 {
     Simulation sim;
     Sequencer seq(rom, info, song);
+    if (plan.loops && plan.loop_start > 0)
+    {
+        seq.RestateFrom(plan.loop_start);
+    }
+
     uint32_t frames = 0;
     for (uint32_t f = 0; f < kMaxFrames; f++)
     {
         const std::vector<Action>& actions = seq.Step();
         sim.actions.insert(sim.actions.end(), actions.begin(), actions.end());
+        sim.tick_ends.push_back(seq.Tick());
         frames = f + 1;
         if (seq.Tick() > plan.end || seq.TracksEnded())
         {
@@ -415,9 +425,9 @@ struct TempoChange
 };
 
 // Returns the time each tick takes from each tick on, as the driver plays the song. Each frame adds the tempo to the
-// tick counter before the frame's ticks run, so where a song changes the tempo, the frame's progress towards the next
-// tick was counted at the old tempo. The next tick takes that progress at the old tempo and the rest at the new one.
-// Any ticks still due in the frame come first, at the old tempo.
+// tick counter before running any ticks. When a song changes tempo, progress towards the next tick has already been
+// counted at the old tempo. The next tick combines that progress with the remainder at the new tempo. Any ticks still
+// due in the current frame run first, at the old tempo.
 std::vector<TempoChange> TempoMap(const std::vector<Action>& actions)
 {
     std::vector<TempoChange> map = {{0, kTickCounter / kDefaultTempo}};
@@ -463,6 +473,90 @@ uint32_t QuarterMicros(double frames)
 {
     const double micros = 1e6 * kTicksPerQuarter * frames / kFrameRate;
     return uint32_t(std::clamp(std::lround(micros), 1L, 0xFFFFFFL));
+}
+
+// The MIDI file's ticks with frame timing, which puts each event at the start of the frame the driver plays it in. A
+// tick is a unit of the tempo, so a quarter note has 24 × 150 of them, and each frame lasts the tempo that it adds to
+// the driver's counter, and starts on a whole tick.
+struct FrameGrid
+{
+    std::vector<uint64_t> tick_ends;              // the player's tick count after each frame
+    std::vector<uint64_t> starts;                 // the MIDI tick each frame starts at, and the one after the last
+    std::vector<std::pair<uint64_t, int>> tempos; // the MIDI tick of each frame that changes the tempo, and the tempo
+};
+
+constexpr uint16_t kFrameQuarterTicks = uint16_t(kTicksPerQuarter * kTickCounter);
+
+// Returns the frame grid of a song. A frame adds the tempo that was set before it started; a tempo of 0 counts as 1, so
+// that each frame lasts a tick.
+FrameGrid MakeFrameGrid(const Simulation& sim)
+{
+    FrameGrid grid;
+    grid.tick_ends = sim.tick_ends;
+    grid.starts.push_back(0);
+    int tempo = kDefaultTempo;
+    size_t next = 0;
+    for (uint32_t f = 0; f < sim.tick_ends.size(); f++)
+    {
+        for (; next < sim.actions.size() && sim.actions[next].frame < f; next++)
+        {
+            if (sim.actions[next].kind == Action::kTempo)
+            {
+                tempo = std::max(sim.actions[next].value, 1);
+            }
+        }
+
+        if (grid.tempos.empty() || grid.tempos.back().second != tempo)
+        {
+            grid.tempos.push_back({grid.starts.back(), tempo});
+        }
+        grid.starts.push_back(grid.starts.back() + uint64_t(tempo));
+    }
+
+    return grid;
+}
+
+// Returns the MIDI tick of the start of the frame that the driver plays song tick `tick` in.
+uint32_t FrameTick(const FrameGrid& grid, uint64_t tick)
+{
+    const auto it = std::upper_bound(grid.tick_ends.begin(), grid.tick_ends.end(), tick);
+    const size_t f = size_t(it - grid.tick_ends.begin());
+    return uint32_t(grid.starts[std::min(f, grid.starts.size() - 1)]);
+}
+
+// Returns the first song tick whose events go on the loop's start marker: the loop's start, or with frame timing, the
+// first tick of the frame that plays it.
+uint64_t LoopFrom(const Plan& plan, const FrameGrid* frames)
+{
+    if (!frames)
+    {
+        return plan.loop_start;
+    }
+
+    const auto played = std::upper_bound(frames->tick_ends.begin(), frames->tick_ends.end(), plan.loop_start);
+    return played == frames->tick_ends.begin() ? 0 : *std::prev(played);
+}
+
+// Writes the MIDI file. With frame timing, the events go at the start of the frames the driver plays them in, and the
+// conductor track, which has no tempos yet, gets the frames' tempos.
+bool WriteMidiFile(MidiFile& midi, MidiTrack& conductor, const FrameGrid* frames, const std::string& path,
+                   std::string& error)
+{
+    if (frames)
+    {
+        const auto place = [&](uint32_t tick)
+        {
+            return FrameTick(*frames, tick);
+        };
+        midi.Retime(place);
+        for (const auto& [tick, tempo] : frames->tempos)
+        {
+            conductor.Tempo(uint32_t(tick), QuarterMicros(kTickCounter / tempo));
+        }
+        midi.SetDivision(kFrameQuarterTicks);
+    }
+
+    return midi.Write(path, error);
 }
 
 // Returns the elapsed seconds at `tick`, at the GBA's frame rate.
@@ -530,9 +624,14 @@ int PsgPitch(const Note& n, int pitch)
     return pitch - (zone_key - n.play_key) * 256;
 }
 
-// Returns the pitch offsets the MIDI file gives each track, from the model's pitch changes. While every note a track
-// plays is a PSG note, the offset follows what the driver plays for the newest of them (see PsgPitch()).
-std::vector<PitchPoint> PitchPoints(const Simulation& sim, const std::vector<Note>& notes, const Plan& plan)
+// Builds each track's MIDI pitch offsets from the model's pitch changes. While all of a track's notes are PSG notes,
+// the offset follows the pitch that the driver plays the newest of them at (see PsgPitch()), through that note's
+// release while no other note plays. A looping player retains the offset from the loop's end, as the game does until
+// the loop sets the track's pitch, which the model then reports (see Sequencer::RestateFrom()), or starts a PSG note
+// whose offset depends on its key, so the offset is written there even if it hasn't changed. `loop_from` is the first
+// tick on the loop-start marker.
+std::vector<PitchPoint> PitchPoints(const Simulation& sim, const std::vector<Note>& notes, const Plan& plan,
+                                    uint64_t loop_from)
 {
     std::vector<PitchPoint> points;
     for (int t = 0; t < 16; t++)
@@ -561,11 +660,14 @@ std::vector<PitchPoint> PitchPoints(const Simulation& sim, const std::vector<Not
         }
         std::stable_sort(mine.begin(), mine.end(), [](const Note* a, const Note* b) { return a->on < b->on; });
 
-        // Sweep the ticks, keeping the notes that play at each.
+        // Sweep the ticks, keeping the notes that play at each, and the newest of the last ones that played if they
+        // were all PSG notes, whose release goes on at the pitch the driver plays it at until another note starts.
         std::vector<const Note*> playing;
+        const Note* tail = nullptr;
         size_t next = 0;
         int pitch = 0;
         int last = 0x7FFFFFFF;
+        bool before_loop = plan.loops && plan.loop_start > 0;
         for (uint64_t tick : ticks)
         {
             if (tick >= plan.end && tick > 0)
@@ -591,7 +693,19 @@ std::vector<PitchPoint> PitchPoints(const Simulation& sim, const std::vector<Not
                 newest = !newest || n->on >= newest->on ? n : newest;
             }
 
-            const int value = newest && all_psg ? PsgPitch(*newest, pitch) : pitch;
+            if (newest)
+            {
+                tail = all_psg ? newest : nullptr;
+            }
+
+            const int value = tail ? PsgPitch(*tail, pitch) : pitch;
+            const bool sets = found != raw.end() || (tail && tail->on == tick && value != pitch);
+            if (before_loop && tick >= loop_from && sets)
+            {
+                before_loop = false;
+                last = 0x7FFFFFFF;
+            }
+
             if (value != last)
             {
                 points.push_back({tick, t, value});
@@ -748,7 +862,7 @@ Presets AddPresets(SoundfontBuilder& sf, const SongHeader& header, const std::ve
     Presets presets;
     for (const Note& n : notes)
     {
-        const int instrument = sf.InstrumentFor(header.voices + 12 * uint32_t(n.program));
+        const int instrument = sf.InstrumentFor(header.voices + 12 * uint32_t(n.program), n.key);
         if (instrument < 0)
         {
             presets.missing.insert(n.program);
@@ -826,10 +940,44 @@ void MatchPrograms(std::vector<Note>& notes, std::vector<ProgramChange>& program
     }
 }
 
+// Returns copies of the voice, volume and pan settings in the loop-end tick, moved to the loop start, where they match
+// settings inherited by the marked pass. The next pass begins on the loop-end tick, but a looping player jumps back
+// before playing those events. Repeating the settings at the start restores the values that would otherwise be missed.
+std::vector<Action> LoopEndSettings(const Simulation& sim, const Plan& plan)
+{
+    // Each track's last voice, volume and pan up to the loop's start, and the ones it sets in the loop end's tick.
+    std::map<std::pair<int, int>, const Action*> start, end;
+    for (const Action& a : sim.actions)
+    {
+        const bool setting = a.kind == Action::kVoice || a.kind == Action::kVolume || a.kind == Action::kPan;
+        if (setting && a.tick <= plan.loop_start)
+        {
+            start[{a.track, a.kind}] = &a;
+        }
+        if (setting && a.tick == plan.loop_end)
+        {
+            end[{a.track, a.kind}] = &a;
+        }
+    }
+
+    std::vector<Action> settings;
+    for (const auto& [key, a] : end)
+    {
+        const auto before = start.find(key);
+        if (before != start.end() && before->second->tick < plan.loop_start && before->second->a == a->a)
+        {
+            settings.push_back(*a);
+            settings.back().tick = plan.loop_start;
+        }
+    }
+
+    return settings;
+}
+
 // Adds the conductor track: the title, the loop markers and the tempo, at the GBA's speed, since the driver's tempo is
-// for 60 frames a second.
-void AddConductor(MidiFile& midi, const std::string& title, const std::string& about,
-                  const std::vector<TempoChange>& map, const Plan& plan)
+// for 60 frames a second, and returns it.
+MidiTrack& AddConductor(MidiFile& midi, const std::string& title, const std::string& about,
+                        const std::vector<TempoChange>& map, const Plan& plan)
 {
     MidiTrack& conductor = midi.AddTrack();
     conductor.Name(title);
@@ -848,6 +996,8 @@ void AddConductor(MidiFile& midi, const std::string& title, const std::string& a
             conductor.Tempo(uint32_t(change.tick), QuarterMicros(change.frames));
         }
     }
+
+    return conductor;
 }
 
 // Writes the MIDI file: a conductor track, then a track for each of the song's tracks that plays notes, on the MIDI
@@ -855,10 +1005,11 @@ void AddConductor(MidiFile& midi, const std::string& title, const std::string& a
 // preset that `presets` gives for it.
 bool WriteMidi(const std::string& path, const std::string& title, const std::string& about, const Simulation& sim,
                const std::vector<TempoChange>& map, const Plan& plan, std::vector<Note> notes,
-               const std::array<int, 16>& channel, const Presets* presets, int reverb, std::string& error)
+               const std::array<int, 16>& channel, const Presets* presets, int reverb, const FrameGrid* frames,
+               std::string& error)
 {
     MidiFile midi(kTicksPerQuarter);
-    AddConductor(midi, title, about, map, plan);
+    MidiTrack& conductor = AddConductor(midi, title, about, frames ? std::vector<TempoChange>() : map, plan);
 
     std::array<bool, 16> plays = {};
     for (const Note& n : notes)
@@ -877,8 +1028,13 @@ bool WriteMidi(const std::string& path, const std::string& title, const std::str
         }
     }
 
+    // The model's actions, and the settings that the loop's end gives the next pass where the marked pass has them.
+    std::vector<Action> actions = sim.actions;
+    const std::vector<Action> loop_end = LoopEndSettings(sim, plan);
+    actions.insert(actions.end(), loop_end.begin(), loop_end.end());
+
     std::vector<ProgramChange> programs;
-    for (const Action& a : sim.actions)
+    for (const Action& a : actions)
     {
         if (a.tick >= plan.end)
         {
@@ -915,7 +1071,7 @@ bool WriteMidi(const std::string& path, const std::string& title, const std::str
         }
     }
 
-    const std::vector<PitchPoint> points = PitchPoints(sim, notes, plan);
+    const std::vector<PitchPoint> points = PitchPoints(sim, notes, plan, LoopFrom(plan, frames));
     const std::array<int, 16> range = BendRanges(points);
     for (const PitchPoint& p : points)
     {
@@ -960,7 +1116,7 @@ bool WriteMidi(const std::string& path, const std::string& title, const std::str
         mt.NoteOff(uint32_t(n.off), ch, n.key);
     }
 
-    return midi.Write(path, error);
+    return WriteMidiFile(midi, conductor, frames, path, error);
 }
 
 // Each track's volume, pan and pitch offset from each tick on, as the model reports them.
@@ -1009,7 +1165,7 @@ int SettingAt(const std::map<uint64_t, int>& changes, uint64_t tick, int fallbac
 // stops, where an All Sound Off cuts off the note's release. With a shared SoundFont, each program change selects the
 // bank and program of the preset that `presets` gives for it.
 void WriteVoiceChannel(MidiTrack& mt, int ch, const std::vector<const Note*>& notes, const TrackSettings& settings,
-                       const Presets* presets, const Plan& plan, int reverb)
+                       const Presets* presets, const Plan& plan, uint64_t loop_from, int reverb)
 {
     // The channel's settings, written only where they change, or where they're unknown, and its pitch offsets, which
     // wait for the bend range.
@@ -1050,8 +1206,8 @@ void WriteVoiceChannel(MidiTrack& mt, int ch, const std::vector<const Note*>& no
         const Note& n = *notes[i];
 
         // A player that jumps back to the loop's start keeps the settings that the loop's end left, so the channel's
-        // first note in the loop sets them all again.
-        if (plan.loops && n.on >= plan.loop_start && (i == 0 || notes[i - 1]->on < plan.loop_start))
+        // first note from the loop's start marker, whose first tick is `loop_from`, sets them all again.
+        if (plan.loops && n.on >= loop_from && (i == 0 || notes[i - 1]->on < loop_from))
         {
             preset = {-1, -1};
             volume.reset();
@@ -1135,12 +1291,14 @@ void WriteVoiceChannel(MidiTrack& mt, int ch, const std::vector<const Note*>& no
 // then a track for each of those channels, named after it, in the order of the MIDI channels that `sound` gives them.
 bool WriteVoiceMidi(const std::string& path, const std::string& title, const std::string& about, const Simulation& sim,
                     const std::vector<TempoChange>& map, const Plan& plan, const std::vector<Note>& notes,
-                    const std::array<int, 16>& sound, const Presets* presets, int reverb, std::string& error)
+                    const std::array<int, 16>& sound, const Presets* presets, int reverb, const FrameGrid* frames,
+                    std::string& error)
 {
     MidiFile midi(kTicksPerQuarter);
-    AddConductor(midi, title, about, map, plan);
+    MidiTrack& conductor = AddConductor(midi, title, about, frames ? std::vector<TempoChange>() : map, plan);
 
     const TrackSettings settings = SettingsOf(sim, plan);
+    const uint64_t loop_from = LoopFrom(plan, frames);
     for (int ch = 0; ch < 16; ch++)
     {
         if (sound[size_t(ch)] < 0)
@@ -1161,10 +1319,10 @@ bool WriteVoiceMidi(const std::string& path, const std::string& title, const std
         MidiTrack& mt = midi.AddTrack();
         mt.Name(SoundChannelName(sound[size_t(ch)]));
         mt.SetEnd(uint32_t(plan.end));
-        WriteVoiceChannel(mt, ch, mine, settings, presets, plan, reverb);
+        WriteVoiceChannel(mt, ch, mine, settings, presets, plan, loop_from, reverb);
     }
 
-    return midi.Write(path, error);
+    return WriteMidiFile(midi, conductor, frames, path, error);
 }
 
 // Converts a song, writing its files if `write` is set.
@@ -1214,7 +1372,7 @@ SongSummary Run(const Rom& rom, const DriverInfo& info, int song, const ConvertO
     if (collected.dropped)
     {
         sum.warnings.push_back(std::to_string(collected.dropped) + " note" + (collected.dropped == 1 ? "" : "s") +
-                               " found no channel free; left out of the MIDI file, as in the game");
+                               " had no available sound channel; omitted from the MIDI file to match the game");
     }
 
     sum.tracks = int(tracks.size());
@@ -1260,8 +1418,13 @@ SongSummary Run(const Rom& rom, const DriverInfo& info, int song, const ConvertO
         sum.warnings.push_back("the shared SoundFont has no free preset left for some of its voices");
     }
 
-    // The song's reverb, if it sets one, or else the driver's.
-    const int reverb = header.reverb & 0x80 ? header.reverb & 0x7F : info.reverb;
+    // The song's reverb, if it sets one, or else the driver's. Camelot's mixer has an echo of its own instead, the same
+    // in every song, which feeds back about as much as the driver's reverb at its level.
+    int reverb = header.reverb & 0x80 ? header.reverb & 0x7F : info.reverb;
+    if (info.camelot_mixer)
+    {
+        reverb = kCamelotEcho;
+    }
 
     // The files' names and titles, and the MIDI file's description.
     const std::string number = SongNumber(song, info.song_count);
@@ -1274,10 +1437,13 @@ SongSummary Run(const Rom& rom, const DriverInfo& info, int song, const ConvertO
     std::string error;
     sum.midi_path = stem + ".mid";
     const Presets* shared_presets = shared ? &presets : nullptr;
-    const bool written = opt.voice_channels ? WriteVoiceMidi(sum.midi_path, title, about, sim, map, plan,
-                                                             collected.notes, sound, shared_presets, reverb, error)
-                                            : WriteMidi(sum.midi_path, title, about, sim, map, plan, collected.notes,
-                                                        channel, shared_presets, reverb, error);
+    const FrameGrid frames = opt.frame_timing ? MakeFrameGrid(sim) : FrameGrid();
+    const FrameGrid* framed = opt.frame_timing ? &frames : nullptr;
+    const bool written = opt.voice_channels
+                             ? WriteVoiceMidi(sum.midi_path, title, about, sim, map, plan, collected.notes, sound,
+                                              shared_presets, reverb, framed, error)
+                             : WriteMidi(sum.midi_path, title, about, sim, map, plan, collected.notes, channel,
+                                         shared_presets, reverb, framed, error);
     if (!written)
     {
         sum.warnings.push_back(error);
@@ -1407,8 +1573,7 @@ bool DumpSong(const Rom& rom, const DriverInfo& info, int song, const std::strin
 
                 address = e.target;
             }
-            else if (c == kCmdFine || c == kCmdPatt || (c == kCmdXcmd && (e.arg[0] == 0 || e.arg[0] == 3)) ||
-                     (c > kCmdPend && c < kCmdMemAcc) || c == 0xC6 || c == 0xC7 || (c >= 0xC9 && c <= 0xCB))
+            else if (EndsTrack(c) || c == kCmdPatt || (c == kCmdXcmd && (e.arg[0] == 0 || e.arg[0] == 3)))
             {
                 break;
             }

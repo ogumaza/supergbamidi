@@ -55,4 +55,7 @@ struct DriverInfo
 // `error` empty if the game shows no sign of the driver.
 bool DetectDriver(const Rom& rom, const DriverOverrides& overrides, DriverInfo& info, std::string& error);
 
+// Returns `v` as 0x and 8 hexadecimal digits, for messages.
+std::string Hex(uint32_t v);
+
 } // namespace supergbamidi::rd2

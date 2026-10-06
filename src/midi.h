@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -73,6 +74,11 @@ public:
         end_ = std::max(end_, tick);
     }
 
+    // Moves each event, and the track's end, to the tick that `place` gives for its own tick, which mustn't put any two
+    // ticks out of order. A note whose note on and note off then come on the same tick no longer plays, so it's left
+    // out.
+    void Retime(const std::function<uint32_t(uint32_t)>& place);
+
     // Returns the track's events as the data of an MTrk chunk.
     std::vector<uint8_t> Encode() const;
 
@@ -115,6 +121,21 @@ public:
     {
         tracks_.emplace_back();
         return tracks_.back();
+    }
+
+    // Sets the ticks in a quarter note.
+    void SetDivision(uint16_t division)
+    {
+        division_ = division;
+    }
+
+    // Moves the events of every track, as MidiTrack::Retime() does.
+    void Retime(const std::function<uint32_t(uint32_t)>& place)
+    {
+        for (MidiTrack& track : tracks_)
+        {
+            track.Retime(place);
+        }
     }
 
     // Writes the file. Returns false and sets `error` if it can't be written.

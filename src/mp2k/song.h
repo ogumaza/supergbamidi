@@ -21,7 +21,7 @@ enum Command : uint8_t
     kCmdGoto = 0xB2,   // 4 bytes: an address to go on from
     kCmdPatt = 0xB3,   // 4 bytes: the address of a pattern to play, which ends at a kCmdPend
     kCmdPend = 0xB4,   // the end of a pattern
-    kCmdRept = 0xB5,   // a count and 4 bytes: an address to go back to, count times
+    kCmdRept = 0xB5,   // a count and 4 bytes: an address to go back to, so that the part plays count times in all
     kCmdMemAcc = 0xB9, // an operation, a byte of the memory area, a value, and an address for the conditional jumps
     kCmdPrio = 0xBA,   // the track's priority
     kCmdTempo = 0xBB,  // half the tempo, in quarter notes a minute
@@ -59,6 +59,10 @@ enum Xcommand : uint8_t
     kXcmdOffset = 0x0D,  // 4 bytes: the point in the sample that the track's notes start from
     kXcmdCount
 };
+
+// Returns true if a command ends the track: kCmdFine, and the command numbers that the driver's command table gives the
+// same handler.
+bool EndsTrack(uint8_t command);
 
 // Returns the length in ticks of wait or note length `index` (0-48).
 int ClockLength(int index);
@@ -144,7 +148,10 @@ struct Event
     uint8_t command = 0; // a Command, or a wait or note
     int args = 0;        // argument bytes
     uint8_t arg[4] = {};
-    uint32_t target = 0; // the address that kCmdGoto, kCmdPatt and kCmdRept go to, or kCmdMemAcc's conditional jump
+
+    // The address that kCmdGoto, kCmdPatt and kCmdRept go to, kCmdMemAcc's conditional jump, or the 4-byte argument of
+    // kXcmdWave or kXcmdOffset.
+    uint32_t target = 0;
 };
 
 // Decodes the command at `address`, after commands that left `running` as the running status (0 for none). Returns

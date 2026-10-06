@@ -64,10 +64,12 @@ struct Channel
     int prev = -1; // the track's list of channels, newest first
     int next = -1;
 
-    // A DirectSound channel's progress through its sample.
+    // A DirectSound channel's progress through its sample. Camelot's mixer plays a sample of no length as a synth
+    // voice, whose count holds the pulse wave's duty or the saw wave's filter, and whose fraction is the wave's phase.
     int32_t count = 0;     // the points left before the sample's end
     uint32_t fraction = 0; // 23 bits
     uint32_t position = 0; // the address of the point it plays, or the point's number in a compressed sample
+    bool synth = false;
 
     // A PSG channel's envelope and output settings.
     uint8_t goal = 0;    // the envelope's full level, 0-15
@@ -129,6 +131,14 @@ public:
 
     // Runs one frame of the driver's per-frame routine. Returns what the tracks and channels did in it, in order.
     const std::vector<Action>& Step();
+
+    // From tick `tick` on, has each track report its volume, pan and pitch where it first sets each of them, with a
+    // command or by clearing its LFO's swing, even if that leaves it unchanged. A player that jumps back to a loop's
+    // start keeps the settings that the loop's end left, as the game does until the loop sets them again.
+    void RestateFrom(uint64_t tick)
+    {
+        restate_from_ = tick;
+    }
 
     // Returns true once every track has ended.
     bool TracksEnded() const
@@ -211,6 +221,8 @@ private:
         int voice = -1;
         bool modified = false; // an extended command changed its copy of its voice
         int last_volume = -1, last_pan = -1, last_pitch = 0x7FFFFFFF;
+        uint8_t sets = 0;    // the settings it set in the tick, changed or not
+        uint8_t restate = 0; // the settings it reports where it next sets them
     };
 
     // Runs a tick of track `t`: counts down its notes, runs its commands that are due and moves its LFO on.
@@ -243,12 +255,20 @@ private:
     void LinkChannel(int index, int t);
     void UnlinkChannel(int index);
 
+    // Returns the channel a DirectSound note takes in Camelot's version of the driver, or -1 if there's none it can
+    // take.
+    int FindCamelotChannel(int t, int priority) const;
+
     void RunPsg();
     void SetPsgVolume(Channel& c) const;
     void RunDirect();
     void MixChannel(Channel& c, const Wave& wave);
 
-    // Records the track's volume, pan and pitch for the conversion if they changed.
+    // Moves a synth voice of Camelot's mixer on by a frame.
+    void MixSynth(Channel& c) const;
+
+    // Records the track's volume, pan and pitch for the conversion if they changed, or if it set them for the first
+    // time from RestateFrom()'s tick on.
     void ReportTrack(int t);
 
     void AddAction(Action action);
@@ -278,6 +298,7 @@ private:
 
     uint8_t c15_ = 0; // the PSG envelopes' frame counter, 14 down to 0
     uint32_t frame_ = 0;
+    uint64_t restate_from_ = ~uint64_t(0);
     std::vector<Action> actions_;
     std::vector<std::string> warnings_;
 };
@@ -285,6 +306,14 @@ private:
 // Returns the rate in Hz at which a sample whose header gives `frequency` (1024 times its rate for key 60) plays `key`,
 // raised by `fine`/256 of a semitone, as the driver's MidiKeyToFreq works it out.
 uint32_t KeyToFrequency(uint32_t frequency, int key, int fine);
+
+// Returns the rate as KeyToFrequency() does, as Camelot's version of MidiKeyToFreq works it out. It shifts the step to
+// the next semitone down by the octaves, where the driver shifts both semitones' rates and takes the difference, so the
+// two can round differently.
+uint32_t CamelotKeyToFrequency(uint32_t frequency, int key, int fine);
+
+// Returns the rate as KeyToFrequency() does, or as CamelotKeyToFrequency() does in Camelot's version of the driver.
+uint32_t SampleFrequency(const DriverInfo& info, uint32_t frequency, int key, int fine);
 
 // Returns the frequency setting of PSG channel `channel` (1-4) for `key`, raised by `fine`/256 of a semitone, as the
 // driver's MidiKeyToCgbFreq works it out: the 11-bit register value for channels 1-3, or a noise setting for 4.

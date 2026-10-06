@@ -101,6 +101,12 @@ public:
     // Monsters revisions' records have no pan, and 0 there.
     bool Trace(int song, long long frames, std::FILE* out, std::vector<std::string>& warnings) const override
     {
+        // Only the song table's entries are songs.
+        if (song < 0 || song >= info_.song_count)
+        {
+            return false;
+        }
+
         const std::unique_ptr<Sequencer> sequencer = Sequencer::Create(rom_, info_, song);
         Sequencer& seq = *sequencer;
         if (!seq.Valid())
@@ -137,6 +143,7 @@ private:
         ConvertOptions opt;
         opt.loops = settings.loops;
         opt.track_mask = settings.track_mask;
+        opt.frame_timing = settings.frame_timing;
         opt.out_dir = settings.out_dir;
         opt.base_name = settings.base_name;
 

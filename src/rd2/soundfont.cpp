@@ -63,10 +63,10 @@ int Timecents(double seconds)
     return std::clamp(int(std::lround(1200.0 * std::log2(seconds))), kInstant, 8000);
 }
 
-// Returns the SoundFont time for a fade to silence over `frames` frames. The driver's fade is a straight line in level,
-// which stays loud for most of its length, where a SoundFont's is a straight line in decibels, which drops sooner.
-// Stretching the SoundFont's keeps the loudness of the two close while the fade can be heard. A fade of a few frames
-// falls in steps, and needs less stretching than a longer one.
+// Returns the SoundFont duration for a fade to silence over `frames` frames. The driver's level falls linearly, so its
+// fade stays loud for most of its length, where a SoundFont's level falls linearly in decibels and becomes quiet
+// sooner. The SoundFont fade is lengthened to keep their loudness close while the fade is audible. Short fades fall in
+// larger steps and need less stretching.
 double FadeSeconds(double frames)
 {
     const double stretch = std::clamp(3.0 + 3.0 * (frames - 5) / 11.0, 3.0, 6.0);

@@ -39,7 +39,7 @@ def driver_records(rom, song, frames):
 
 
 def supergbamidi_records(tool, rom_path, song, frames):
-    text = subprocess.run([tool, '--trace', str(song), '--trace-frames', str(frames), rom_path],
+    text = subprocess.run([tool, '--driver', 'konami', '--trace', str(song), '--trace-frames', str(frames), rom_path],
                           capture_output=True, encoding='utf-8', check=True).stdout
     out = []
     for line in text.splitlines():
@@ -68,8 +68,8 @@ def main():
     rom = load_rom(a.rom)
     songs = parse_range(a.songs) if a.songs else None
     if songs is None:
-        info = subprocess.run([a.supergbamidi, '--info', a.rom], capture_output=True, encoding='utf-8',
-                              check=True).stdout
+        info = subprocess.run([a.supergbamidi, '--driver', 'konami', '--info', a.rom], capture_output=True,
+                              encoding='utf-8', check=True).stdout
         songs = [int(m.group(1)) for m in re.finditer(r'^\s+(\d+)\s+0x[0-9A-F]{8}\s', info, re.M)]
         if not songs:
             raise SystemExit('found no songs in the song list of supergbamidi --info')

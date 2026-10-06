@@ -18,9 +18,6 @@ namespace
 // The most commands DumpSong() lists for each track.
 constexpr int kMaxListedCommands = 200000;
 
-// The deepest F4 nests.
-constexpr size_t kMaxDepth = 3;
-
 std::string NoteName(int note)
 {
     static constexpr const char* kNames[12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
@@ -311,7 +308,7 @@ bool DumpSong(const Rom& rom, const DriverInfo& info, int song, const std::strin
                 }
                 continue;
             }
-            if (op == 0xF4 && stack.size() < kMaxDepth)
+            if (op == 0xF4 && stack.size() < size_t(kMaxDepth))
             {
                 stack.push_back(address + c.size);
                 address = sequence + c.target;

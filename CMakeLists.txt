@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 
 cmake_minimum_required(VERSION 3.20)
-project(supergbamidi VERSION 1.2.0 LANGUAGES CXX)
+project(supergbamidi VERSION 1.3.0 LANGUAGES CXX)
 
 # The name of the macOS droplet app.
 set(SUPERGBAMIDI_APP_NAME Supergbamidi)
@@ -20,11 +20,18 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 option(SUPERGBAMIDI_BUILD_TESTS "Build and register the tests" ON)
 
 add_library(supergbamidi_core STATIC
+    src/beat_grid.cpp
     src/inflate.cpp
     src/midi.cpp
     src/music.cpp
     src/rom.cpp
     src/sf2.cpp
+    src/brownie/convert.cpp
+    src/brownie/driver.cpp
+    src/brownie/music.cpp
+    src/brownie/sequencer.cpp
+    src/brownie/song.cpp
+    src/brownie/soundfont.cpp
     src/konami/convert.cpp
     src/konami/driver.cpp
     src/konami/music.cpp
@@ -112,7 +119,8 @@ endif()
 if(SUPERGBAMIDI_BUILD_TESTS)
     enable_testing()
     add_executable(supergbamidi_tests tests/test_main.cpp tests/test_util.cpp tests/konami_test.cpp tests/rare_test.cpp
-                                      tests/quintet_test.cpp tests/mp2k_test.cpp tests/rd2_test.cpp)
+                                      tests/quintet_test.cpp tests/mp2k_test.cpp tests/rd2_test.cpp
+                                      tests/brownie_test.cpp)
     target_link_libraries(supergbamidi_tests PRIVATE supergbamidi_core)
     add_test(NAME supergbamidi_tests COMMAND supergbamidi_tests)
 

@@ -206,7 +206,7 @@ class FifoModel:
         self.position = None
         self.step = 0.0
 
-    def write(self, address, size, value):
+    def write(self, address, value):
         if address == self.source:
             self.next_start = value - 32
         elif address == self.control:
@@ -248,7 +248,7 @@ def render(rom, song, frames, channels_wanted=None):
         for address, size, value in writes:
             apu.write(address, size, value)
             for fifo in fifos:
-                fifo.write(address, size, value)
+                fifo.write(address, value)
             if address == 0x04000082:
                 soundcnt_h = value
         acc += psg_model.FRAME_SAMPLES

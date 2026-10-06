@@ -19,12 +19,19 @@
 namespace supergbamidi::quintet
 {
 
+// The CPU cycles in a frame, and a second's.
+constexpr uint64_t kFrameCycles = 280896;
+constexpr uint64_t kSecondCycles = 16777216;
+
 // The level of a PSG channel at volume v (0-15), as a full-scale waveform, relative to a full-scale FIFO sample: 2v of
 // 128. That's how the GBA mixes them under the driver's settings: PSG at 100% and a master volume of 7.
 constexpr int kPsgLevelPerVolume = 2;
 
 // The level of a full-scale FIFO sample.
 constexpr int kFifoLevel = 128;
+
+// The names of the square channels' duty cycles.
+inline constexpr const char* kDutyNames[4] = {"12.5%", "25%", "50%", "75%"};
 
 // A wave channel's sound: the 32 steps of a bank, or the 64 of both, each 0-15.
 struct WaveShape

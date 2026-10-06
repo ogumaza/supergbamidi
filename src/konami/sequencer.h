@@ -171,7 +171,7 @@ protected:
     // Adds warning `what` about `track`'s data at `addr`, headed by the frame, the track and the address.
     void Warn(int track, uint32_t addr, const std::string& what);
 
-    // Records the first frame on which `track` passes its loop point, for LoopStartFrame().
+    // Records the frame on which `track` passes a loop point before the song first loops, for LoopStartFrame().
     void PassLoopPoint(int track);
 
     const Rom& rom_;
@@ -188,7 +188,7 @@ private:
     bool looped_last_frame_ = false;
     int loops_ = 0;
     int loop_track_ = -1;
-    std::array<int, kTracks> loop_frame_{}; // the frame each track passed its loop point, -1 if it hasn't
+    std::array<int, kTracks> loop_frame_{}; // the frame each track last passed a loop point in the first pass, or -1
     uint32_t frame_ = 0;
     std::vector<std::string> warnings_;
 };

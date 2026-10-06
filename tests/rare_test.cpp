@@ -110,9 +110,9 @@ public:
                            uint32_t(bend_range), vibrato_rate, uint32_t(vibrato_depth)});
     }
 
-    // Places a drum kit or key split whose key map gives each key in `keys` the instrument after it.
-    uint32_t Split(uint32_t type, const std::vector<std::pair<std::pair<int, int>, uint32_t>>& keys,
-                   int32_t bend_range = 2)
+    // Places a drum kit or key split, with a bend range of 2 semitones, whose key map gives each key in `keys` the
+    // instrument after it.
+    uint32_t Split(uint32_t type, const std::vector<std::pair<std::pair<int, int>, uint32_t>>& keys)
     {
         std::vector<uint8_t> map(128, 0xFF);
         std::vector<uint8_t> table;
@@ -130,9 +130,7 @@ public:
 
         const uint32_t map_at = Place(map, 1);
         const uint32_t table_at = Place(table);
-
-        return Instrument(
-            {type, 0xFFFFFFFF, 0, 0, 0, 0, 0, map_at, table_at, 0, 0, 0, 0, 0, uint32_t(bend_range), 0, 0});
+        return Instrument({type, 0xFFFFFFFF, 0, 0, 0, 0, 0, map_at, table_at, 0, 0, 0, 0, 0, 2, 0, 0});
     }
 
     // Places a program map and instrument table that give each program in `programs` its instrument. Returns the map
@@ -151,13 +149,12 @@ public:
         }
 
         const uint32_t map_at = Place(map, 1);
-
         return {map_at, Place(table)};
     }
 
-    // Places a tune with these tracks, and adds it to the tune table. Returns its header's address.
-    uint32_t Tune(const std::vector<std::vector<uint8_t>>& tracks, std::pair<uint32_t, uint32_t> bank,
-                  uint32_t ticks_per_quarter = 480)
+    // Places a tune with these tracks, at 480 ticks to the quarter note, and adds it to the tune table. Returns its
+    // header's address.
+    uint32_t Tune(const std::vector<std::vector<uint8_t>>& tracks, std::pair<uint32_t, uint32_t> bank)
     {
         std::vector<uint8_t> list;
         for (const std::vector<uint8_t>& t : tracks)
@@ -171,7 +168,7 @@ public:
 
         const uint32_t list_at = Place(list);
         std::vector<uint8_t> header;
-        for (uint32_t v : {uint32_t(tracks.size()), ticks_per_quarter, list_at, bank.first, bank.second})
+        for (uint32_t v : {uint32_t(tracks.size()), uint32_t(480), list_at, bank.first, bank.second})
         {
             for (int b = 0; b < 4; b++)
             {
@@ -779,6 +776,53 @@ void TestLoops()
     SUPERGBAMIDI_CHECK(std::fabs(r.seconds - 2.5 * kTempoScale) < 1e-9);
 }
 
+// A track bends back to the centre where its loop starts, where it already is the first time through, and bends up
+// later in the loop. A player that jumps back to the loop's start comes from the bend up, as the game does, so the
+// centre is written again there.
+void TestLoopBend()
+{
+    const Format kFormat = Format::kChannelByte;
+    Cart cart(kFormat);
+    const auto bank = cart.Bank({{5, cart.Sample(Saw(), 32)}});
+    cart.Tune({Track(kFormat)
+                   .Tempo(500000)
+                   .Wait(480)
+                   .Control(0, kCtrlLoopStart, 0)
+                   .Wait(960)
+                   .Control(0, kCtrlLoopEnd, 0)
+                   .End(),
+               Track(kFormat)
+                   .Program(1, 5)
+                   .Wait(480)
+                   .Control(1, kCtrlLoopStart, 0)
+                   .Bend(1, 0x2000)
+                   .On(1, 60, 100)
+                   .Wait(480)
+                   .Off(1, 60)
+                   .Bend(1, 0x3000)
+                   .Wait(480)
+                   .Control(1, kCtrlLoopEnd, 0)
+                   .End()},
+              bank);
+    const Rom rom = cart.ToRom();
+    const DriverInfo info = Detect(rom);
+
+    ConvertOptions opt;
+    opt.out_dir = Utf8(g_temp);
+    opt.base_name = "loop_bend";
+
+    const SongSummary r = ConvertSong(rom, info, 0, opt, nullptr);
+
+    using Events = std::vector<std::pair<uint32_t, std::vector<uint8_t>>>;
+    const Events kBends = {{0, {0xE1, 0x00, 0x40}},
+                           {480, {0xE1, 0x00, 0x40}},
+                           {960, {0xE1, 0x00, 0x60}},
+                           {1440, {0xE1, 0x00, 0x40}},
+                           {1920, {0xE1, 0x00, 0x60}}};
+    SUPERGBAMIDI_CHECK(r.ok);
+    SUPERGBAMIDI_CHECK(ReadMidi(r.midi_path).Find(0xE1) == kBends);
+}
+
 void TestLoopStarts()
 {
     // One track loops 960 ticks from the start, and the other 480 ticks from tick 480. The loop goes from tick 480,
@@ -947,6 +991,68 @@ void TestHourLimit()
     const auto offs = m.Find(0x81);
     SUPERGBAMIDI_CHECK(last / 960.0 * kTempoScale < 3620);
     SUPERGBAMIDI_CHECK(!offs.empty() && offs.back().first / 960.0 * kTempoScale > 3610);
+}
+
+void TestFrameTiming()
+{
+    // With frame timing, each event goes at the start of the frame the driver plays it in. Track 1 loops 1000 ticks,
+    // 62.5 frames, from tick 0: a note at the loop's start, and a grace note of the same key a tick before its end,
+    // which the driver releases on the frame it starts on. The grace note and the second pass's first note come on
+    // frame 62, which starts at tick 991, and the third pass's first note on frame 125, which starts at tick 1999.
+    const Format kFormat = Format::kChannelByte;
+    Cart cart(kFormat);
+    const auto bank = cart.Bank({{5, cart.Sample(Saw(), 32)}});
+    cart.Tune({Track(kFormat).Tempo(500000).Wait(9600).End(), Track(kFormat)
+                                                                  .Program(1, 5)
+                                                                  .Control(1, kCtrlLoopStart, 0)
+                                                                  .On(1, 60, 100)
+                                                                  .Wait(500)
+                                                                  .Off(1, 60)
+                                                                  .Wait(499)
+                                                                  .On(1, 60, 50)
+                                                                  .Wait(1)
+                                                                  .Off(1, 60)
+                                                                  .Control(1, kCtrlLoopEnd, 0)
+                                                                  .End()},
+              bank);
+    const Rom rom = cart.ToRom();
+    const DriverInfo info = Detect(rom);
+    ConvertOptions opt;
+    opt.out_dir = Utf8(g_temp);
+    opt.base_name = "frame_timing";
+    opt.frame_timing = true;
+
+    const SongSummary r = ConvertSong(rom, info, 0, opt, nullptr);
+
+    // The loop ends at the start of frame 62, so that it holds the first pass's first note but not the second's, nor
+    // the grace note on the same frame. The grace note lasts a tick, and the note after it starts as it ends. The
+    // conversion ends after the second pass, so the third pass's first note is left out.
+    SUPERGBAMIDI_CHECK(r.ok && !r.silent);
+    const MidiEvents m = ReadMidi(r.midi_path);
+    std::vector<std::pair<uint32_t, std::string>> markers;
+    for (const auto& e : m.tracks[0])
+    {
+        if (e.second[0] == 0xFF && e.second[1] == 0x06)
+        {
+            markers.push_back({e.first, std::string(e.second.begin() + 3, e.second.end())});
+        }
+    }
+    SUPERGBAMIDI_CHECK(markers.size() == 2 && markers[0] == std::make_pair(0u, std::string("loopStart")) &&
+                       markers[1] == std::make_pair(991u, std::string("loopEnd")));
+
+    std::vector<std::pair<uint32_t, int>> ons, offs;
+    for (const auto& e : m.Find(0x91))
+    {
+        ons.push_back({e.first, e.second[2]});
+    }
+    for (const auto& e : m.Find(0x81))
+    {
+        offs.push_back({e.first, e.second[1]});
+    }
+    const std::vector<std::pair<uint32_t, int>> kOns = {{0, 100}, {991, 50}, {992, 100}, {1983, 50}};
+    const std::vector<std::pair<uint32_t, int>> kOffs = {{495, 60}, {992, 60}, {1487, 60}, {1999, 60}};
+    SUPERGBAMIDI_CHECK(ons == kOns);
+    SUPERGBAMIDI_CHECK(offs == kOffs);
 }
 
 void TestConversion()
@@ -1314,10 +1420,12 @@ void RunTests()
     TestEnvelope();
     TestPitch();
     TestLoops();
+    TestLoopBend();
     TestLoopStarts();
     TestLoopLengths();
     TestTrackWithoutLoop();
     TestHourLimit();
+    TestFrameTiming();
     TestConversion();
     TestOtherDrumKitType();
     TestPrograms();

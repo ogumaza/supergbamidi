@@ -64,9 +64,11 @@ struct DriverInfo
     int song_count = 0;
     uint32_t sample_table = 0;
     uint32_t volume_table = 0;   // u8 [volume][64 pan levels], or [volume][16] in older revisions; 0 = not found
-    uint32_t psg_freq_table = 0; // u16 GB frequency per 1/32 semitone; 0 = not found
+    uint32_t psg_freq_table = 0; // u16 GB frequency per 1/32 semitone, or in Dungeon Dice Monsters per 1/16 semitone of
+                                 // notes 0-71, then noise settings and a vibrato part; 0 = not found
     uint32_t noise_table = 0;    // u16 NR43 (+flags) per noise note; 0 = not found
-    uint32_t wave_table = 0;     // 16-byte wave RAM images, [wave][16 volumes]; 0 = not found
+    uint32_t wave_table = 0;     // 16-byte wave RAM images, [wave][16 volumes], or in Dungeon Dice Monsters [wave] at
+                                 // full scale; 0 = not found
     uint32_t sfx_wave_table = 0; // the same for waves 80 and up (wave & 7F), which sound effects use; 0 = not found
     uint32_t timer_table = 0;    // u32 timer 0 setting per mixer mode; 0 = not found
     double mix_rate = 0;         // DirectSound mixer output rate in Hz; 0 in Dungeon Dice Monsters, which has no mixer
@@ -97,8 +99,8 @@ struct DriverOverrides
     double mix_rate = 0;
 };
 
-// Finds the driver's tables in `rom`. Returns false and sets `error` if the driver's tables are unusable, or returns
-// false with `error` empty if the game shows no sign of the driver.
+// Finds the driver's tables in `rom`. Returns false and sets `error` if the driver's tables are unusable, or missing
+// although its command reader is there, or returns false with `error` empty if the game shows no sign of the driver.
 bool DetectDriver(const Rom& rom, const DriverOverrides& overrides, DriverInfo& info, std::string& error);
 
 } // namespace supergbamidi::konami

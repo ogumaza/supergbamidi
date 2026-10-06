@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <map>
 #include <memory>
@@ -43,7 +44,13 @@ constexpr uint32_t kInitPool = kRomBase + 0x120;      // its literal pool
 constexpr uint32_t kSongStart = kRomBase + 0x200;     // the routine that starts a song
 constexpr uint32_t kSongStartPool = kRomBase + 0x228; // its literal pool
 constexpr uint32_t kSpecialTest = kRomBase + 0x300;   // the mixer's test for reversed and compressed samples
+constexpr uint32_t kMonoVolume = kRomBase + 0x340;    // the mono mixer's volume code, where a test puts it
 constexpr uint32_t kPlayerTable = kRomBase + 0x400;
+
+// Addresses of Camelot's changes in a test cartridge that has them.
+constexpr uint32_t kUnusedSongStart = kRomBase + 0x180; // a copy of the routine that starts a song, its pool zeroed
+constexpr uint32_t kCamelotSearch = kRomBase + 0x360;   // the note start's search for a channel
+constexpr uint32_t kCamelotPulse = kRomBase + 0x380;    // the mixer's pulse wave
 constexpr uint32_t kSongTable = kRomBase + 0x500;
 constexpr uint32_t kData = kRomBase + 0x1000; // storage for songs, voices and samples
 
@@ -52,6 +59,10 @@ constexpr uint32_t kMode = 0x0094C500;
 
 // A voice type: a DirectSound sample that plays at the mixer's rate.
 constexpr uint8_t kFixed = kVoiceFixed;
+
+// The routine that starts a song, with its call to MPlayStart, whose literal pool is 0x28 bytes after its start.
+constexpr uint16_t kSongStartCode[18] = {0xB500, 0x0400, 0x4A08, 0x4909, 0x0B40, 0x1840, 0x8883, 0x0059, 0x18C9,
+                                         0x0089, 0x1889, 0x680A, 0x6801, 0x1C10, 0xF000, 0xF800, 0xBC01, 0x4700};
 
 // Returns the index of `ticks` in the driver's table of note lengths and waits, or -1 if it isn't one of them.
 int LengthIndex(int ticks)
@@ -274,14 +285,54 @@ public:
         return Place(bytes);
     }
 
-    // Places a compressed sample of `points` points from its blocks of 33 bytes, which plays at `rate` for key 60.
-    uint32_t CompressedWave(const std::vector<uint8_t>& blocks, uint32_t points, uint32_t rate = 13379)
+    // Places a synth voice's sample for Camelot's mixer: a looping sample of no length, whose data is 0x80, the type,
+    // and `params`. It plays at 13379 Hz for key 60.
+    uint32_t Synth(uint8_t type, const std::vector<uint8_t>& params)
+    {
+        std::vector<uint8_t> bytes = {0, 0, 0, 0x40};
+        for (int b = 0; b < 4; b++)
+        {
+            bytes.push_back(uint8_t((13379 * 1024) >> (8 * b)));
+        }
+        bytes.resize(16, 0);
+        bytes.push_back(0x80);
+        bytes.push_back(type);
+        bytes.insert(bytes.end(), params.begin(), params.end());
+
+        return Place(bytes);
+    }
+
+    // Writes Camelot's changes: an unused copy of the routine that starts a song before the one the game uses, with its
+    // literal pool zeroed, the note start's search for a channel, and the mixer's pulse wave.
+    void WriteCamelot()
+    {
+        for (uint32_t i = 0; i < 18; i++)
+        {
+            Put16(kUnusedSongStart + 2 * i, kSongStartCode[i]);
+        }
+
+        const uint8_t kSearch[16] = {0x0A, 0x23, 0x50, 0x34, 0xC7, 0x27, 0x00, 0x22,
+                                     0x00, 0x26, 0x03, 0x20, 0x21, 0x78, 0x39, 0x42};
+        const uint8_t kPulse[20] = {0x02, 0x60, 0xD3, 0xE5, 0x06, 0x2C, 0x82, 0xE0, 0x04, 0x60,
+                                    0xD3, 0xE5, 0x06, 0x6C, 0x92, 0xE0, 0x06, 0x60, 0xE0, 0x41};
+        for (uint32_t i = 0; i < 16; i++)
+        {
+            Put8(kCamelotSearch + i, kSearch[i]);
+        }
+        for (uint32_t i = 0; i < 20; i++)
+        {
+            Put8(kCamelotPulse + i, kPulse[i]);
+        }
+    }
+
+    // Places a compressed sample of `points` points from its blocks of 33 bytes, which plays at 13379 Hz for key 60.
+    uint32_t CompressedWave(const std::vector<uint8_t>& blocks, uint32_t points)
     {
         std::vector<uint8_t> bytes(16, 0);
         bytes[0] = 1;
         for (int b = 0; b < 4; b++)
         {
-            bytes[4 + size_t(b)] = uint8_t((rate * 1024) >> (8 * b));
+            bytes[4 + size_t(b)] = uint8_t((13379 * 1024) >> (8 * b));
             bytes[12 + size_t(b)] = uint8_t(points >> (8 * b));
         }
         bytes.insert(bytes.end(), blocks.begin(), blocks.end());
@@ -384,11 +435,9 @@ private:
         Put32(kInitPool, mode);
         Put32(kInitPool + 4, kPlayerTable);
 
-        const uint16_t kCode[] = {0xB500, 0x0400, 0x4A08, 0x4909, 0x0B40, 0x1840, 0x8883, 0x0059, 0x18C9,
-                                  0x0089, 0x1889, 0x680A, 0x6801, 0x1C10, 0xF000, 0xF800, 0xBC01, 0x4700};
         for (uint32_t i = 0; i < 18; i++)
         {
-            Put16(kSongStart + 2 * i, kCode[i]);
+            Put16(kSongStart + 2 * i, kSongStartCode[i]);
         }
         Put32(kSongStartPool, kPlayerTable);
         Put32(kSongStartPool + 4, kSongTable);
@@ -486,6 +535,8 @@ void TestDecoding()
         .Tie(64, 127)
         .Eot(64)
         .Raw({kCmdXcmd, kXcmdEchoVol, 16})
+        .Raw({kCmdXcmd, kXcmdWave, 0x56, 0x34, 0x12, 0x08})
+        .Raw({kCmdXcmd, kXcmdOffset, 0x40, 0x01, 0x00, 0x00})
         .Patt(start)
         .Rept(2, start)
         .Raw({kCmdMemAcc, 6, 1, 2, 0, 0, 0, 0})
@@ -515,6 +566,8 @@ void TestDecoding()
     SUPERGBAMIDI_CHECK(next() && DescribeEvent(e) == "TIE key 64 vel 127");
     SUPERGBAMIDI_CHECK(next() && DescribeEvent(e) == "EOT key 64");
     SUPERGBAMIDI_CHECK(next() && e.size == 3 && DescribeEvent(e) == "XCMD xIECV 16");
+    SUPERGBAMIDI_CHECK(next() && e.size == 6 && e.target == 0x08123456 && DescribeEvent(e) == "XCMD xWAVE 0x08123456");
+    SUPERGBAMIDI_CHECK(next() && e.size == 6 && e.target == 320 && DescribeEvent(e) == "XCMD x0D 320");
     SUPERGBAMIDI_CHECK(next() && e.command == kCmdPatt && e.target == at);
     SUPERGBAMIDI_CHECK(next() && e.command == kCmdRept && e.size == 6 && e.arg[0] == 2 && e.target == at);
     SUPERGBAMIDI_CHECK(next() && e.command == kCmdMemAcc && e.size == 8 && e.target == 0);
@@ -565,6 +618,32 @@ void TestDetection()
     SUPERGBAMIDI_CHECK(DetectDriver(rom, overrides, one, error));
     SUPERGBAMIDI_CHECK_EQ(one.song_count, 1);
 
+    // An all-zero entry, as a GSF rip can leave for a song it doesn't hold, is empty and doesn't end the song table,
+    // but those after the last song don't count. A table without a song fails, with a hint.
+    Cart gaps;
+    for (int s = 0; s < 4; s++)
+    {
+        gaps.Song({Track().Fine()}, voices);
+    }
+    for (const uint32_t entry : {kSongTable + 8, kSongTable + 24})
+    {
+        gaps.Put32(entry, 0);
+        gaps.Put32(entry + 4, 0);
+    }
+    const Rom gaps_rom = gaps.ToRom();
+    const Rom empty_rom = Cart().ToRom();
+    DriverInfo empty;
+
+    const DriverInfo gaps_info = Detect(gaps_rom);
+    const bool found_empty = DetectDriver(empty_rom, DriverOverrides(), empty, error);
+
+    SUPERGBAMIDI_CHECK_EQ(gaps_info.song_count, 3);
+    SUPERGBAMIDI_CHECK_EQ(SongAddress(gaps_rom, gaps_info, 1), 0);
+    SUPERGBAMIDI_CHECK(SongAddress(gaps_rom, gaps_info, 0) != 0 && SongAddress(gaps_rom, gaps_info, 2) != 0);
+    SUPERGBAMIDI_CHECK(!Sequencer(gaps_rom, gaps_info, 1).Valid() && Sequencer(gaps_rom, gaps_info, 2).Valid());
+    SUPERGBAMIDI_CHECK(!found_empty);
+    SUPERGBAMIDI_CHECK(error.find("--song-count") != std::string::npos);
+
     // Another mode, an older mixer, and no mode at all: then the driver's defaults stand.
     Cart slow(0x0093F800, {4}, true, false);
     slow.Song({Track().Fine()}, voices);
@@ -581,6 +660,28 @@ void TestDetection()
     SUPERGBAMIDI_CHECK_EQ(unset_info.max_channels, 8);
     SUPERGBAMIDI_CHECK_EQ(unset_info.mix_rate, 13379);
     SUPERGBAMIDI_CHECK(!unset_info.warnings.empty());
+
+    // Some games' compiler swaps r2 and r3 in the routine that starts a song. The mono mixer's volume code marks a
+    // mixer that plays every channel on both sides.
+    Cart swapped;
+    swapped.Song({Track().Fine()}, voices);
+    const uint16_t kSwapped[] = {0x4B08, 0x4909, 0x0B40, 0x1840, 0x8882, 0x0051, 0x1889, 0x0089, 0x18C9};
+    for (uint32_t i = 0; i < 9; i++)
+    {
+        swapped.Put16(kSongStart + 4 + 2 * i, kSwapped[i]);
+    }
+    const uint8_t kMono[] = {0xA0, 0x78, 0xE1, 0x78, 0x40, 0x18, 0x68, 0x43, 0x40, 0x0A, 0xA0, 0x72};
+    for (uint32_t i = 0; i < 12; i++)
+    {
+        swapped.Put8(kMonoVolume + i, kMono[i]);
+    }
+
+    const DriverInfo swapped_info = Detect(swapped.ToRom());
+
+    SUPERGBAMIDI_CHECK_EQ(swapped_info.song_start, kSongStart);
+    SUPERGBAMIDI_CHECK_EQ(swapped_info.song_table, kSongTable);
+    SUPERGBAMIDI_CHECK_EQ(swapped_info.player_table, kPlayerTable);
+    SUPERGBAMIDI_CHECK(swapped_info.mono && !info.mono);
 
     // A cartridge without the driver's code fails, unless the song table is given.
     Cart bare(kMode, {10}, false);
@@ -950,6 +1051,57 @@ void TestLoopAfterTie()
     SUPERGBAMIDI_CHECK(std::fabs(held.loop_end - 120 / kFrameRate) < 1e-9);
     SUPERGBAMIDI_CHECK(std::fabs(ended.loop_start - 30 / kFrameRate) < 1e-9);
     SUPERGBAMIDI_CHECK(std::fabs(ended.loop_end - 54 / kFrameRate) < 1e-9);
+}
+
+// A track's volume is 100 when its loop starts the first time, and the loop sets 60 for its second note. In song 0 the
+// loop sets 100 again as it starts, and in song 1 just before it jumps back, in the tick of the loop's end, which the
+// next pass starts on. Either way the marked pass gives volume 100 again at its start, for a player that jumps back
+// there from volume 60. In song 2 the loop doesn't set it again, so the game plays the later passes' first note at 60,
+// as such a player does, and nothing is written again.
+void TestLoopSettingsAgain()
+{
+    Cart cart;
+    const uint32_t voices = cart.VoiceGroup({{0, Cart::Voice(0, cart.Wave(Saw(), 13379, 0))}});
+    for (int song = 0; song < 3; song++)
+    {
+        Track t;
+        t.Cmd(kCmdTempo, 75).Cmd(kCmdVoice, 0).Cmd(kCmdVol, 100).Wait(12);
+        const size_t loop = t.Here();
+        if (song == 0)
+        {
+            t.Cmd(kCmdVol, 100);
+        }
+        t.Note(12, 60, 100).Wait(12).Cmd(kCmdVol, 60).Note(12, 62, 100).Wait(12);
+        if (song == 1)
+        {
+            t.Cmd(kCmdVol, 100);
+        }
+        cart.Song({t.Goto(loop)}, voices);
+    }
+    const Rom rom = cart.ToRom();
+    const DriverInfo info = Detect(rom);
+
+    ConvertOptions opt;
+    opt.out_dir = Utf8(g_temp);
+    opt.base_name = "loop_again";
+
+    for (int song = 0; song < 3; song++)
+    {
+        const SongSummary r = ConvertSong(rom, info, song, opt, nullptr);
+
+        std::vector<std::pair<uint32_t, int>> volumes;
+        for (const auto& [tick, bytes] : ReadMidi(r.midi_path).Find(0xB0))
+        {
+            if (bytes[1] == cc::kVolume)
+            {
+                volumes.emplace_back(tick, bytes[2]);
+            }
+        }
+
+        const bool again = std::find(volumes.begin(), volumes.end(), std::make_pair(12u, 100)) != volumes.end();
+        SUPERGBAMIDI_CHECK(r.ok && std::fabs(r.loop_start - 12 / kFrameRate) < 1e-9);
+        SUPERGBAMIDI_CHECK(again == (song < 2));
+    }
 }
 
 void TestHourLimit()
@@ -1509,7 +1661,8 @@ void TestDroppedNotes()
     const SongSummary r = ConvertSong(rom, info, 0, opt, nullptr);
 
     const MidiEvents m = ReadMidi(r.midi_path);
-    SUPERGBAMIDI_CHECK(r.ok && r.warnings.size() == 1 && r.warnings[0].find("1 note found no channel free") == 0);
+    SUPERGBAMIDI_CHECK(r.ok && r.warnings.size() == 1 &&
+                       r.warnings[0].find("1 note had no available sound channel") == 0);
     SUPERGBAMIDI_CHECK(m.Find(0x90).size() == 1 && m.Find(0x91).empty());
 }
 
@@ -1665,6 +1818,47 @@ void TestPsgPitch()
     SUPERGBAMIDI_CHECK_EQ(square_bend, 0);
 }
 
+void TestPsgRelease()
+{
+    // A noise note bent up 3 semitones plays the noise setting 3 keys up, which the MIDI file bends up 8.14 semitones,
+    // with a range of 9. Its release goes on at that pitch after the note ends on tick 6, so the bend stays there until
+    // the track's next note, a sample on tick 24, which plays with the track's bend of 3 semitones.
+    Cart cart;
+    const uint32_t voices =
+        cart.VoiceGroup({{0, Cart::Voice(4, 0, 60, {0, 0, 15, 4})}, {1, Cart::Voice(0, cart.Wave(Saw(), 13379, 0))}});
+    cart.Song({Track()
+                   .Cmd(kCmdTempo, 75)
+                   .Cmd(kCmdVoice, 0)
+                   .Cmd(kCmdVol, 127)
+                   .Cmd(kCmdBendR, 12)
+                   .Cmd(kCmdBend, 0x50)
+                   .Note(6, 60, 127)
+                   .Wait(24)
+                   .Cmd(kCmdVoice, 1)
+                   .Note(12, 62, 127)
+                   .Wait(12)
+                   .Fine()},
+              voices);
+    const Rom rom = cart.ToRom();
+    const DriverInfo info = Detect(rom);
+
+    ConvertOptions opt;
+    opt.out_dir = Utf8(g_temp);
+    opt.base_name = "psg_release";
+
+    const SongSummary r = ConvertSong(rom, info, 0, opt, nullptr);
+
+    const auto bends = ReadMidi(r.midi_path).Find(0xE0);
+    const int kNoise = 8192 + int(std::lround(256.0 * 12.0 * std::log2(1.6) * 8192 / (9 * 256)));
+    const int kSample = 8192 + int(std::lround(768.0 * 8192 / (9 * 256)));
+
+    SUPERGBAMIDI_CHECK(r.ok);
+    SUPERGBAMIDI_CHECK_EQ(bends.size(), 2);
+    SUPERGBAMIDI_CHECK(bends.size() == 2 && bends[0].first == 0 && bends[1].first == 24);
+    SUPERGBAMIDI_CHECK(bends.size() == 2 && std::abs((bends[0].second[1] | (bends[0].second[2] << 7)) - kNoise) <= 1);
+    SUPERGBAMIDI_CHECK(bends.size() == 2 && (bends[1].second[1] | (bends[1].second[2] << 7)) == kSample);
+}
+
 void TestQuietPsg()
 {
     // A PSG note's level is its two volumes added up and divided by 16. At a velocity of 32 and a track volume of 31,
@@ -1747,6 +1941,280 @@ void TestMusic()
     SUPERGBAMIDI_CHECK(bare_forced && bare_forced->SongCount() == 1);
 }
 
+// Camelot's version of the driver has an unused copy of the routine that starts a song, whose literal pool is zeroed,
+// before the one the game uses. Its note start and mixer have changes of their own, which detection finds by their
+// code.
+void TestCamelotDetection()
+{
+    Cart cart(kMode, {10, 3}, true, false);
+    cart.WriteCamelot();
+    const uint32_t voices = cart.VoiceGroup({{0, Cart::Voice(0, cart.Wave(Saw()))}});
+    cart.Song({Track().Fine()}, voices);
+    Cart plain;
+    plain.Song({Track().Fine()}, voices);
+
+    const DriverInfo info = Detect(cart.ToRom());
+    const DriverInfo plain_info = Detect(plain.ToRom());
+
+    SUPERGBAMIDI_CHECK_EQ(info.song_start, kSongStart);
+    SUPERGBAMIDI_CHECK_EQ(info.song_table, kSongTable);
+    SUPERGBAMIDI_CHECK_EQ(info.sound_mode, kMode);
+    SUPERGBAMIDI_CHECK(info.camelot_sequencer && info.camelot_mixer);
+    SUPERGBAMIDI_CHECK(!plain_info.camelot_sequencer && !plain_info.camelot_mixer);
+}
+
+// Camelot's note start takes the third free channel, or the last free one when there are only one or two, unless a
+// released note of the same track has a channel. It works out the left side's level from 128 rather than 127, and
+// rounds a fine-tuned key's rate a little differently. Its LFO counts its delay down at a speed of 0 too.
+void TestCamelotSequencer()
+{
+    Cart cart(kMode, {10, 3}, true, false);
+    cart.WriteCamelot();
+    const uint32_t voices = cart.VoiceGroup({{0, Cart::Voice(0, cart.Wave(Saw(), 13379, 0), 60, {255, 0, 255, 250})}});
+    cart.Song({Track()
+                   .Cmd(kCmdTempo, 75)
+                   .Cmd(kCmdVoice, 0)
+                   .Cmd(kCmdVol, 127)
+                   .Tie(60, 127)
+                   .Tie(62, 127)
+                   .Tie(64, 127)
+                   .Tie(65, 127)
+                   .Wait(1)
+                   .Eot(60)
+                   .Wait(1)
+                   .Tie(67, 127)
+                   .Wait(1)
+                   .Tie(69, 127)
+                   .Wait(10)
+                   .Fine()},
+              voices);
+    cart.Song({Track()
+                   .Cmd(kCmdTempo, 75)
+                   .Cmd(kCmdVoice, 0)
+                   .Cmd(kCmdVol, 127)
+                   .Cmd(kCmdMod, 30)
+                   .Cmd(kCmdLfoDl, 4)
+                   .Cmd(kCmdLfoS, 0)
+                   .Tie(60, 127)
+                   .Wait(2)
+                   .Cmd(kCmdLfoS, 32)
+                   .Wait(10)
+                   .Fine()},
+              voices);
+    const Rom rom = cart.ToRom();
+    const DriverInfo info = Detect(rom);
+
+    Sequencer seq(rom, info, 0);
+    std::vector<std::pair<int, int>> ons;
+    int left = -1;
+    for (int f = 0; f < 6; f++)
+    {
+        for (const Action& a : seq.Step())
+        {
+            if (a.kind == Action::kNoteOn)
+            {
+                ons.push_back({a.a, a.channel});
+            }
+        }
+        if (f == 0)
+        {
+            left = seq.GetChannel(2).left;
+        }
+    }
+
+    Sequencer lfo(rom, info, 1);
+    std::vector<Action> pitches = Actions(lfo, 12, Action::kPitch);
+    pitches.erase(std::remove_if(pitches.begin(), pitches.end(), [](const Action& a) { return a.value == 0; }),
+                  pitches.end());
+
+    // Of 5 channels, keys 60, 62 and 64 take the third free one each time, and 65 the last of the two left. Once 60 is
+    // released, 67 takes its channel rather than the free channel 0, which 69 takes.
+    const std::vector<std::pair<int, int>> kOns = {{60, 2}, {62, 3}, {64, 4}, {65, 1}, {67, 2}, {69, 0}};
+    SUPERGBAMIDI_CHECK(ons == kOns);
+    SUPERGBAMIDI_CHECK_EQ(left, 125);
+    SUPERGBAMIDI_CHECK_EQ(KeyToFrequency(13379 * 1024, 11, 255), 836);
+    SUPERGBAMIDI_CHECK_EQ(CamelotKeyToFrequency(13379 * 1024, 11, 255), 835);
+    SUPERGBAMIDI_CHECK_EQ(CamelotKeyToFrequency(13379 * 1024, 60, 0), 13379);
+
+    // The LFO's delay of 4 ticks has run out by tick 4, two ticks after its speed is set: a depth of 30 on the first
+    // step of 32 bends the pitch by 15/16 of a semitone.
+    SUPERGBAMIDI_CHECK(!pitches.empty() && pitches[0].tick == 4 && pitches[0].value == 240);
+}
+
+// Camelot's mixer takes 256 less the release off the level each frame. It leaves out a note that comes out silent on
+// both sides, which doesn't move on through its sample. It plays a sample of no length as a synth voice, which goes on
+// until it's released: a pulse wave moves its duty on each frame, and a saw wave keeps its filter in the count.
+void TestCamelotMixer()
+{
+    Cart cart(kMode, {10, 3}, true, false);
+    cart.WriteCamelot();
+    const uint32_t pulse = cart.Synth(0, {0x80, 0x10, 0x00, 0x00});
+    const uint32_t saw = cart.Synth(1, {});
+    const uint32_t voices = cart.VoiceGroup({{0, Cart::Voice(0, cart.Wave(Saw(), 13379, 0), 60, {255, 0, 255, 200})},
+                                             {1, Cart::Voice(0, pulse)},
+                                             {2, Cart::Voice(0, saw)}});
+    cart.Song({Track().Cmd(kCmdTempo, 75).Cmd(kCmdVoice, 0).Cmd(kCmdVol, 127).Note(4, 60, 127).Wait(12).Fine()},
+              voices);
+    cart.Song({Track().Cmd(kCmdTempo, 75).Cmd(kCmdVoice, 0).Cmd(kCmdVol, 1).Tie(60, 1).Wait(12).Fine()}, voices);
+    cart.Song({Track().Cmd(kCmdTempo, 75).Cmd(kCmdVoice, 1).Cmd(kCmdVol, 127).Tie(60, 127).Wait(12).Fine(),
+               Track().Cmd(kCmdVoice, 2).Cmd(kCmdVol, 127).Tie(60, 127).Wait(12).Fine()},
+              voices);
+    const Rom rom = cart.ToRom();
+    const DriverInfo info = Detect(rom);
+
+    // The note's level after each frame from its release, on frame 4, until it stops.
+    Sequencer release(rom, info, 0);
+    std::vector<int> levels;
+    for (int f = 0; f < 9; f++)
+    {
+        release.Step();
+        if (f >= 4)
+        {
+            levels.push_back(release.GetChannel(2).status ? release.GetChannel(2).envelope : -1);
+        }
+    }
+
+    Sequencer silent(rom, info, 1);
+    for (int f = 0; f < 3; f++)
+    {
+        silent.Step();
+    }
+
+    Sequencer synths(rom, info, 2);
+    synths.Step();
+    const int32_t saw_filter = synths.GetChannel(3).count;
+    synths.Step();
+    synths.Step();
+    const std::vector<int16_t> saw_points = RenderSynth(rom, info, Synth::kSaw, saw + 16, 13379, 224);
+
+    const std::vector<int> kLevels = {199, 143, 87, 31, -1};
+    SUPERGBAMIDI_CHECK(levels == kLevels);
+    SUPERGBAMIDI_CHECK(silent.GetChannel(2).status && silent.GetChannel(2).count == 64);
+
+    // The pulse wave's phase moves on by 8 times a sample's step for each of the mixer's 224 points a frame, and its
+    // duty's phase by its fourth byte. The saw wave's filter ends the frame where the SoundFont's sample does.
+    const Channel& p = synths.GetChannel(2);
+    SUPERGBAMIDI_CHECK(p.status && p.synth && uint32_t(p.count) == 0x30000000u);
+    SUPERGBAMIDI_CHECK_EQ(p.fraction, uint32_t(3 * uint64_t((13379u * 627u) << 3) * 224 % 0x100000000u));
+    SUPERGBAMIDI_CHECK(synths.GetChannel(3).status && saw_points.size() == 224 && saw_points[223] == saw_filter * 128);
+}
+
+// A pulse or saw synth voice's SoundFont instrument has a zone for each key that the song plays it at, with a sample
+// made for that key at the mixer's rate. A triangle wave's has one cycle for every key. The MIDI file's reverb is the
+// echo of Camelot's mixer, whatever the song sets, and a PSG voice is quieter against the samples.
+void TestCamelotConversion()
+{
+    Cart cart(kMode, {10, 3}, true, false);
+    cart.WriteCamelot();
+    const uint32_t pulse = cart.Synth(0, {0x80, 0x00, 0x00, 0x00});
+    const uint32_t triangle = cart.Synth(2, {});
+    const uint32_t voices = cart.VoiceGroup(
+        {{0, Cart::Voice(0, pulse)}, {1, Cart::Voice(0, triangle)}, {2, Cart::Voice(1, 2, 60, {0, 0, 15, 0})}});
+    cart.Song({Track()
+                   .Cmd(kCmdTempo, 75)
+                   .Cmd(kCmdVoice, 0)
+                   .Cmd(kCmdVol, 127)
+                   .Note(12, 60, 127)
+                   .Wait(12)
+                   .Note(12, 64, 127)
+                   .Wait(12)
+                   .Note(12, 60, 127)
+                   .Wait(12)
+                   .Fine(),
+               Track().Cmd(kCmdVoice, 1).Cmd(kCmdVol, 127).Note(12, 48, 127).Wait(12).Fine(),
+               Track().Cmd(kCmdVoice, 2).Cmd(kCmdVol, 127).Note(12, 72, 127).Wait(12).Fine()},
+              voices, 0, 0, 0x80 | 10);
+    const Rom rom = cart.ToRom();
+    const DriverInfo info = Detect(rom);
+    ConvertOptions opt;
+    opt.out_dir = Utf8(g_temp);
+    opt.base_name = "camelot";
+
+    const SongSummary r = ConvertSong(rom, info, 0, opt, nullptr);
+    const std::vector<int16_t> points = RenderSynth(rom, info, Synth::kPulse, pulse + 16, 13379, 64);
+
+    SUPERGBAMIDI_CHECK(r.ok && !r.silent);
+    const MidiEvents m = ReadMidi(r.midi_path);
+    int reverbs = 0;
+    for (uint8_t ch = 0; ch < 3; ch++)
+    {
+        for (const auto& e : m.Find(uint8_t(0xB0 + ch)))
+        {
+            if (e.second[1] == cc::kReverb)
+            {
+                reverbs++;
+                SUPERGBAMIDI_CHECK_EQ(e.second[2], 53);
+            }
+        }
+    }
+    SUPERGBAMIDI_CHECK_EQ(reverbs, 3);
+
+    // The SoundFont's instrument for each program.
+    const Sf2Records sf = ReadSf2(r.sf2_path);
+    std::map<int, int> instrument;
+    for (size_t p = 0; p + 1 < sf.Count("phdr", 38); p++)
+    {
+        const uint8_t* h = sf.Record("phdr", 38, p);
+        instrument[Le16(h + 20)] = Le16(sf.Record("pgen", 4, Le16(sf.Record("pbag", 4, Le16(h + 24)))) + 2);
+    }
+
+    // Each zone's key range, its sample's name, rate and root key, and its attenuation.
+    auto zones = [&](int program)
+    {
+        const size_t first = Le16(sf.Record("inst", 22, size_t(instrument[program])) + 20);
+        const size_t last = Le16(sf.Record("inst", 22, size_t(instrument[program]) + 1) + 20);
+        std::vector<std::map<uint16_t, uint16_t>> out;
+        for (size_t z = first + 1; z < last; z++)
+        {
+            out.push_back(sf.ZoneGens(z));
+        }
+
+        return out;
+    };
+
+    auto sample_name = [&](const std::map<uint16_t, uint16_t>& zone)
+    {
+        const uint8_t* h = sf.Record("shdr", 46, zone.at(sf2gen::kSampleId));
+        return std::string(reinterpret_cast<const char*>(h), std::find(h, h + 20, 0) - h);
+    };
+
+    auto sample_rate = [&](const std::map<uint16_t, uint16_t>& zone)
+    {
+        return test::Le32(sf.Record("shdr", 46, zone.at(sf2gen::kSampleId)) + 36);
+    };
+
+    auto root_key = [&](const std::map<uint16_t, uint16_t>& zone)
+    {
+        return int(sf.Record("shdr", 46, zone.at(sf2gen::kSampleId))[40]);
+    };
+
+    // The names of the pulse wave's samples for keys 60 and 64, and of the triangle wave's.
+    char pulse_60[32], pulse_64[32], triangle_name[32];
+    std::snprintf(pulse_60, sizeof pulse_60, "Pulse %08X 60", unsigned(pulse));
+    std::snprintf(pulse_64, sizeof pulse_64, "Pulse %08X 64", unsigned(pulse));
+    std::snprintf(triangle_name, sizeof triangle_name, "Triangle %08X", unsigned(triangle));
+
+    const auto pulse_zones = zones(0);
+    SUPERGBAMIDI_CHECK_EQ(pulse_zones.size(), 2);
+    if (pulse_zones.size() == 2)
+    {
+        SUPERGBAMIDI_CHECK(pulse_zones[0].at(sf2gen::kKeyRange) == 0x3C3C && sample_name(pulse_zones[0]) == pulse_60);
+        SUPERGBAMIDI_CHECK(pulse_zones[1].at(sf2gen::kKeyRange) == 0x4040 && sample_name(pulse_zones[1]) == pulse_64);
+        SUPERGBAMIDI_CHECK(sample_rate(pulse_zones[1]) == 13379 && root_key(pulse_zones[1]) == 64);
+        SUPERGBAMIDI_CHECK(!pulse_zones[0].count(sf2gen::kInitialAttenuation) &&
+                           pulse_zones[0].count(sf2gen::kSampleModes));
+    }
+    const auto triangle_zones = zones(1);
+    SUPERGBAMIDI_CHECK(triangle_zones.size() == 1 && triangle_zones[0].at(sf2gen::kKeyRange) == 0x7F00 &&
+                       sample_name(triangle_zones[0]) == triangle_name && sample_rate(triangle_zones[0]) == 13379);
+    const auto square_zones = zones(2);
+    SUPERGBAMIDI_CHECK(!square_zones.empty() && square_zones[0].at(sf2gen::kInitialAttenuation) == 73);
+
+    // A pulse wave with a duty of 128/256 at the mixer's rate: 32 points high and 32 low, at half the full level.
+    SUPERGBAMIDI_CHECK(points.size() == 64 && points[0] == 16384 && points[31] == 16384 && points[32] == -16384 &&
+                       points[63] == -16384);
+}
+
 } // namespace
 
 void RunTests()
@@ -1762,6 +2230,7 @@ void RunTests()
     TestLoopStarts();
     TestLoopLengths();
     TestLoopAfterTie();
+    TestLoopSettingsAgain();
     TestHourLimit();
     TestConversion();
     TestSharedSoundfont();
@@ -1775,9 +2244,14 @@ void RunTests()
     TestDoubledNote();
     TestTempoChange();
     TestPsgPitch();
+    TestPsgRelease();
     TestQuietPsg();
     TestDump();
     TestMusic();
+    TestCamelotDetection();
+    TestCamelotSequencer();
+    TestCamelotMixer();
+    TestCamelotConversion();
 }
 
 } // namespace supergbamidi::mp2k

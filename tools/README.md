@@ -22,10 +22,17 @@ These scripts in `tools/` serve more than one driver:
 | `gbarom.py` | loads a `.gba` ROM or a GSF rip; used by the other scripts |
 | `gbadis.py` | recursive-descent Thumb/ARM disassembler that resolves literal pools, marks code a GSF rip has zeroed out, and can read code at the address the game copies it to |
 | `psg_model.py` | Game Boy APU model that renders a driver's PSG register writes to audio |
+| `conversion.py` | finds a driver's MIDI files in a folder of `supergbamidi`'s output, and compares a conversion on the song's beat with one made with `--frame-timing`; used by the `compare_notes.py` scripts |
+
+A conversion includes songs from every driver found in the game. Files from
+drivers other than the first include the driver's name. The `compare_trace.py`
+scripts, and the `compare_notes.py` scripts apart from Rare's and MP2K's, run
+`supergbamidi` with `--driver`. Each `compare_notes.py` checks only its
+driver's files.
 
 Driver-specific scripts are in `tools/konami/`, `tools/rare/`, `tools/quintet/`,
-`tools/rd2/` and `tools/mp2k/`. Run the commands below from the repository
-root.
+`tools/rd2/`, `tools/mp2k/` and `tools/brownie/`. Run the commands below from
+the repository root.
 
 ## Konami's driver
 
@@ -49,15 +56,26 @@ fluidsynth -ni -R 0 -C 0 -F mine.wav out/rom_10.sf2 out/rom_10.mid
 python tools/konami/compare_audio.py ref.wav mine.wav
 ```
 
-`compare_notes.py` checks every note in a folder of MIDI files against what
-the driver does with the hardware on the same frame: the note's start and stop,
+By default, converted notes follow the estimated beat and may be up to a
+frame and a half from the driver's timing. `compare_notes.py` first makes a
+temporary conversion with `--frame-timing`, placing each event on the
+driver's frame. It checks that the original conversion has the same notes,
+keys, programs, controller changes and pitch bends, in the same order on
+each channel and within 1.65 frames of the temporary conversion: a frame and
+a half, and the rounding of a tick. An event that gives a controller, pitch
+bend or program the value it already has, as the conversions do where a loop
+starts, isn't compared. The SoundFonts must be identical.
+
+It then checks each note in the temporary conversion against the hardware
+state left by the driver on the same frame: the note's start and stop,
 the sample, duty cycle, wave or noise setting that plays, its pitch, its level
 on each side and its echo send. If a MIDI track or an entire song is absent
 from the conversion, the corresponding channel or song must also be silent in
-the driver. It lists the differences and the largest pitch and level
-deviations. PSG notes are written at their equal-tempered pitch, while the
-driver's frequency table can only get within one step of the Game Boy's 11-bit
-frequency register, so that much is allowed for.
+the driver, and each track with notes has to stand for a different voice or
+channel of the driver. It lists the differences and the largest pitch and
+level deviations. PSG notes are written at their equal-tempered pitch, while
+the driver's frequency table can only get within one step of the Game Boy's
+11-bit frequency register, so that much is allowed for.
 
 `render-ds` leaves the echo out unless you pass `--echo`, because MIDI can't
 reproduce it, and fluidsynth's reverb and chorus are turned off to match.
@@ -66,9 +84,8 @@ them. `--voices` on `render-ds` renders chosen sample voices.
 
 ### Working out Konami's driver
 
-A GSF rip is a ROM from which `gsfopt` has zeroed every byte that the songs
-never touched, so it holds only the code and data the music uses. That made
-the driver easy to isolate:
+In a GSF rip, `gsfopt` has zeroed every byte the songs never touched, which
+makes the driver easy to isolate:
 
 1. **Find the entry points.** In a GSF rip, the ripper's patch calls the
    driver's "play song" and "start song" routines. Main's IRQ table points at
@@ -160,8 +177,8 @@ driver plays on the same frame: the note's start and release, its velocity, the
 channel's volume, the sample that the SoundFont plays for it, and its pitch on
 every frame, from the SoundFont zone's tuning and the channel's pitch bend. The
 MIDI file keeps each event on its own tick, where the driver plays it on a
-frame, so it allows a frame's difference either way. It lists the differences
-and the largest pitch deviation.
+frame, so it allows a frame and a half of difference either way. It lists the
+differences and the largest pitch deviation.
 
 `driver_emu.py render` writes the driver's mono output at its own rate, and
 `--channels` renders only the notes of the MIDI channels it names. The other
@@ -258,7 +275,9 @@ table's, so that the tables' tuning, which the MIDI file leaves out, isn't
 counted. A noise drum's sample includes the channel's volume, which is checked
 frame by frame, allowing one step either way while the hardware envelope runs.
 Since the MIDI file keeps each note on its own tick, up to a frame after the
-driver's frame, each frame is compared with the same stretch of the note.
+driver's frame, each frame is compared with the same stretch of the note. A
+note on a MIDI channel that the driver doesn't have, or one that starts after
+all of the driver's channels have ended, counts as a difference.
 
 `driver_emu.py render` writes the driver's stereo output at 32768 Hz: the PSG
 through `psg_model.py`, and each FIFO's sample at its timer's rate.
@@ -321,9 +340,6 @@ fluidsynth -ni -r 10512 -F mine.wav out/rom_05.sf2 out/rom_05.mid
 python tools/konami/compare_audio.py ref.wav mine.wav
 ```
 
-`compare_trace.py` and `compare_notes.py` ask `supergbamidi` for the driver by
-name, `--driver rd2`, since a game can have another driver as well.
-
 `compare_trace.py` runs `supergbamidi --trace` and the driver side by side.
 After each frame it compares every field of each voice that plays, the order of
 the mixer's list of sample voices, and every write to the PSG's registers. It
@@ -339,7 +355,8 @@ or the frame before, and ending within a frame of the driver's release or stop
 of its voice. Its SoundFont zone has to play the driver's sample at the pitch
 the driver plays it at, to within a cent, and while it's the newest note of its
 track, the MIDI file's pitch bend has to follow its voice's pitch, frame by
-frame.
+frame. A sequence named in `--songs` that has no MIDI file mustn't play any
+notes.
 
 `driver_emu.py render` writes the mixer's stereo output at 10512 Hz: the 8-bit
 samples the driver sends to the FIFOs, without the PSG. `--tracks` mutes the
@@ -403,10 +420,6 @@ python tools/mp2k/compare_notes.py rom.gba rom                    # the conversi
 python tools/mp2k/driver_emu.py rom.gba render 10 3000 ref.wav    # the driver's DirectSound output for song 10
 ```
 
-In games with another driver as well as MP2K, such as `AZLE`, detection finds
-the other driver first. `compare_trace.py` selects MP2K by name; pass
-`--driver mp2k` when converting these games too.
-
 `compare_trace.py` runs `supergbamidi --trace` and the driver side by side, and
 compares every sound channel that plays after each frame: its status, track,
 keys, velocity, priority, envelope level and volumes, then a DirectSound
@@ -423,13 +436,26 @@ driver's channels just before the PSG routine runs in each frame, when the
 notes that the tracks started in the frame still have their start flag. A note
 whose envelope never rises above 0 doesn't count. A PSG square or wave note can
 be two steps of the 11-bit frequency register from equal temperament (see
-`docs/mp2k.md`), and that much is allowed for. It needs a conversion made
-without `--voice-channels`, so that each MIDI channel holds one track.
+`docs/mp2k.md`), and that much is allowed for. A sample without a loop that
+runs out stops its channel, which can happen between ticks, so then the MIDI
+note can end as late as the first tick after it. When a track changes its pitch
+in a tick in which it starts a note, the driver leaves the track's older notes
+behind until its next change, while the MIDI file bends them all, so an older
+note's pitch isn't compared until the driver catches it up. Track 9 plays on
+the drum channel, so its zones come from bank 128. A synth voice of Camelot's
+mixer has to play the SoundFont's sample for its wave, and for a pulse or saw
+wave, the sample made for the key the driver plays it at, whose pitch is the
+driver's rate for that key. A song named in `--songs` that has no MIDI file
+mustn't play any notes. It needs a conversion made without `--voice-channels`,
+so that each MIDI channel holds one track.
 
 `driver_emu.py render` writes the DirectSound mixer's stereo output at its own
-rate. It leaves the PSG channels out. `--tracks` mixes only the notes of the
-tracks it names, and the others still take up channels, so the result is what
-the game would play with those tracks muted.
+rate, with the same output on both sides for a mono mixer. It leaves the PSG
+channels out. `--tracks` mixes only the notes of the tracks it names, and the
+others still take up channels, so the result is what the game would play with
+those tracks muted. Camelot's mixer's output has its echo in it, and a muted
+track's channels go into sums of their own, since the mixer leaves out a silent
+channel, which then doesn't move on through its sample.
 
 ### Working out MP2K
 
@@ -437,10 +463,13 @@ The driver's routines have the names of the SDK's m4a library, and the
 patterns that `supergbamidi` finds them by are in `docs/mp2k.md`:
 
 1. **Find the entry points.** `m4aSongNumStart` has the same code in every
-   version, and its literal pool gives the song table and the music player
-   table. `m4aSoundMain`, which calls the driver's main routine, comes just
-   before it, and `m4aSoundInit`, which sets the driver's mode, a little before
-   that. `m4aSoundVSync` restarts the sound DMA each frame.
+   version, apart from two registers that some games' compiler swaps, and its
+   literal pool gives the song table and the music player table.
+   `m4aSoundMain`, which calls the driver's main routine, comes just before it,
+   and `m4aSoundInit`, which sets the driver's mode, a little before that.
+   `m4aSoundVSync` restarts the sound DMA each frame. Where the compiler swaps
+   the registers, it's compiled from C: `push {lr}`, then loads of the address
+   at `0x03007FF0` and of the structure's ID.
 2. **Model and compare.** The sequencer, the choice of channels, the
    envelopes and the mixer's progress through each sample were reimplemented
    from the driver's code. They were then compared, channel for channel, with
@@ -449,11 +478,147 @@ patterns that `supergbamidi` finds them by are in `docs/mp2k.md`:
    checked note by note with `compare_notes.py`.
 
 `driver_emu.py` picks the routine addresses by the ROM's game code. Those of
-*Pokémon Emerald* (`BPEE`) and *The Legend of Zelda: A Link to the Past & Four
-Swords* (`AZLE`), whose Four Swords half and menus use MP2K, are built in. For
+*Pokémon Emerald* (`BPEE`), *The Legend of Zelda: A Link to the Past & Four
+Swords* (`AZLE`), whose Four Swords half and menus use MP2K, *The Legend of
+Zelda: The Minish Cap* (`BZME`), *Kingdom Hearts: Chain of Memories* (`B8CE`),
+*Super Robot Taisen: Original Generation 2* (`B2RE`) and *Golden Sun: The Lost
+Age* (`AGFE`) are built in. For
 another game, find the same routines and tables, and add them to `GAMES`:
 `init`, `song_start`, `main` and `vsync` are `m4aSoundInit`,
 `m4aSongNumStart`, `m4aSoundMain` and `m4aSoundVSync`, and `song_table` and
 `player_table` come from `m4aSongNumStart`'s literal pool. The emulator finds
 the driver's state, its channels and the PSG routine from the structure whose
 address the init stores at `0x03007FF0`.
+
+`AGFE`'s entry runs Camelot's version under `CamelotEmulator`, which does what
+the game does around the driver (see `docs/mp2k.md`): it copies the mixer to
+IWRAM before the init, and each frame it runs Camelot's `m4aSoundVSync`, copies
+the DMA counter, runs Camelot's `SoundMain` and then the output stage. Three
+GBA behaviours need special handling in Unicorn:
+
+* Camelot calls routines with `mov lr, rN` and the second half of a `bl` alone,
+  which the ARM7 runs as a jump to LR. Unicorn's cores either take it for half
+  of a Thumb-2 instruction or switch to ARM mode, so each such call in the code
+  is changed to `blx lr`, which does the same.
+* The mixer writes instructions into its loops, which the ARM7 runs at once.
+  Unicorn runs translations of the code, so each write to the mixer's code
+  drops the translations it changes, and a new translation starts just before
+  the fixed-pitch loop, whose first pass would otherwise run the old code.
+* The mixer has DMA3 copy a frame's points of a sample to the stack, so a
+  write that starts DMA3 at once does the copy.
+
+The output stage writes two 8-bit points for each mixed point, which add up to
+a 9-bit point, at twice the mix rate; `render` averages them.
+
+## Brownie Brown's driver
+
+| Script | Description |
+|---|---|
+| `driver_emu.py` | runs the game's sound driver under the Unicorn ARM emulator: its writes to the sound registers, each sound channel's record and each mixer voice's or FIFO's sample, its variables, and a render of its output |
+| `compare_trace.py` | diffs `supergbamidi --trace` against the emulated driver, frame by frame, for every sound |
+| `compare_notes.py` | checks a conversion's MIDI files and SoundFonts against what the emulated driver plays, frame by frame |
+
+### Checking supergbamidi against Brownie Brown's driver
+
+```sh
+python tools/brownie/compare_trace.py rom.gba build/supergbamidi -j 4  # the model: every sound, 12000 frames
+build/supergbamidi -q -o rom rom.gba                                   # convert every sound into rom/
+python tools/brownie/compare_notes.py rom.gba build/supergbamidi rom   # the conversion, frame by frame
+python tools/brownie/driver_emu.py rom.gba render 10 3000 ref.wav --channels 8,9,10,11,12
+build/supergbamidi -q -l 1 -o out -s 10 -t 8-12 rom.gba               # the same channels as MIDI + SF2
+fluidsynth -ni -R 0 -C 0 -r 32768 -F mine.wav out/rom_010.sf2 out/rom_010.mid
+python tools/konami/compare_audio.py ref.wav mine.wav
+```
+
+`compare_trace.py` runs `supergbamidi --trace` and the driver side by side, and
+compares, frame by frame, every write the driver makes to the sound registers,
+in order, each sound channel's record, each mixer voice's or FIFO's sample, and
+the driver's other variables. It reports the first difference in each sound
+that has one. `-j` compares several sounds at once.
+
+As with Konami's driver, the default conversion follows the estimated beat.
+`compare_notes.py` makes a second conversion with `--frame-timing` and
+checks that the original matches it, allowing 1.65 frames of timing
+difference per event: a frame and a half, and the rounding of a tick. It
+then checks the second conversion against the driver.
+
+`compare_notes.py` works out what each channel plays in each frame: for the PSG
+channels, from the driver's register writes, with the PSG's envelope, length
+counter and frequency sweep modelled, and with a sound effect's channel taking
+its PSG channel from the music; and for the sample channels, from the voices as
+the per-frame routine leaves them, while the mixer runs and mixes them, or in
+the *Magical Vacation* revision from the FIFOs' samples, while their timers
+run. It then checks the MIDI file and the SoundFont against that, frame by
+frame: the square and wave channels' frequency settings against the frequency
+table's entry for each note's key, in a zone tuned as the table is; a sample
+channel's sample, its length and loop, and the rate the mixer or the timer
+plays it at; and each channel's levels. A noise drum's sample includes the
+channel's volume, which is checked frame by frame, allowing one step either way
+while the hardware envelope runs. A sound channel plays one note at a time, so a
+MIDI note that still sounds when the next one on its channel starts counts as a
+difference, and so does a note on a MIDI channel that stands for none of the
+sound channels. A sound named in `--songs` that has no MIDI file mustn't play
+anything.
+
+`driver_emu.py render` writes the driver's stereo output at 32768 Hz: the PSG
+through `psg_model.py`, with the hardware's envelope, length counter and sweep,
+and the FIFOs' points from the frame their DMA starts in, or in the *Magical
+Vacation* revision each FIFO's points at its timer's rate, on both sides.
+`--channels` keeps the PSG channels it names, all four, one or none, and the
+sample channels all together or not at all.
+
+### Working out Brownie Brown's driver
+
+The driver is ARM code, with its mixer copied to IWRAM:
+
+1. **Find the entry points.** The game's VBlank handler calls a Thumb routine
+   that calls the per-frame routine, and the IRQ table that the game copies to
+   RAM points the DMA 1 and DMA 2 interrupts at the mixer. The game's other
+   sound routines, which queue a sound and start the fades, are Thumb routines
+   just before the driver's tables.
+2. **Disassemble.** `gbadis.py` was run from the per-frame routine and the
+   mixer, with an `A` before each address for ARM code, and with `--copy` it
+   read the mixer's code at its address in IWRAM. The command table gave the
+   byte code, and the mixer showed how the voices move through their samples.
+3. **Model and compare.** The per-frame routine, the fades, the queue and the
+   mixer's progress through each sample were reimplemented from that reading,
+   and compared with the driver running in `driver_emu.py`, until the two
+   matched, the routine's `r5` included, which `ED` writes to a register.
+4. **Check the conversion.** The converted MIDI files and SoundFonts were
+   checked frame by frame with `compare_notes.py`, and rendered and compared
+   with the driver's output.
+
+The *Magical Vacation* revision turned up when the patterns that detection
+reads were searched for in the game: all of them matched but the per-frame
+routine's start, which pushes `r8` too, and the routine's loop counts 12
+channels. A diff of the two revisions' per-frame routines, instruction by
+instruction with the addresses masked, showed what changed, and the Thumb
+routines that call the driver, just before its frequency table, led through
+veneers to its init, its queue, its fade out and the two interrupt routines
+that feed the FIFOs.
+
+`driver_emu.py` picks the addresses by the ROM's game code. Those of *Sword of
+Mana* (`AVSE`) and *Magical Vacation* (`AMVJ`) are built in. For another game,
+add an entry to `GAMES` with:
+
+* `channel_count` and `voice_count`: the channels that the per-frame routine
+  runs, and the mixer's voices or the FIFOs.
+* `init`, `request` and `frame`: the driver's init, the routine that queues a
+  sound, and the per-frame routine, all in ARM.
+* `mixer` and `copies`: the mixer's address in IWRAM, and the copies the game
+  makes of it from the ROM, as (source, destination, size); or for the
+  *Magical Vacation* revision, `interrupts`: the DMA 1 and DMA 2 interrupt
+  routines, which feed FIFO A and FIFO B, and no copies.
+* `channels`, `voices`, `fifos` and `variables`: the channel records, the
+  voices or the FIFOs' samples, the 32 bytes of the mixer's points for the
+  FIFOs, and the stretches of the driver's variables: from the queue to the
+  voices, or the queue and then SOUNDCNT_L's copy and the fade.
+
+In the *Magical Vacation* revision, the harness plays each FIFO at its timer's
+rate after each frame's routine: at each overflow, the FIFO plays a point, and
+if it then holds 16 or fewer, the harness runs the FIFO's interrupt routine,
+which gives it the next 4 points or stops the timer. It notes the channel whose
+note starts each timer from the routine's `r7`.
+
+The emulator starts each call with `r0`-`r12` at 0, so that what `ED` writes
+from `r5` is the same as in the model.

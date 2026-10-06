@@ -22,7 +22,8 @@ struct SongHeader
     std::array<uint32_t, 6> channels = {};
 };
 
-// Reads the header of the song at `address`. Returns false if it isn't one the driver can read.
+// Reads the header of the song at `address`. Returns false if it isn't one the driver can read: a length that covers
+// the header, and 6 channels that start inside the song.
 bool ReadSongHeader(const Rom& rom, uint32_t address, SongHeader& header);
 
 // A command of a channel's data, as the driver reads it.

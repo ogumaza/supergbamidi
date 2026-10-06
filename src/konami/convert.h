@@ -20,6 +20,7 @@ struct ConvertOptions
 {
     int loops = 2;                // times the looped section is played
     uint16_t track_mask = 0xFFFF; // game tracks to include (bit t = track t)
+    bool frame_timing = false;    // each event on the frame the driver plays it in, rather than on the beat
     std::string out_dir = ".";
     std::string base_name = "song";
 };
@@ -28,11 +29,11 @@ struct ConvertOptions
 struct SongSummary
 {
     bool ok = false;           // converted, or skipped for having no notes
-    bool silent = false;       // no notes at all: nothing was written
+    bool silent = false;       // no notes on the chosen tracks: nothing was written
     uint32_t frames = 0;       // converted length
     int loop_start_frame = -1; // -1: song doesn't loop
     int loop_end_frame = -1;
-    int tracks = 0; // tracks with notes
+    int tracks = 0; // chosen tracks with notes
     double bpm = 0;
     std::string midi_path, sf2_path;
     std::vector<std::string> warnings;

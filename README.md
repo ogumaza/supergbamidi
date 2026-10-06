@@ -1,17 +1,18 @@
 # supergbamidi
 
 `supergbamidi` converts the music of Game Boy Advance games that use Konami's,
-Rare's, Quintet's or Nintendo R&D2's sound driver, or Nintendo's MP2K, to MIDI
-files and SoundFonts.
+Rare's, Quintet's, Nintendo R&D2's or Brownie Brown's sound driver, or
+Nintendo's MP2K, to MIDI files and SoundFonts.
 
 MP2K, often called the "Sappy" engine, is the sound driver in most GBA games.
-Konami's, Rare's and Quintet's games, and *The Legend of Zelda: A Link to the
-Past*, use drivers of their own, which the usual MP2K tools such as Sappy,
-gba-mus-ripper and agbplay can't read. `supergbamidi` finds the game's driver
-in a ROM, plays each song through a model of that driver, and converts it to a
-Standard MIDI File with a matching SoundFont built from the game's samples and
-instruments. For Konami's, Quintet's and Nintendo R&D2's drivers and MP2K, the
-SoundFonts also include Game Boy PSG waveforms.
+Konami's, Rare's and Quintet's games, *The Legend of Zelda: A Link to the Past*,
+*Sword of Mana* and *Magical Vacation* use drivers of their own, which the
+usual MP2K tools such as Sappy, gba-mus-ripper and agbplay can't read. `supergbamidi` finds the
+game's driver in a ROM, plays each song through a model of that driver, and
+converts it to a Standard MIDI File with a matching SoundFont built from the
+game's samples and instruments. For Konami's, Quintet's, Nintendo R&D2's and
+Brownie Brown's drivers and MP2K, the SoundFonts also include Game Boy PSG
+waveforms.
 
 ## Supported games
 
@@ -57,12 +58,23 @@ The tool reports unrecognised revisions of Konami's driver.
 ### Nintendo R&D2's driver
 
 * *The Legend of Zelda: A Link to the Past*, in *A Link to the Past & Four
-  Swords*. The cartridge's game selection and *Four Swords* play their music
-  with MP2K, which `--driver mp2k` converts.
+  Swords*, whose game selection and *Four Swords* play their music with MP2K
 
 ### MP2K
 
 * *Pokémon Emerald*
+* the game selection and *Four Swords* in *The Legend of Zelda: A Link to the
+  Past & Four Swords*
+* *The Legend of Zelda: The Minish Cap*
+* *Kingdom Hearts: Chain of Memories*
+* *Super Robot Taisen: Original Generation 2*
+* *Golden Sun: The Lost Age*, with Camelot's version of the driver
+
+### Brownie Brown's driver
+
+* *Sword of Mana*, whose sound effects are converted with its music
+* *Magical Vacation*, with an older revision of the driver, whose sound effects
+  are converted with its music too
 
 ### Other games
 
@@ -112,15 +124,17 @@ supergbamidi game.gba
 
 This writes one `.mid` and one `.sf2` per song to a folder beside the input
 file, with the same name: for example `game/game_00.mid` and
-`game/game_00.sf2`. Pass several files to convert them together. Characters
-that Windows forbids in filenames are replaced with underscores. Trailing dots
-and spaces are removed, and reserved device names such as `CON` get an
-underscore prefix.
+`game/game_00.sf2`. A game with more than one sound driver gets every driver's
+songs (see [Options](#options)). Pass several files to convert them together.
+Characters that Windows forbids in filenames are replaced with underscores.
+Trailing dots and spaces are removed, and reserved device names such as `CON`
+get an underscore prefix.
 
 Input can be a raw `.gba` ROM or a GSF rip (`.gsflib`, `.minigsf` or `.gsf`).
 A `.minigsf` selects a song from the library named in its `_lib` tag. The
 library is loaded from the same folder and supplies the output name. If you
-pass several `.minigsf` files from one set, the library is converted once.
+pass several `.minigsf` files from one set, the library is converted once, or
+if no music that supergbamidi reads is found in it, the reason is given once.
 Conversion includes all songs in the ROM, regardless of the GSF's selected song.
 
 Use a ROM if you have one. A GSF rip keeps only the bytes used during playback,
@@ -145,23 +159,31 @@ Each file's results go in a folder next to it, as above.
 | `-n, --name NAME` | base name of the output files (default: input name) |
 | `-s, --songs LIST` | only these songs, e.g. `0,3,7-9` |
 | `-l, --loops N` | play each song's loop N times (default 2) |
-| `-t, --tracks LIST` | only these tracks, e.g. `4-15`; in Konami's driver, 0-3 are the PSG channels and 4 and up the sample voices, and in Quintet's, 0-3 are the PSG channels and 4 and 5 the PCM channels |
+| `-t, --tracks LIST` | only these tracks, e.g. `4-15`; in Konami's driver, 0-3 are the PSG channels and 4 and up the sample voices, in Quintet's, 0-3 are the PSG channels and 4 and 5 the PCM channels, and in Brownie Brown's, 0-3 are the music's PSG channels, 4-7 the sound effects' and 8 and up the sample channels |
 | `--single-sf2` | one SoundFont for all songs (see [Output](#output) for its banks) |
 | `--voice-channels` | MP2K only: a MIDI channel for each of the driver's sound channels instead of each track, so that notes stop where the game cuts them off, though a track's notes then move between channels (see [MIDI from MP2K](#midi-from-mp2k)) |
+| `--frame-timing` | put each event on the frame the game plays it in, rather than on the song's beat (see [Output](#output)) |
 | `--dump` | also write a text listing of every command of each song (`NAME_NN.txt`) |
-| `--info` | print each driver found, with its tables and a list of its songs, then exit. A game with more than one driver lists the one a conversion uses first. The track count, length and loop reflect the current conversion options |
-| `--driver NAME` | use `konami`, `rare`, `quintet`, `rd2` or `mp2k` instead of detecting the driver |
+| `--info` | print each driver found, with its tables and a list of its songs, then exit. The track count, length and loop reflect the current conversion options |
+| `--driver NAME` | use only `konami`, `rare`, `quintet`, `rd2`, `brownie` or `mp2k`, instead of every driver detection finds |
 | `--song-table ADDR`, `--song-count N` | override detection: the song table's address (hex), or for Nintendo R&D2's driver the address of the game's settings for it, and the number of songs |
 | `--sample-table ADDR`, `--mix-rate HZ` | override detection in Konami's driver: the sample table's address (hex) and the mixer's rate |
 | `-q, --quiet` | only print warnings and errors |
 | `--trace SONG`, `--trace-frames N` | print the driver model's state after each frame (for the driver's `compare_trace.py` in `tools/`) |
 
-Detection looks for Rare's driver first, then Quintet's, Nintendo R&D2's and
-MP2K, because they're found from their code alone, and then for Konami's. A
-game with two drivers uses the first one found; `--driver` selects the
-other. With `--song-table` but no `--driver`, the table goes to whichever driver
-detection finds, so a game whose driver isn't recognised needs `--driver` as
-well. `--sample-table` and `--mix-rate` imply `--driver konami`.
+Detection checks for Rare's driver first, followed by Quintet's, Nintendo
+R&D2's, MP2K and Brownie Brown's. These are identified from their code
+alone. Konami's is checked last.
+If a game has several drivers, each driver's songs are converted. The first
+driver uses the usual file names; the others add the driver's name after the
+base name, as in `game_mp2k_000.mid`. Messages also include the driver's
+name before the song number. `--songs` and `--tracks` apply to every driver.
+`--driver` selects one driver and uses the usual file names.
+
+`--trace` uses the first driver found. Without `--driver`, `--song-table`
+and `--song-count` also select the first driver and convert only its songs.
+Supply `--driver` as well if the game's driver isn't recognised.
+`--sample-table` and `--mix-rate` imply `--driver konami`.
 
 To listen, load the pair into any SoundFont player, for example:
 
@@ -176,11 +198,14 @@ fluidsynth -ni -F song10.wav game/game_10.sf2 game/game_10.mid
 * An input file without an extension needs `-o`, since its default output
   folder would have the same path as the file. A path that ends in a slash shows
   an empty file name in messages.
-* `--info` stops at the first driver whose tables it can't read; `--driver`
-  reaches the others. It lists each song's length and loop without checking
-  that the song converts, and leaves out the song's warnings.
-* In an MP2K game with more than 100 songs, whose files get three-digit
-  numbers, `--dump` numbers the listings of songs below 100 with two digits.
+* If the tables of the first driver found can't be read, a conversion and
+  `--info` stop with an error, and they leave out a later driver whose tables
+  can't be read; `--driver` reaches the others. `--info` lists each song's
+  length and loop without checking that the song converts, and leaves out the
+  song's warnings.
+* In a game with MP2K or Brownie Brown's driver and more than 100 songs, whose
+  files get three-digit numbers, `--dump` numbers the listings of songs below
+  100 with two digits.
 * On a case-sensitive file system, a `.minigsf` whose `_lib` tag differs in case
   from the library's file name doesn't find it.
 * On Windows, the console window waits for Enter even when the output is
@@ -197,12 +222,49 @@ A song's tracks can loop from different points and at different lengths. The
 loop starts where every track is looping and every track without a loop has
 finished, and it lasts until every track is back where its loop started: 12
 bars for tracks that loop 3 and 4 bars, for example, so that it repeats
-seamlessly. If that would be more than 8 times as long as the longest track's
-loop, the loop is the longest track's, and the other tracks fall out of step
-each time a player repeats it. Konami's driver sends every track back to its
-loop point at once, so each of its songs loops from the first of those points.
-A player that silences its notes when it repeats the loop also cuts short any
-note held across the loop's start.
+seamlessly. If that would be more than 8 times as long as the longest
+track's loop, the loop is the longest track's, and the other tracks fall out
+of step each time a player repeats it. Konami's driver sends every track
+back to its loop point at once, so each of its songs loops from the first of
+those points. Quintet's and Brownie Brown's drivers retain a track's
+settings when it loops. If the intro and the end of the loop leave different
+settings, such as octave or volume, the first pass can sound different from
+later passes. The marked loop then starts on the second pass, and the file
+plays the first pass once before it. Quintet's driver also discards
+fractional frames when a track loops. If this would make a looping player
+play a note at the loop's start twice, the marked loop moves to the second
+pass as well. A player that silences its notes when it repeats the loop also
+cuts short any note held across the loop's start.
+
+When a loop sets a track's program, volume, pan, expression, reverb or pitch
+bend, the MIDI file writes that setting even if its value hasn't changed.
+Otherwise, a player jumping back to `loopStart` would retain the value from
+the end of the loop. Konami conversions restore all these settings at each
+track's first event in the loop. Settings such as pan therefore repeat as
+they did on the first pass, even when the game carries them over from the
+loop's end.
+
+Each event goes on the song's beat, as in a quantised MIDI file, so that the
+notes line up with the bars and beats in an editor. The game plays each event
+at the start of a frame, so an event on the beat can be up to a frame from
+where the game plays it, or a frame and a half with Konami's and Brownie Brown's
+drivers. `--frame-timing` puts each event on the frame the game plays it in
+instead, as closely as the MIDI file's ticks allow, at the same tempos.
+
+Konami's and Brownie Brown's drivers store note lengths in whole frames,
+rounded by the composers' tools. A 16th note that should last 6.5 frames
+therefore lasts 6 or 7, and the original beat isn't stored. `supergbamidi`
+estimates the beat from the note lengths, finding steady passages and tempo
+changes. For ritardandos and rubatos, it sets a tempo for each note. Notes
+within a frame and a half of the nearest beat are moved onto it, using
+divisions from a quarter note down to a 32nd note or a 16th-note triplet.
+Echo channels keep their delay, as do the quick notes of an arpeggiated
+chord. Songs too short to establish a beat, such as most sound effects, use
+a quarter note of 30 frames. At possible tempo changes, such as loops, the
+quarter-note length is adjusted so that the preceding stretch ends on the
+beat. The next stretch reuses the quarter-note length of an earlier stretch
+with the same beat, if there is one. Otherwise it starts with the adjusted
+length.
 
 ### MIDI from Konami's driver
 
@@ -213,10 +275,9 @@ The older Rave Master, Eternal Duelist and Dungeon Dice Monsters revisions have
 8, 6 and 4 voices. MIDI channel 10 is used only if a song needs all 16
 channels.
 
-The game counts time in frames, so one MIDI tick is one frame (1/59.73 s) and
-every event is exactly on the frame the game plays it. The game doesn't store
-a tempo, so `supergbamidi` estimates the beat length from the note spacing.
-This only affects how bars line up in an editor.
+The game counts time in frames and doesn't store a tempo. The MIDI file has
+480 ticks per quarter note, and the tempos of the beat that `supergbamidi`
+works out from the notes (see [Output](#output)).
 
 The game's controls map to MIDI like this:
 
@@ -388,6 +449,10 @@ driver, the tempos are slowed down by 0.46% to match the GBA's frame rate.
 | `BEND`, `BENDR`, `TUNE`, `KEYSH`, vibrato | pitch bend, with the bend range set per channel by RPN 0 |
 | the song's reverb | CC91 (reverb send) |
 
+In Camelot's version of the driver, in *Golden Sun: The Lost Age*, the mixer
+has an echo in place of the reverb, the same in every song, so every track gets
+a reverb send of 53, the driver's reverb that comes closest to it.
+
 The MIDI file follows what the driver plays, where that differs from the
 song's commands:
 
@@ -433,6 +498,12 @@ those played on channel 10.
   backwards.
 * **Fixed-pitch samples**, which the driver plays at its mixer's rate whatever
   the key, play at that rate on every key, and the pitch bend doesn't move them.
+* **Synth voices**, in Camelot's version of the driver, play waves that its
+  mixer makes from a sample's data: a pulse wave whose duty moves up and down
+  each frame, a saw wave through a filter, and a triangle wave. A pulse or saw
+  voice gets a sample for each key the song plays it at, made at the mixer's
+  rate and looped over the duty's cycle, and a triangle voice one cycle that
+  plays at every key.
 * **PSG voices** play the Game Boy's square waves, the voice's 32-point wave
   pattern, or noise from the Game Boy's LFSR. Noise gets a zone for each of the
   driver's noise settings, at its rate, though settings below 32 Hz play at
@@ -442,10 +513,12 @@ those played on channel 10.
   the same voice. A drum kit's zones play at their voices' keys and pans.
 * **Envelopes** follow the voice's attack, decay, sustain and release. A
   sample's decay and release fall by a fraction each frame, which is a straight
-  line in decibels, as in a SoundFont. The PSG's fades are straight lines in
-  level, and they're stretched to keep the loudness close.
+  line in decibels, as in a SoundFont. The PSG's fades, and the releases of
+  Camelot's mixer, are straight lines in level, and they're stretched to keep
+  the loudness close.
 * **Volume and velocity** scale the level in a straight line, as in the driver,
-  and the driver's master volume scales the samples.
+  and the driver's master volume scales the samples. Camelot's mixer leaves the
+  master volume out, and plays the samples a little louder against the PSG.
 
 With `--single-sf2`, each voice keeps its number as its program, and banks tell
 apart the voices that songs play under the same number: the first one is in
@@ -507,15 +580,72 @@ named after its bank and number.
 With `--single-sf2`, each sequence's instruments are in the bank numbered after
 the sequence.
 
+### MIDI from Brownie Brown's driver
+
+The song table lists every sound the game plays, music and sound effects alike,
+and each one is converted as a song. Each MIDI file has a conductor track with
+the tempo and loop markers, and a track for each channel that plays notes:
+`Square 1`, `Square 2`, `Wave` and `Noise` for the music's PSG channels,
+`Effect square 1` to `Effect noise` for the sound effects', and `Samples 1` to
+`Samples 5`, or in *Magical Vacation*'s revision of the driver `Samples 1`,
+`Samples 2`, `Effect samples 1` and `Effect samples 2`, on MIDI channels 1-9 and
+11-14, away from the drum channel.
+
+The driver counts time in frames, and has no tempo: a song picks a set of note
+lengths, each for a tempo. The MIDI file has 480 ticks per quarter note, and
+the tempos of the beat that `supergbamidi` works out from the notes (see
+[Output](#output)). It starts on the song's first beat, in the second frame,
+when the driver first reads the song's data.
+
+| Game | MIDI |
+|---|---|
+| note | note on/off; velocity is always 127 |
+| volume, envelopes, the hardware's envelope, pans, the master level and fades | CC11 for loudness and CC10 for pan, a frame at a time, as with Konami's driver |
+| detune and the frequency sweep | pitch bend, with the bend range set per channel by RPN 0 |
+
+Each note uses the MIDI key nearest the driver's pitch. In *Sword of Mana*,
+the driver's key 0 is 33 cents below C#2, so it becomes MIDI key 37, with
+the SoundFont's square and wave samples tuned down 33 cents. In *Magical
+Vacation*, key 0 is C2, MIDI key 36. Pitch bends carry the difference
+between the channel's pitch and its key's frequency-table entry. Sample
+notes use the same keys. Noise notes are drums, with a key for each distinct
+sound and 92 sounds per kit. Notes last as long as their channel sounds: a
+rest that turns off or mutes a PSG channel, silences a voice or stops a FIFO
+ends the note.
+
+### SoundFont from Brownie Brown's driver
+
+Each song's SoundFont holds the instruments its notes play:
+
+* **Square channels** get a sample for each duty, and the wave channel a sample
+  for each wave pattern, tuned as the driver's frequency table is.
+* **Noise drums** are rendered from the driver's writes to the noise channel,
+  including each step of the note's envelope, which starts the channel again,
+  using the Game Boy's LFSR, envelope and length counter at 32768 Hz. As with
+  Quintet's driver, a drum that ends on a steady sound loops its last two
+  frames.
+* **Sample sets** get an instrument each, with a zone for each key the song
+  plays: the semitone's sample, one of the game's 8-bit samples widened to 16
+  bits, with its loop, played at the octave's rate, from an eighth of the
+  mixer's 16384 Hz up to the full rate. In *Magical Vacation*'s revision, each
+  sample gets an instrument, with a zone for each key the song plays, tuned to
+  the rate that the driver's table gives the key, from 1024 Hz at its key 0 up,
+  and a detune is a pitch bend.
+
+The levels follow the GBA's mixer: a square at full volume is 30/128 as loud as
+a full-scale sample. With `--single-sf2`, the instruments of all the songs are
+numbered together, in the order the songs first play them, with 128 to a bank.
+
 ### Sequence listing (`--dump`)
 
-The listing shows every track command with its address, raw bytes and meaning.
-For Konami's driver, it includes the frame and the delay after the command;
-for Rare's and Quintet's, it includes the tick. For MP2K and Nintendo R&D2's
-driver, it follows each track as the driver plays it, through its calls (and
-MP2K's patterns and repeats), up to its end or the end of its first loop, with
-the tick of each command. Use it to study a song or
-check the format documentation against real data.
+The listing shows every track command with its address, raw bytes and
+meaning. For Konami's driver, it includes the frame and the delay after the
+command; for Rare's, it includes the tick. For Quintet's and Nintendo R&D2's
+drivers and MP2K, it follows each track through its repeats, calls and
+patterns, to the end of the track or its first loop. Each command is listed
+with its tick. Brownie Brown's driver is listed the same way, using frames.
+Use the listing to study a song or check the format documentation against
+real data.
 
 ## Accuracy
 
@@ -524,6 +654,10 @@ SoundFonts.
 
 ### Konami's driver
 
+* **Timing.** The MIDI file puts each note on the beat that `supergbamidi`
+  works out, up to a frame and a half from where the game plays it, unless
+  `--frame-timing` keeps it on its frame. Where a song has no steady beat, its
+  notes keep their frames.
 * **PSG tuning.** The Game Boy's 11-bit frequency registers can't hit every
   pitch, so the game plays its high PSG notes slightly out of tune. The
   driver's frequency table is within about 3 cents of equal temperament below
@@ -551,8 +685,12 @@ SoundFonts.
 * **Envelopes.** The SoundFont's envelopes approximate the driver's straight
   fades, and some players treat very short envelope phases differently.
 * **Timing.** The driver runs once a frame, so it plays every event on a frame
-  boundary. The MIDI file keeps each event on its own tick, which can be up to
-  a frame earlier.
+  boundary. The MIDI file keeps each event on its tick, which can be up to a
+  frame later, or on the track that sets the tempo, up to a frame earlier,
+  unless `--frame-timing` puts it at the start of its frame. A delay that's
+  counting down when the tempo changes runs on at the old tempo, so after a
+  change partway through a tune, the MIDI file can put the other tracks' notes
+  several frames off, unless `--frame-timing` is used.
 * **Mixer character.** The driver mixes in mono at 13379 Hz with linear
   interpolation, and writes 8-bit output. A SoundFont player plays the same
   samples more cleanly, and the MIDI files leave every channel in the centre.
@@ -562,12 +700,12 @@ SoundFonts.
 ### Quintet's driver
 
 * **Timing.** The driver plays each note at the start of the frame its tick
-  falls in. The MIDI file keeps each note on its own tick, which can be up to a
-  frame later.
+  falls in. The MIDI file keeps each note on its tick, which can be up to a
+  frame later, unless `--frame-timing` puts it at the start of its frame.
 * **Tuning.** The driver's frequency table is within about 3 cents of equal
   temperament in the C4 octave, but up to about 27 cents flat in the C2 octave,
   9 cents in the C3 octave, 19 to 34 cents off in the C5 to C7 octaves, and 43
-  in the top octave. The PCM pitch table is within 4 cents, apart from its top
+  in the top octave. The PCM pitch table is within 7 cents, apart from its top
   entry, which is 14 cents flat. The MIDI files keep the keys equal-tempered.
 * **Noise drums.** The noise channel's envelope steps on the sound hardware's
   64 Hz clock, which isn't tied to the frames, so in the game a drum's volume
@@ -585,8 +723,9 @@ SoundFonts.
 ### Nintendo R&D2's driver
 
 * **Timing.** The driver plays each note at the start of the first frame that
-  reaches its tick. The MIDI file keeps each note on its own tick, which can be
-  up to a frame earlier.
+  reaches its tick. The MIDI file keeps each note on its tick, which can be up
+  to a frame earlier, unless `--frame-timing` puts it at the start of that
+  frame.
 * **Pitch bends.** The driver bends each voice on its own, and its LFO starts
   again with each note. A MIDI channel has one bend, which follows the track's
   newest note, so notes that play together on a track share it.
@@ -606,8 +745,10 @@ SoundFonts.
 ### MP2K
 
 * **Timing.** The driver plays each event at the start of the first frame that
-  reaches its tick. The MIDI file keeps each event on its own tick, which can
-  be up to a frame earlier.
+  reaches its tick. The MIDI file keeps each event on its tick, which can be up
+  to a frame earlier, unless `--frame-timing` puts it at the start of that
+  frame. With `--frame-timing`, the MIDI file has 3600 ticks per quarter note,
+  one for each 150th of a tick, so that each frame starts on a whole tick.
 * **PSG tuning.** As with Konami's driver, the PSG's 11-bit frequency registers
   put the game's high PSG notes slightly out of tune, and the driver's table
   and its bends round down. The MIDI files keep the equal-tempered pitch.
@@ -621,6 +762,10 @@ SoundFonts.
 * **Notes cut off.** The driver stops a note at once when it gives the note's
   channel to another, even partway through its release. Without
   `--voice-channels`, a SoundFont player lets the note fade out instead.
+* **Changes that miss older notes.** When a track changes its volume, pan or
+  pitch in the tick in which it starts a note, the driver gives the change to
+  the new note alone, and the track's older notes keep their volume, pan and
+  pitch until the track's next change. The MIDI file changes them all.
 * **Echo.** A track can give its notes a quiet echo after their release. The
   SoundFont's release doesn't include it.
 * **Reverb.** The driver's reverb is a short echo of its output. It's
@@ -632,15 +777,48 @@ SoundFonts.
   conversion leaves these out, with a warning.
 * **Mixer character.** The driver mixes at its own rate, often 13379 Hz, with
   linear interpolation, and writes 8-bit output. A SoundFont player plays the
-  same samples more cleanly.
+  same samples more cleanly. Some games' mixer is mono, and plays every
+  DirectSound note in the middle, whatever its pan; the MIDI file keeps each
+  track's pan.
+* **Camelot's synth voices.** The mixer makes its waves at its rate, 31536 Hz,
+  and the SoundFont's samples hold them at the pitch of each key. A pitch bend,
+  and a track's key shift, which the MIDI file puts in the pitch bend, move a
+  pulse wave's cycle of duties and a saw wave's filter with the pitch, where
+  the game keeps them as they are. A sample's loop ends at the nearest whole
+  cycle of its wave, up to half a cycle from where the duty's cycle ends. The
+  triangle wave's single cycle leaves out the faint aliasing of the mixer's.
+* **Camelot's echo.** The mixer's echo comes back a frame and four frames
+  later, and from the right side to the left after 704 points. The reverb send
+  only approximates it.
+
+### Brownie Brown's driver
+
+* **Timing.** The MIDI file puts each note on the beat that `supergbamidi`
+  works out, up to a frame and a half from where the game plays it, unless
+  `--frame-timing` keeps it on its frame. Where a song has no steady beat, as
+  in most sound effects, its notes keep their frames.
+* **The hardware's envelope.** A PSG channel's envelope steps on the sound
+  hardware's 64 Hz clock, which isn't tied to the frames. CC11 follows a model
+  of it a frame at a time, so a step can come up to a frame later than in the
+  game, and a noise drum's steps up to 1/128 s earlier or later.
+* **Mixer character.** The driver mixes at 16384 Hz and plays the lower octaves
+  by repeating each point, interpolating only between the points it plays twice
+  when it mixes all five voices, and writes 8-bit output. A SoundFont player
+  plays the same samples more cleanly. The PSG's waveforms are without the DC
+  offset. In *Magical Vacation*'s revision, which plays each sample straight
+  through a FIFO, the driver scales each point to the volume, a step lower for
+  most negative points, and a sample that doesn't loop stops about 20 points
+  before its end, which then play at the start of the FIFO's next note.
+* **Sound effects** play on their own in their conversions. In the game, a
+  sound effect takes its PSG channel from the music while it plays.
 
 ## Internals
 
-`docs/konami.md`, `docs/rare.md`, `docs/quintet.md`, `docs/rd2.md` and
-`docs/mp2k.md` document the drivers and their data formats in full, including
-how the tool locates them. The code for each is in `src/konami/`, `src/rare/`,
-`src/quintet/`, `src/rd2/` and `src/mp2k/`, behind the interface in
-`src/music.h`.
+`docs/konami.md`, `docs/rare.md`, `docs/quintet.md`, `docs/rd2.md`,
+`docs/mp2k.md` and `docs/brownie.md` document the drivers and their data
+formats in full, including how the tool locates them. The code for each is in
+`src/konami/`, `src/rare/`, `src/quintet/`, `src/rd2/`, `src/mp2k/` and
+`src/brownie/`, behind the interface in `src/music.h`.
 
 `tools/` holds the scripts used to reverse engineer the drivers and validate
 the conversion: a disassembler, harnesses that run each game's driver

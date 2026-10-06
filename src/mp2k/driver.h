@@ -50,6 +50,9 @@ struct DriverInfo
     uint32_t step_scale = 627;         // the mixer's step for each Hz of a sample's rate, in 2^-23 points
     uint8_t dac_bits = 0x40;           // the output's resolution: bits 6 and 7 of the sound bias register's high byte
     bool special_samples = false;      // the mixer can play samples backwards, and compressed samples
+    bool mono = false;                 // the mixer has one output, and plays a sample at the average of its volumes
+    bool camelot_sequencer = false;    // Camelot's changes to how a note takes a channel and sets its volume and rate
+    bool camelot_mixer = false;        // Camelot's mixer, with straight-line releases and synth voices
     std::vector<std::string> log;      // detection results for --info
     std::vector<std::string> warnings; // assumptions detection had to make
 };

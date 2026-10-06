@@ -5,7 +5,7 @@
 
 It follows branches and calls from the given entry points, resolves PC-relative literal loads, and marks code that a
 GSF rip zeroed out ("stripped"). gsfopt keeps only the bytes a song actually touched, so zeroed code is code the songs
-never ran.
+never ran. It also marks where the walk runs into bytes that aren't an instruction ("undecodable"), such as data.
 
     gbadis.py ROM ENTRY [ENTRY ...] [--copy SRC:DST:SIZE]
 
@@ -37,6 +37,7 @@ class Disassembler:
         self.literals = {}
         self.xrefs = {}
         self.stripped = set()  # addresses the walk reached in code that a GSF rip zeroed out
+        self.undecodable = {}  # address -> thumb, where the walk reached bytes that aren't an instruction
         self.md = {True: Cs(CS_ARCH_ARM, CS_MODE_THUMB), False: Cs(CS_ARCH_ARM, CS_MODE_ARM)}
         for md in self.md.values():
             md.detail = True
@@ -71,6 +72,7 @@ class Disassembler:
                     break
                 ins = next(self.md[thumb].disasm(code, addr), None)
                 if ins is None:
+                    self.undecodable[addr] = thumb
                     self.labels.setdefault(addr, 'BAD_%08x' % addr)
                     break
                 self.insns[addr] = (ins, thumb)
@@ -95,7 +97,7 @@ class Disassembler:
 
     def listing(self):
         prev = None
-        for addr in sorted(set(self.insns) | set(self.literals) | self.stripped):
+        for addr in sorted(set(self.insns) | set(self.literals) | self.stripped | set(self.undecodable)):
             if prev is not None and addr > prev:
                 print('        ; gap %x bytes' % (addr - prev))
             if addr in self.labels:
@@ -115,6 +117,11 @@ class Disassembler:
                 mode = '' if thumb else 'A:'
                 print('%08x: %-10s %s%-7s %s%s' % (addr, ins.bytes.hex(), mode, ins.mnemonic, ops, comment))
                 prev = addr + ins.size
+            elif addr in self.undecodable:
+                thumb = self.undecodable[addr]
+                size = 2 if thumb else 4
+                print('%08x: %-10s %s<undecodable>' % (addr, self.read(addr, size).hex(), '' if thumb else 'A:'))
+                prev = addr + size
             elif addr in self.literals:
                 print('%08x: .word 0x%08x' % (addr, self.literals[addr]))
                 prev = addr + 4

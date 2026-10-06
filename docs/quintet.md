@@ -1,13 +1,11 @@
 # Quintet's GBA sound driver
 
-This document describes the sound driver that Quintet wrote for Banpresto's
-*Super Robot Taisen* games on the Game Boy Advance: its song data, its
-sequencer and the way it drives the sound hardware, in enough detail to play
-the songs the way the driver does. It's based on the driver's code in *Super
-Robot Taisen A* (game code `ASRJ`), and the addresses given as examples come
-from that game. Other games put the driver and its data elsewhere, and
-`supergbamidi` finds them from the code (see
-[Locating the driver](#locating-the-driver)).
+This document covers the song format, sequencer and sound hardware control
+in Quintet's driver for Banpresto's *Super Robot Taisen* games on the Game
+Boy Advance. It's based on the driver's code in *Super Robot Taisen A* (game
+code `ASRJ`), and the addresses given as examples come from that game. Other
+games put the driver and its data elsewhere, and `supergbamidi` finds them
+from the code (see [Locating the driver](#locating-the-driver)).
 
 The driver plays six channels, one for each of the GBA's sound channels: the
 Game Boy's two square channels, its wave channel and its noise channel, and
@@ -213,11 +211,14 @@ table says otherwise.
 `D1` outside a note, `D8`, `D9`, `F0` and `F2`-`FE` do nothing, apart from
 `F0` in the J revision.
 
-`FF` sends the channel back to its loop point if it has one. If the loop point
-is the `FF` itself, the channel stops reading until the song is changed. A
-channel without a loop point ends: its level goes to 0 and a PCM channel's
-FIFO stops. Each channel loops on its own, so channels with loops of different
-lengths drift apart.
+`FF` sends the channel back to its loop point if it has one. It resets the
+channel's counts (see [Timing](#timing)), but the octave, the volume and every
+other setting stay as the end of the loop leaves them, so a loop that relies
+on a setting from before it plays its first pass with the one the intro left.
+If the loop point is the `FF` itself, the channel stops reading until the song
+is changed. A channel without a loop point ends: its level goes to 0 and a PCM
+channel's FIFO stops. Each channel loops on its own, so channels with loops of
+different lengths drift apart.
 
 ## Timing
 
@@ -379,12 +380,13 @@ A note plays the sample:
    bytes into it, points the DMA at the 32 bytes after them, and starts the
    DMA (control `0xB640`) and the timer, at 0x10000 − 16780000 / rate.
 
-The DMA feeds the FIFO on the timer's requests. The driver gets no notification
-when the sample ends. Instead, each frame it adds the rate to the position,
-and if another frame would take it past the end, it stops the FIFO, and starts
-it again from the loop point if there is one, with the position set to the
-loop point's count plus the rate. So each pass through a loop lasts a whole
-number of frames, and is cut a frame or two short of the end that `E7` sets.
+The DMA feeds the FIFO on the timer's requests. The driver gets no
+notification when a sample ends. Each frame, it adds the rate to the
+position and checks whether another frame would pass the end. If so, it
+stops the FIFO. For a looping sample, it restarts the FIFO from the loop
+point and sets the position to the loop point's count plus the rate. Each
+pass therefore lasts a whole number of frames and ends a frame or two before
+the endpoint set by `E7`.
 
 ## The J revision
 

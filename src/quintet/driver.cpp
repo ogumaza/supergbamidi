@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "quintet/song.h"
 #include "thumb.h"
 
 namespace supergbamidi::quintet
@@ -17,9 +18,6 @@ namespace
 // The most songs and samples detection reads, so that unrelated ROM data can't keep it busy.
 constexpr int kMaxSongs = 1024;
 constexpr int kMaxSamples = 128;
-
-// A song starts with its length and the offsets of its 6 channels' data, so its data starts at 14.
-constexpr uint32_t kSongHeaderSize = 14;
 
 std::string Hex(uint32_t v)
 {
@@ -34,28 +32,6 @@ uint32_t FindLiteral(const Rom& rom, const char* pattern, int index)
 {
     const std::vector<uint32_t> hits = FindThumb(rom, ParseThumbPattern(pattern));
     return hits.empty() ? 0 : ThumbLiteral(rom, hits[0] + 2 * uint32_t(index));
-}
-
-// Returns true if the song at `at` has a header the driver can read: a length that covers the header, and 6 channels
-// that start inside the song.
-bool PlausibleSong(const Rom& rom, uint32_t at)
-{
-    const uint32_t length = rom.U16(at) & ~1u;
-    if (length < kSongHeaderSize || !rom.Contains(at, length))
-    {
-        return false;
-    }
-
-    for (uint32_t c = 0; c < 6; c++)
-    {
-        const uint32_t offset = rom.U16(at + 2 + 2 * c);
-        if (offset < kSongHeaderSize || offset >= length)
-        {
-            return false;
-        }
-    }
-
-    return true;
 }
 
 // Returns the address that the game's lookup of a file gives, where the instruction before the bl at `call` is
@@ -128,7 +104,8 @@ uint32_t FindSongs(const Rom& rom, uint32_t play)
         for (uint32_t back = 4; back <= 40; back += 2)
         {
             const std::optional<uint32_t> songs = GameLookup(rom, call - back);
-            if (songs && PlausibleSong(rom, *songs))
+            SongHeader header;
+            if (songs && ReadSongHeader(rom, *songs, header))
             {
                 return *songs;
             }
@@ -215,10 +192,11 @@ std::vector<uint32_t> ReadSongList(const Rom& rom, uint32_t songs, int limit)
 {
     std::vector<uint32_t> list;
     uint32_t at = songs;
-    while (int(list.size()) < limit && PlausibleSong(rom, at))
+    SongHeader header;
+    while (int(list.size()) < limit && ReadSongHeader(rom, at, header))
     {
         list.push_back(at);
-        at += rom.U16(at) & ~1u;
+        at += header.length;
     }
 
     return list;

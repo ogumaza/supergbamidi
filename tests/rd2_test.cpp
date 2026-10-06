@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "files.h"
+#include "midi.h"
 #include "music.h"
 #include "rd2/convert.h"
 #include "rd2/driver.h"
@@ -317,6 +318,7 @@ private:
 
             return uint16_t(here);
         };
+
         auto region = [](uint8_t type, uint8_t flags, uint16_t arg, uint16_t envelope, uint8_t release, uint8_t tuning)
         {
             return std::vector<uint8_t>{
@@ -574,28 +576,31 @@ void TestInstruments()
     const Rom rom = cart.ToRom();
     const DriverInfo info = Detect(rom);
 
-    const auto frames = Run(rom, info, 0, 4);
-
+    Sequencer seq(rom, info, 0);
     std::vector<Event> notes;
-    for (const auto& frame : frames)
+    std::vector<uint32_t> pitches;
+    for (int f = 0; f < 4; f++)
     {
-        for (const Event& e : frame)
+        seq.Step();
+        for (const Event& e : seq.Events())
         {
             if (e.kind == Event::kNote)
             {
                 notes.push_back(e);
+                pitches.push_back(e.voice >= 0 ? seq.Voices()[size_t(e.voice)].note_pitch : 0);
             }
         }
     }
+
     SUPERGBAMIDI_CHECK_EQ(notes.size(), 5);
     SUPERGBAMIDI_CHECK(notes[0].lookup.drum);
     SUPERGBAMIDI_CHECK_EQ(notes[0].lookup.drum_pan, 0x20);
-    SUPERGBAMIDI_CHECK_EQ(notes[0].note_pitch, 0x8000);
+    SUPERGBAMIDI_CHECK_EQ(pitches[0], 0x8000);
     SUPERGBAMIDI_CHECK(notes[1].lookup.key_sample && notes[2].lookup.key_sample);
     SUPERGBAMIDI_CHECK(notes[1].sample != notes[2].sample);
     SUPERGBAMIDI_CHECK_EQ(notes[3].sample, notes[2].sample);
     SUPERGBAMIDI_CHECK_EQ(notes[4].sample, notes[1].sample);
-    SUPERGBAMIDI_CHECK_EQ(notes[3].note_pitch, rom.U32(kPitchTable + 4 * (59 + 0x30 - 48)));
+    SUPERGBAMIDI_CHECK_EQ(pitches[3], rom.U32(kPitchTable + 4 * (59 + 0x30 - 48)));
 }
 
 void TestConversion()
@@ -694,6 +699,60 @@ void TestLoopLengths()
     SUPERGBAMIDI_CHECK(sum.loop_end > 0 && std::fabs(sum.seconds / sum.loop_end - 12150.0 / 6750) < 0.01);
 }
 
+// A track sets volume 200 and plays a note, and then loops: volume 200 and a note, and volume 100, pan 100 and a note.
+// The first time through, the loop's first note has the levels that the note before it left, but a player that jumps
+// back to the loop's start comes from volume 100, so the loudness is written again there, at the MIDI file's tick 900.
+// The game keeps pan 100 from then on, as such a player does, so the pan isn't written again.
+void TestLoopSettingsAgain()
+{
+    Cart cart;
+    cart.Sequences({{Track()
+                         .Bytes({0xE4, 120, 0xC2, kLooped, 0xE0, 200})
+                         .Note(60, 6, 127)
+                         .Wait(6)
+                         .Bytes({0xE0, 200})
+                         .Note(64, 6, 127)
+                         .Wait(6)
+                         .Bytes({0xE0, 100, 0xC3, 100})
+                         .Note(67, 6, 127)
+                         .Wait(6)
+                         .Bytes({0xF0, 15, 0})
+                         .End()}});
+    const Rom rom = cart.ToRom();
+    const DriverInfo info = Detect(rom);
+    ConvertOptions opt;
+    opt.out_dir = Utf8(test::g_temp);
+    opt.base_name = "loop_again";
+
+    const SongSummary sum = ConvertSong(rom, info, 0, opt, nullptr);
+
+    std::vector<std::pair<uint32_t, int>> pans, levels;
+    for (const auto& [tick, bytes] : ReadMidi(sum.midi_path).Find(0xB0))
+    {
+        if (bytes[1] == cc::kPan)
+        {
+            pans.emplace_back(tick, bytes[2]);
+        }
+        if (bytes[1] == cc::kExpression)
+        {
+            levels.emplace_back(tick, bytes[2]);
+        }
+    }
+
+    SUPERGBAMIDI_CHECK(sum.ok);
+    SUPERGBAMIDI_CHECK_EQ(levels.size(), 5);
+    if (levels.size() == 5)
+    {
+        SUPERGBAMIDI_CHECK(levels[1] == std::make_pair(900u, levels[0].second));
+        SUPERGBAMIDI_CHECK(levels[2].first == 1800 && levels[2].second < levels[1].second);
+    }
+    SUPERGBAMIDI_CHECK_EQ(pans.size(), 2);
+    if (pans.size() == 2)
+    {
+        SUPERGBAMIDI_CHECK(pans[0] == std::make_pair(0u, 64) && pans[1].first == 1800 && pans[1].second > 64);
+    }
+}
+
 void TestDump()
 {
     Cart cart;
@@ -751,6 +810,7 @@ void RunTests()
     TestInstruments();
     TestConversion();
     TestLoopLengths();
+    TestLoopSettingsAgain();
     TestDump();
     TestMusic();
 }

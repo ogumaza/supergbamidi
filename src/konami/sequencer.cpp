@@ -72,10 +72,9 @@ std::unique_ptr<Sequencer> Sequencer::Create(const Rom& rom, const DriverInfo& i
 Sequencer::Sequencer(const Rom& rom, const DriverInfo& info, int song) : rom_(rom)
 {
     loop_frame_.fill(-1);
-    if (!ReadSongHeader(rom, info.song_table, song, info.revision, header_))
-    {
-        header_ = SongHeader();
-    }
+
+    // A song whose entry isn't in the ROM keeps an empty header, so it plays nothing.
+    ReadSongHeader(rom, info.song_table, song, info.revision, header_);
 }
 
 bool Sequencer::AnyTrackActive() const
@@ -119,7 +118,9 @@ void Sequencer::Warn(int track, uint32_t addr, const std::string& what)
 
 void Sequencer::PassLoopPoint(int track)
 {
-    if (loop_frame_[size_t(track)] < 0 && loops_ == 0)
+    // Each loop point moves the track's start, so a loop takes the track back to the last one it passed. Those it
+    // passes once the song has looped don't change where the loop starts.
+    if (loops_ == 0)
     {
         loop_frame_[size_t(track)] = int(frame_);
     }

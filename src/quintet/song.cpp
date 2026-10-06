@@ -24,10 +24,10 @@ constexpr size_t kMaxRepeatDepth = 8;
 // The names of the pitches, from C.
 constexpr const char* kNoteNames[12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
 
-std::string Format(const char* format, int a, int b = 0, int c = 0, int d = 0, int e = 0)
+std::string Format(const char* format, int a, int b = 0, int c = 0, int d = 0)
 {
     char text[160];
-    std::snprintf(text, sizeof text, format, a, b, c, d, e);
+    std::snprintf(text, sizeof text, format, a, b, c, d);
 
     return text;
 }

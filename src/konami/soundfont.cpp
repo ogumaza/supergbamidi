@@ -60,7 +60,7 @@ double SquareNoteZeroHz(const Rom& rom, const DriverInfo& info)
         }
     }
 
-    return 65.40639132514966; // C2, 440 Hz * 2^(-33/12)
+    return kC2;
 }
 
 } // namespace

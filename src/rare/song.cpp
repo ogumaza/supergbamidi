@@ -13,9 +13,6 @@ namespace
 // byte to the commands that have a channel.
 constexpr uint8_t kArgBytes[kCommandCount] = {3, 1, 2, 3, 2, 2, 2, 2, 1, 1, 2, 0, 0};
 
-// Maximum number of commands ScanTrack() reads per track.
-constexpr int kMaxTrackCommands = 1000000;
-
 bool HasChannel(uint8_t command)
 {
     return command >= kCmdNoteOnB && command <= kCmdBend;

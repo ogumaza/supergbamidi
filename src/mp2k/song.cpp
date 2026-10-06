@@ -28,14 +28,6 @@ constexpr int kMaxTrackCommands = 1000000;
 // The size of the memory area that kCmdMemAcc reads and writes: a byte offset reaches 256 bytes.
 constexpr size_t kMemAccSize = 256;
 
-// Returns true if a command ends the track: kCmdFine, and the command numbers that the driver's command table gives the
-// same handler.
-bool EndsTrack(uint8_t command)
-{
-    return command == kCmdFine || (command >= 0xB6 && command <= 0xB8) || command == 0xC6 || command == 0xC7 ||
-           (command >= 0xC9 && command <= 0xCB);
-}
-
 // Returns true if kCmdMemAcc's conditional operation `op` jumps, for a byte `value` of the memory area and an operand
 // `operand`.
 bool MemAccJumps(uint8_t op, uint8_t value, uint8_t operand)
@@ -58,6 +50,12 @@ bool MemAccJumps(uint8_t op, uint8_t value, uint8_t operand)
 }
 
 } // namespace
+
+bool EndsTrack(uint8_t command)
+{
+    return command == kCmdFine || (command >= 0xB6 && command <= 0xB8) || command == 0xC6 || command == 0xC7 ||
+           (command >= 0xC9 && command <= 0xCB);
+}
 
 int ClockLength(int index)
 {
@@ -251,7 +249,7 @@ bool DecodeEvent(const Rom& rom, uint32_t address, uint8_t running, Event& event
     {
         event.target = rom.U32(at);
     }
-    else if (c == kCmdRept || (c == kCmdMemAcc && args == 7))
+    else if (c == kCmdRept || (c == kCmdMemAcc && args == 7) || (c == kCmdXcmd && args == 5))
     {
         event.target = rom.U32(at + uint32_t(args - 4));
     }
@@ -322,6 +320,12 @@ std::string DescribeEvent(const Event& e)
     else if (c == kCmdPort)
     {
         std::snprintf(b, sizeof b, "PORT register %02X value %02X", unsigned(e.arg[0]), unsigned(e.arg[1]));
+    }
+    else if (c == kCmdXcmd && e.args == 5)
+    {
+        // The 4-byte argument of kXcmdWave, a sample's address, or of kXcmdOffset, a point in the sample.
+        std::snprintf(b, sizeof b, e.arg[0] == kXcmdWave ? "XCMD %s 0x%08X" : "XCMD %s %u", kXcmdNames[e.arg[0]],
+                      unsigned(e.target));
     }
     else if (c == kCmdXcmd)
     {

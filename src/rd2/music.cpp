@@ -126,7 +126,8 @@ public:
         return rd2::DumpSong(rom_, info_, song, path, error);
     }
 
-    // Writes the PSG register writes and the voices' state after each frame.
+    // Writes the PSG register writes, the state of each voice that plays and the order the mixer takes the sample
+    // voices in, after each frame.
     bool Trace(int song, long long frames, std::FILE* out, std::vector<std::string>& warnings) const override
     {
         Sequencer seq(rom_, info_, song);
@@ -174,6 +175,7 @@ private:
         ConvertOptions opt;
         opt.loops = settings.loops;
         opt.track_mask = settings.track_mask;
+        opt.frame_timing = settings.frame_timing;
         opt.bank = shared_ ? song : 0;
         opt.out_dir = settings.out_dir;
         opt.base_name = settings.base_name;

@@ -1,12 +1,11 @@
 # Rare's GBA sound driver
 
-This document describes the sound driver in Rare's Game Boy Advance games: its
-tune data, its sequencer and its mixer, in enough detail to play the tunes the
-way the driver does. It's based on the driver's code in the US release of
-*Donkey Kong Country* (game code `A5NE`), and the addresses given as examples
-come from that game. Other games put the driver and its data elsewhere, and
-`supergbamidi` finds them from the code (see
-[Locating the driver](#locating-the-driver)).
+This document covers the tune format, sequencer and mixer in Rare's Game Boy
+Advance sound driver. It's based on the driver's code in the US release of
+*Donkey Kong Country* (game code `A5NE`), and the addresses given as
+examples come from that game. Other games put the driver and its data
+elsewhere, and `supergbamidi` finds them from the code (see [Locating the
+driver](#locating-the-driver)).
 
 The tune data is close to a Standard MIDI File: tracks of MIDI-like commands
 with delays in ticks, a tempo in microseconds per quarter note, MIDI channels,
@@ -493,9 +492,10 @@ scales: 10512 Hz (176 samples), 13379 Hz (224), 18157 Hz (304) and 21024 Hz
 13379 Hz in every game except *It's Mr. Pants*, where it's 21024 Hz.
 `supergbamidi` reads the rate from the init and assumes 13379 Hz for any other.
 
-If it doesn't find the command reader, as when `--driver rare` and
-`--song-table` give the tune table of a ROM whose init it can't find,
-`supergbamidi` reads every track of every tune in both formats, and takes the
-one in which every track ends. If both do, it takes the one that reads more
-commands, since the wrong format usually takes a note's argument for an end.
-`--song-count` sets the number of tunes when the count from the table is wrong.
+If the command reader can't be found, `supergbamidi` tries every track of
+every tune in both formats and chooses the format in which every track ends.
+This can happen when `--driver rare` and `--song-table` supply a tune table
+but detection can't find the init routine. If both formats work, it chooses
+the one that reads more commands: the wrong format usually mistakes a note's
+argument for an end command. Use `--song-count` if the count read from the
+table is wrong.

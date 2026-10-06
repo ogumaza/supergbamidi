@@ -18,7 +18,6 @@ constexpr int kGuardPoints = 8;
 
 // Game Boy square duty waveforms, 8 steps, most significant bit first.
 constexpr uint8_t kDutyPatterns[4] = {0x01, 0x81, 0x87, 0x7E};
-constexpr const char* kDutyNames[4] = {"12.5%", "25%", "50%", "75%"};
 
 // Middle C, which a square or wave sample plays on its root key.
 constexpr double kMiddleC = 261.6255653005986;
@@ -29,13 +28,12 @@ constexpr uint32_t kNoiseRate = 65536;
 // The longest noise sound rendered after its last change, in frames: about 4 seconds.
 constexpr size_t kMaxNoiseFrames = 240;
 
-// The CPU cycles in a frame, and in a point of the noise sample.
-constexpr uint64_t kFrameCycles = 280896;
-constexpr uint64_t kNoisePointCycles = 16777216 / kNoiseRate;
+// The CPU cycles in a point of the noise sample.
+constexpr uint64_t kNoisePointCycles = kSecondCycles / kNoiseRate;
 
 // The CPU cycles between the frame sequencer's ticks of the envelope (64 Hz) and of the length counter (256 Hz).
-constexpr uint64_t kEnvelopeTickCycles = 16777216 / 64;
-constexpr uint64_t kLengthTickCycles = 16777216 / 256;
+constexpr uint64_t kEnvelopeTickCycles = kSecondCycles / 64;
+constexpr uint64_t kLengthTickCycles = kSecondCycles / 256;
 
 // Stores one waveform cycle as three copies looping over the middle one, so players get lead-in and lead-out points
 // around the loop.

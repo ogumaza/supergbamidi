@@ -3,7 +3,6 @@
 #include "rd2/sequencer.h"
 
 #include <algorithm>
-#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -43,9 +42,6 @@ constexpr uint64_t kFresh = ~uint64_t(0);
 // The highest pitch index in the driver's tables.
 constexpr int kTopIndex = 0x77;
 
-// The deepest F4 can nest: the driver keeps 3 return addresses.
-constexpr int kMaxDepth = 3;
-
 // The most commands a track reads in a frame before the model gives up on it, so that a loop without a wait can't hang
 // the conversion. The driver would hang there.
 constexpr int kMaxCommands = 100000;
@@ -81,14 +77,6 @@ Event MakeEvent(Event::Kind kind, int track, int voice, uint32_t id, uint64_t un
     e.value = value;
 
     return e;
-}
-
-std::string Hex(uint32_t v)
-{
-    char b[16];
-    std::snprintf(b, sizeof b, "0x%08X", unsigned(v));
-
-    return b;
 }
 
 } // namespace
@@ -824,7 +812,6 @@ void Sequencer::NoteOn(int slot, uint8_t note, uint8_t velocity, uint32_t length
     e.type = x.type;
     e.sample = x.sample;
     e.psg = x.psg;
-    e.note_pitch = x.note_pitch;
     events_.push_back(e);
 
     if (frames == 0)

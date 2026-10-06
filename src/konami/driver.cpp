@@ -654,7 +654,7 @@ uint32_t FindSongTable(const Rom& rom, Revision revision, std::vector<std::strin
         return best;
     }
 
-    // Nothing that holds the driver's songs: this game has another driver.
+    // Nothing that holds the driver's songs: without the driver's command reader, the game has another driver.
     error.clear();
 
     return 0;
@@ -862,7 +862,9 @@ uint32_t FindSampleTable(const Rom& rom, const std::vector<int>& used, const Tab
                                    : "the sample table that the note-start code loads isn't in the ROM";
     if (revision == Revision::kDungeonDiceMonsters)
     {
-        error = std::string(why) + ", and supergbamidi can't look for this revision's sample table in the data";
+        error = std::string(why) +
+                ", and supergbamidi can't look for this revision's sample table in the data (--sample-table overrides "
+                "detection)";
         return 0;
     }
 
@@ -870,7 +872,7 @@ uint32_t FindSampleTable(const Rom& rom, const std::vector<int>& used, const Tab
     const uint32_t scanned = ScanForSampleTable(rom, used, log, warnings);
     if (!scanned)
     {
-        error = "couldn't find the sample table";
+        error = "couldn't find the sample table (--sample-table overrides detection)";
     }
 
     return scanned;
@@ -887,19 +889,22 @@ double TimerRate(const Rom& rom, uint32_t timer_table)
 
     constexpr int kPrescale[4] = {1, 64, 256, 1024};
     const uint32_t v = rom.U32(timer_table);
-    const double rate = 16777216.0 / ((0x10000 - (v & 0xFFFF)) * kPrescale[(v >> 16) & 3]);
+    const double rate = kCpuHz / ((0x10000 - (v & 0xFFFF)) * kPrescale[(v >> 16) & 3]);
     return rate >= 4000 && rate <= 65536 ? rate : 0;
 }
 
 // Finds the driver's command reader, and works out the driver's revision from the opcodes it compares the command with:
 // ldrb rX,[rY] / cmp rX,#0xFC / ble, then FF, and FD in the Ultimate Masters revision or FE in older ones. Of those,
 // the WCT 2004 revision goes on with EF and FA, the Rave Master revision with EF and F5, the Eternal Duelist revision
-// with EF and F3, and the Dungeon Dice Monsters revision with EF and FC. Returns false and sets `error` for another
-// older revision, which supergbamidi can't read. A ROM without a command reader that this recognises is taken to have
-// the Ultimate Masters revision.
-bool FindRevision(const Rom& rom, Revision& revision, std::vector<std::string>& log, std::string& error)
+// with EF and F3, and the Dungeon Dice Monsters revision with EF and FC. Sets `reader` to the address of the reader, or
+// to 0 if there's none. Returns false and sets `error` for another older revision, which supergbamidi can't read. A ROM
+// without a command reader that this recognises is taken to have the Ultimate Masters revision.
+bool FindRevision(const Rom& rom, Revision& revision, uint32_t& reader, std::vector<std::string>& log,
+                  std::string& error)
 {
     revision = Revision::kUltimateMasters;
+    reader = 0;
+
     const uint8_t* d = rom.Ptr(kRomBase);
     const size_t count = rom.Size() / 2;
     auto h = [&](size_t i)
@@ -936,7 +941,7 @@ bool FindRevision(const Rom& rom, Revision& revision, std::vector<std::string>& 
             continue;
         }
 
-        const uint32_t reader = kRomBase + uint32_t(2 * i);
+        reader = kRomBase + uint32_t(2 * i);
         if (opcodes[2] == 0xFE && (opcodes[3] != 0xEF || (opcodes[4] != 0xFA && opcodes[4] != 0xF5 &&
                                                           opcodes[4] != 0xF3 && opcodes[4] != 0xFC)))
         {
@@ -1123,7 +1128,8 @@ bool DetectDriver(const Rom& rom, const DriverOverrides& overrides, DriverInfo& 
         }
     }
 
-    if (!FindRevision(rom, info.revision, log, error))
+    uint32_t reader = 0;
+    if (!FindRevision(rom, info.revision, reader, log, error))
     {
         return false;
     }
@@ -1144,6 +1150,14 @@ bool DetectDriver(const Rom& rom, const DriverOverrides& overrides, DriverInfo& 
         info.song_table = FindSongTable(rom, info.revision, log, error);
         if (!info.song_table)
         {
+            // The command reader shows that the game has the driver, so a song table that can't be found is an error.
+            if (reader && error.empty())
+            {
+                error = "found the command reader of the " + std::string(RevisionName(info.revision)) +
+                        " revision of Konami's driver, at " + Hex(reader) +
+                        ", but not its song table (--song-table and --song-count override detection)";
+            }
+
             return false;
         }
     }
@@ -1293,7 +1307,7 @@ bool DetectDriver(const Rom& rom, const DriverOverrides& overrides, DriverInfo& 
     }
     else
     {
-        info.mix_rate = 16777216.0 / (0x10000 - 0xFCE2);
+        info.mix_rate = kCpuHz / (0x10000 - 0xFCE2);
         info.warnings.push_back(info.timer_table
                                     ? "mixer rate in the timer table is outside 4000-65536 Hz, assuming 21024 Hz"
                                     : "mixer timer not found, assuming 21024 Hz");

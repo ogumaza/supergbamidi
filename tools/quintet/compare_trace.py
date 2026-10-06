@@ -30,8 +30,8 @@ def driver_lines(rom_path, song, frames):
 
 
 def model_lines(tool, rom_path, song, frames):
-    return subprocess.run([tool, '--trace', str(song), '--trace-frames', str(frames), rom_path], capture_output=True,
-                          encoding='utf-8', check=True).stdout.splitlines()
+    return subprocess.run([tool, '--driver', 'quintet', '--trace', str(song), '--trace-frames', str(frames), rom_path],
+                          capture_output=True, encoding='utf-8', check=True).stdout.splitlines()
 
 
 def compare(job):
@@ -50,9 +50,14 @@ def compare(job):
     return None
 
 
-def song_count(tool, rom_path):
-    text = subprocess.run([tool, '--info', rom_path], capture_output=True, encoding='utf-8', check=True).stdout
-    return len(re.findall(r'^\s+\d+\s+0x[0-9A-F]{8}', text, re.MULTILINE))
+def listed_songs(tool, rom_path):
+    """Returns the numbers of the songs that `--info` lists."""
+    text = subprocess.run([tool, '--driver', 'quintet', '--info', rom_path], capture_output=True, encoding='utf-8',
+                          check=True).stdout
+    songs = [int(n) for n in re.findall(r'^\s+(\d+)\s+0x[0-9A-F]{8}', text, re.MULTILINE)]
+    if not songs:
+        raise SystemExit('found no songs in the song list of supergbamidi --info')
+    return songs
 
 
 def parse_range(text):
@@ -72,7 +77,7 @@ def main():
     p.add_argument('-j', '--jobs', type=int, default=1, help='songs to compare at once (default: 1)')
     a = p.parse_args()
 
-    songs = parse_range(a.songs) if a.songs else list(range(song_count(a.supergbamidi, a.rom)))
+    songs = parse_range(a.songs) if a.songs else listed_songs(a.supergbamidi, a.rom)
     jobs = [(a.supergbamidi, a.rom, s, a.frames) for s in songs]
     if a.jobs > 1:
         with multiprocessing.Pool(a.jobs) as pool:

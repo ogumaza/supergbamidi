@@ -99,22 +99,8 @@ struct InitCode
 // ldr r4, =limit; cmp r3, r4. Returns false if there's none.
 bool FindInitCopy(const Rom& rom, InitCode& init)
 {
-    const uint8_t* data = rom.Ptr(kRomBase);
-    const size_t size = rom.Size();
-    for (size_t o = 0; o + 12 <= size; o += 2)
+    for (uint32_t at : FindThumb(rom, ParseThumbPattern("49xx 4Axx 4Bxx 681B 4Cxx 42A3")))
     {
-        auto h = [&](size_t i)
-        {
-            return uint16_t(data[o + 2 * i] | (data[o + 2 * i + 1] << 8));
-        };
-
-        if (!IsLdrLiteral(h(0), 1) || !IsLdrLiteral(h(1), 2) || !IsLdrLiteral(h(2), 3) || h(3) != 0x681B ||
-            !IsLdrLiteral(h(4), 4) || h(5) != 0x42A3)
-        {
-            continue;
-        }
-
-        const uint32_t at = kRomBase + uint32_t(o);
         const uint32_t code = ThumbLiteral(rom, at);
         const uint32_t size_at = ThumbLiteral(rom, at + 4);
         const uint32_t code_size = rom.U32(size_at);
@@ -269,7 +255,7 @@ int CountTunes(const Rom& rom, uint32_t table)
 }
 
 // Returns the number of commands that every track of the table's tunes decodes to in `format`, up to each track's end,
-// or -1 if a track has a command the format doesn't know or doesn't end within a million commands.
+// or -1 if a track has a command the format doesn't know or doesn't end within kMaxTrackCommands commands.
 long long CommandsInFormat(const Rom& rom, uint32_t table, int count, Format format)
 {
     long long total = 0;
@@ -281,7 +267,7 @@ long long CommandsInFormat(const Rom& rom, uint32_t table, int count, Format for
         {
             Event e;
             int n = 0;
-            for (; n < 1000000; n++)
+            for (; n < kMaxTrackCommands; n++)
             {
                 if (!DecodeEvent(rom, address, format, e))
                 {
@@ -294,7 +280,7 @@ long long CommandsInFormat(const Rom& rom, uint32_t table, int count, Format for
 
                 address += e.size;
             }
-            if (n == 1000000)
+            if (n == kMaxTrackCommands)
             {
                 return -1;
             }

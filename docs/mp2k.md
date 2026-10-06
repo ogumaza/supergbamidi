@@ -2,13 +2,12 @@
 
 This document describes MusicPlayer2000 (MP2K), the sound driver in
 Nintendo's Game Boy Advance SDK, which most GBA games use. It's often called
-the "Sappy" engine, after a fan-made tool for it. The document covers the
-song data, the sequencer, the sound channels and the mixer, in enough detail
-to play the songs the way the driver does. It's based on the driver's code in
-*Pokémon Emerald* (game code `BPEE`), and the addresses given as examples come
-from that game. Other games put the driver and its data elsewhere, and
-`supergbamidi` finds them from the code (see
-[Locating the driver](#locating-the-driver)).
+the "Sappy" engine, after a fan-made tool for it. This document covers the
+song format, sequencer, sound channels and mixer. It's based on the driver's
+code in *Pokémon Emerald* (game code `BPEE`), and the addresses given as
+examples come from that game. Other games put the driver and its data
+elsewhere, and `supergbamidi` finds them from the code (see [Locating the
+driver](#locating-the-driver)).
 
 The SDK calls the driver's library m4a. The routine names below are its known
 function names.
@@ -21,16 +20,26 @@ differences:
 * **The mixer.** Later versions can play a sample backwards, or decode a
   compressed one (see [Samples](#samples)). Earlier ones, such as the one in
   *The Legend of Zelda: A Link to the Past & Four Swords* (`AZLE`), ignore
-  both voice types and play the sample forwards as it is.
+  both voice types and play the sample forwards as it is. A mono mixer, as in
+  *The Legend of Zelda: The Minish Cap* (`BZME`) and *Super Robot Taisen:
+  Original Generation 2* (`B2RE`), has a single output buffer, which DMA1
+  feeds to FIFO A, and the sound control register sends FIFO A to both sides.
+  It plays each DirectSound channel at the average of its right and left
+  volumes, so the pan has no effect on them, though it still does on the PSG
+  channels.
 * **The settings.** Each game's init gives the driver its mix rate, the
   number of DirectSound channels and the master volume (see
   [Architecture](#architecture)).
 * **The music players.** Each game has its own table of players, with their
   track counts.
+* **Camelot's version.** *Golden Sun: The Lost Age* (`AGFE`) changes how a
+  note takes a channel and works out its volume and rate, and has a mixer of
+  Camelot's with straight-line releases, synth voices and an echo (see
+  [Camelot's version](#camelots-version)).
 
 Some games change the driver's code itself. `supergbamidi` models the SDK's
-driver; supporting a modified driver requires studying its code to determine
-how its behaviour differs.
+driver and Camelot's version; supporting another modified driver requires
+studying its code to determine how its behaviour differs.
 
 ## Architecture
 
@@ -49,8 +58,9 @@ The main routine runs these steps:
 3. It runs the mixer, which moves each DirectSound channel's envelope on and
    mixes it into the output buffer (see [Mixer](#mixer)).
 
-The output is stereo: DMA1 feeds the right side's buffer to FIFO A, and DMA2
-the left side's to FIFO B. Timer 0 runs at the mix rate.
+The output is stereo, apart from the mono mixer's (see [Versions](#versions)):
+DMA1 feeds the right side's buffer to FIFO A, and DMA2 the left side's to
+FIFO B. Timer 0 runs at the mix rate.
 
 In `BPEE` the routines are:
 
@@ -101,7 +111,10 @@ The song table is an array of 8-byte entries: the address of the song's
 header, and two halfwords, each the number of the music player that plays it.
 `m4aSongNumStart` uses the first. The driver doesn't know how many songs there
 are, so `supergbamidi` counts the entries up to the first whose header isn't in
-the ROM or isn't a valid header, or whose player isn't in the player table.
+the ROM or isn't a valid header, or whose player isn't in the player table. An
+entry that's all zero doesn't end the table, since a GSF rip can zero the
+entries of the songs it doesn't hold. It's listed as empty, and all-zero entries
+after the last song aren't counted.
 
 An entry whose header has no tracks is a placeholder, and `--info` lists it as
 empty.
@@ -151,7 +164,7 @@ A track is a stream of command bytes, each followed by its arguments:
 | `B2` | `GOTO` | 4-byte address | go on from the address |
 | `B3` | `PATT` | 4-byte address | play the pattern at the address, which ends with `PEND`. Patterns can call patterns, 3 deep; a fourth call ends the track |
 | `B4` | `PEND` | | return from a pattern; outside a pattern it does nothing |
-| `B5` | `REPT` | count, 4-byte address | go back to the address, count times; a count of 0 goes back for ever. The track has one repeat counter for all its repeats |
+| `B5` | `REPT` | count, 4-byte address | go back to the address, so that the part plays count times in all; a count of 0 goes back for ever. The track has one repeat counter for all its repeats |
 | `B9` | `MEMACC` | operation, byte, value, [4-byte address] | change or test a byte of a 16-byte memory area that the game can read and write. Operations 0-5 set, add or subtract the value or another byte of the area; 6-17 compare and jump to the address if the comparison holds |
 | `BA` | `PRIO` | priority | the track's priority |
 | `BB` | `TEMPO` | tempo | the tempo, in half quarter notes a minute at 60 frames a second |
@@ -200,7 +213,8 @@ The extended commands are:
 
 Commands `01`, `02`, `04`-`07`, `0A` and `0B` change the track's copy of its
 voice, until its next `VOICE` command. The driver's table has no entry past
-`0D`.
+`0D`. Some other versions of the SDK have a table of 12 entries, `00`-`0B`,
+without `0C` and `0D`.
 
 ### Lengths
 
@@ -341,8 +355,8 @@ left volume = velocity × (127 − drum pan) × left / 16384
 ```
 
 Each step rounds down. A note at full volume and velocity in the centre has a
-volume of 126 on each side, and the pan moves it in a straight line from one
-side to the other.
+volume of 126 on the right and 124 on the left, and the pan moves it in a
+straight line from one side to the other.
 
 ## Pitch
 
@@ -393,8 +407,8 @@ mixes the channel. The level runs from 0 to 255:
 * The decay multiplies the level by decay / 256 each frame, rounding down,
   until it falls to the sustain level, where it stays. At a sustain level of 0,
   the note ends there.
-* After the release, the level falls by release / 256 each frame, rounding
-  down.
+* After the release, each frame multiplies the level by release / 256,
+  rounding down.
 * When the release falls to the echo's level, the note carries on at that
   level for the echo's length in frames, if the track has set an echo. Then the
   channel is off.
@@ -477,10 +491,153 @@ driver takes the samples a frame and works out the rate in Hz:
 Without a mode, the driver plays at 13379 Hz with 8 DirectSound channels and a
 master volume of 15.
 
+## Camelot's version
+
+*Golden Sun: The Lost Age* (`AGFE`) has a version of the driver that Camelot
+changed, which loveemu calls the Bon sound driver. Its songs, commands, voices
+and samples are the SDK's, and so is most of its code, from `0x081C1000` on.
+Camelot rewrote `ply_note` (`0x081C07A2`), `MPlayMain` (`0x081C09D0`),
+`ChnVolSetAsm` (`0x081C077A`) and `MidiKeyToFreq` (`0x081C05F0`), and put an
+unused copy of `m4aSongNumStart` at `0x081C0550` with its literal pool zeroed.
+The game reaches the driver through a table of jumps at `0x081C0000`.
+
+### The game's routines
+
+The game's boot code copies 4 KB of code from `0x080006B8` to IWRAM at
+`0x03000100`, Camelot's mixer among it, and 56 bytes from `0x080178B4` over
+part of it. Its sound init (`0x081C0C1C`) calls `m4aSoundInit`, which copies
+the SDK's mixer to `0x03006000` as usual, though the game never runs it, and
+sets the mode `0x0099FA00`: 31536 Hz, 10 DirectSound channels and a master
+volume of 15. It then sets Timer 0 to twice the mix rate, and points DMA1 and
+DMA2 at buffers of 3168 bytes for each side at `0x02003A90` and `0x020046F0`,
+which hold three frames of two bytes for each mixed point.
+
+The VBlank handler runs the driver each frame:
+
+1. Camelot's `m4aSoundVSync` (`0x080005E8`) restarts the sound DMA at the
+   start of the buffers every third frame.
+2. The handler copies the frames left before the DMA restarts to
+   `0x03001139`.
+3. Camelot's `SoundMain` (`0x08000630`) checks that the stack has room and
+   that the `SoundInfo`'s ID is "Smsh", runs the sequencers and the PSG
+   routine, and then the mixer's loop over the DirectSound channels, at
+   `0x030007B4` in IWRAM, which mixes them into 32-bit sums at `0x03006FC0`,
+   one a point with the right side in the low half and the left in the high.
+4. The mixer's output stage (`0x03000D40`) turns the sums into the frame's
+   part of the buffers, and sets up each sum with the echo for the next frame.
+
+Some of the mixer's ARM code writes instructions into its own loops: the loop
+for a sample that plays at the mixer's rate gets the code for the sample's
+alignment, and the loop for other samples gets the code for its step, below 1,
+from 1 to 2, or from 2 up. The ARM7 runs the new instructions straight away,
+having no cache. When a frame's points of a sample fit, the mixer has DMA3
+copy them to the stack and mixes them from there.
+
+### Notes and channels
+
+A sample takes the third DirectSound channel that's off, in the list's order.
+With only one or two off, it takes the last of them, unless a note of the same
+track is released, when it takes the channel of the last such note instead.
+With none off, it takes a released note's channel if any note is released,
+whatever their priorities, or else a channel whose note has a lower priority
+than the new one, or the same priority from this track or a later one. Of
+those, it takes the one with the lowest priority, then from the latest track,
+then the first in the list. The search goes through 10 channels, the number the
+game's mode sets.
+
+The left volume starts from 128 rather than 127:
+
+```
+left volume = velocity × (128 − drum pan) × left / 16384
+```
+
+`MidiKeyToFreq` keeps each semitone's step to the next in its table, and
+shifts the step down by the octaves, where the SDK shifts both semitones'
+rates and takes the difference. A fine-tuned low key's rate can then be 1 Hz
+lower.
+
+`MPlayMain` counts the LFO's delay down in each tick of a track that has a
+depth, and moves the LFO on once it has run out if the track has a speed.
+The SDK does neither without a speed.
+
+### Envelopes and levels
+
+The attack and decay work as the SDK's do. After the release, the level falls
+by 256 − release each frame, in a straight line, to the echo's level. The mixer
+leaves out the master volume:
+
+```
+level = envelope + envelope / 8
+right = right volume × level / 512
+left = left volume × level / 512
+```
+
+and each output point is the sum of the channels' points times their levels,
+/ 128, so a sample channel plays at 9/8 of the SDK mixer's level for the same
+volumes. A channel whose right and left come to 0 isn't mixed, and doesn't
+move on through its sample.
+
+### Synth voices
+
+A sample of no length, with nothing left to play when the mixer comes to mix
+it, plays a wave that the mixer makes, unless its voice plays at the mixer's
+rate. The mixer sets bit 6 of the channel's type, and keeps the wave's phase in
+the channel's fraction, which moves on by 8 times a sample's step for each
+output point, so a cycle lasts 64 of a sample's points. The sample's data
+starts with `0x80` and the wave's type:
+
+| Type | Wave | Level |
+|---|---|---|
+| 0 | a pulse wave, high while the phase is below the duty | ±64 |
+| 1 | a saw wave, through a filter | about ±112 |
+| other | a triangle wave | ±128 |
+
+A pulse wave's next four bytes are its duty *d*, speed *s*, depth *p* and
+offset *o*. Each frame, the channel's count, whose top byte is the duty's
+phase, goes up by *s* × 2^24, and the duty becomes
+
+```
+t = count + o × 2^24, with its bits inverted if bit 31 is set
+duty = (t / 256) × p + d × 2^24
+```
+
+so it follows a triangle wave from *d*/256 of a cycle to (*d* + *p*/2)/256,
+which repeats every 256 / gcd(256, *s*) frames.
+
+A saw wave rises from −112 to 111 over a cycle, by three quarters of a step for
+each of the phase's 256 steps, with a jump of 32 halfway:
+
+```
+x = phase / 2^24 − 112 − (phase / 2^26 mod 32)
+y = x + y / 2
+```
+
+The channel's count keeps the filter's *y*, and the mixer plays it at half
+the level. A triangle wave is (phase / 2^23) − 128 for the first half of the
+cycle and 384 − (phase / 2^23) for the second.
+
+`supergbamidi` makes a sample of each pulse and saw voice for each key a song
+plays it at, at the mixer's rate, over one cycle of the duty, or about 2048
+points of the saw after its filter settles, and loops it at the nearest whole
+cycle of the wave. A triangle wave gets one cycle of 64 points, which plays at
+the rate a sample's header gives.
+
+### Echo
+
+The output stage adds an echo of its earlier output to each frame's sums. The
+right side gets back a quarter of its output from a frame before (528 points),
+53/128 of it from four frames before (2112 points), and −8/128 of the left
+side's from four frames before. The left side gets a quarter of the right
+side's output from 704 points before, 52/128 of its own from four frames
+before, and −8/128 of the right side's. The game doesn't change it, and the
+songs' reverb settings don't reach it, so `supergbamidi` gives every song a
+reverb send of 53, the driver's reverb whose feedback comes closest.
+
 ## Locating the driver
 
 `supergbamidi` finds the driver in a ROM from its code, without fixed
-addresses. `m4aSongNumStart` is the same in every version:
+addresses. `m4aSongNumStart` is the same in every version, apart from the
+registers some games' compiler chose:
 
 ```
 push {lr}                    ; B500
@@ -501,9 +658,14 @@ bl   MPlayStart
 pop  {r0}                    ; BC01
 ```
 
-Its literal pool gives the music player table and the song table. The init's
-literal pool also holds the music player table's address, and a little before
-it the init sets the driver's mode:
+The other compiler swaps `r2` and `r3`: `ldr r3, =music player table` (4Bxx),
+`ldrh r2, [r0, #4]` (8882), `lsls r1, r2, #1` (0051), `adds r1, r1, r2` (1889)
+and `adds r1, r1, r3` (18C9), with the rest the same. Its literal pool gives
+the music player table and the song table. A copy of the routine whose pool
+doesn't give two addresses in the ROM, such as `AGFE`'s unused one, is passed
+over. The init's literal pool also holds
+the music player table's address, and a little before it the init sets the
+driver's mode:
 
 ```
 ldr  r0, =mode               ; 48xx
@@ -515,7 +677,7 @@ resolution, and nothing in its top byte:
 
 | Bits | Contents |
 |---|---|
-| 0-6 | reverb, set if bit 7 is set |
+| 0-6 | reverb, set if bits 0-7 aren't all 0 |
 | 8-11 | DirectSound channels, up to 12 |
 | 12-15 | master volume |
 | 16-19 | mix rate setting |
@@ -528,6 +690,40 @@ for:
 ```
 ldrb r0, [r4, #1]            ; E5D40001
 tst  r0, #0x30               ; E3100030
+```
+
+The mono mixer works out each channel's volume in Thumb code, which
+`supergbamidi` looks for too, and `--info` reports:
+
+```
+ldrb r0, [r4, #2]            ; 78A0: the right volume
+ldrb r1, [r4, #3]            ; 78E1: the left volume
+adds r0, r0, r1              ; 1840
+muls r0, r5, r0              ; 4368: times the envelope's level
+lsrs r0, r0, #9              ; 0A40
+strb r0, [r4, #10]           ; 72A0
+```
+
+Camelot's note start looks through the DirectSound channels with Thumb code
+that `supergbamidi` looks for to find Camelot's changes to the sequencer, and
+Camelot's mixer moves a pulse wave's duty on with ARM code that it looks for
+to find the mixer:
+
+```
+movs r3, #10                 ; 230A: the channels to look through
+adds r4, #0x50               ; 3450: the first channel's record
+movs r7, #0xc7               ; 27C7
+movs r2, #0                  ; 2200
+movs r6, #0                  ; 2600
+movs r0, #3                  ; 2003: take the third free channel
+ldrb r1, [r4]                ; 7821
+tst  r1, r7                  ; 4239
+
+ldrb  r6, [r3, #2]           ; E5D36002: the duty's speed
+add   r2, r2, r6, lsl #24    ; E0822C06
+ldrb  r6, [r3, #4]           ; E5D36004: its offset
+adds  r6, r2, r6, lsl #24    ; E0926C06
+mvnmi r6, r6                 ; 41E06006
 ```
 
 With `--driver mp2k`, `--song-table` gives the song table of a game whose

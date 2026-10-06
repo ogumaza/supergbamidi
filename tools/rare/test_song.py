@@ -102,7 +102,7 @@ def instrument_programs(rom, header):
             continue
         inst = struct.unpack_from('<I', rom, table + 4 * index - ROM_BASE)[0]
         kind, mode = struct.unpack_from('<II', rom, inst - ROM_BASE)
-        (looped if kind == 0x20 and mode == 2 else others).append(program)
+        (looped if kind in (0x20, 0x21) and mode in (2, 4) else others).append(program)
     return looped, others
 
 

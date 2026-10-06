@@ -5,46 +5,56 @@
 
     compare_notes.py ROM FOLDER [--songs 0-22] [--frames 12000] [-j JOBS]
 
-FOLDER holds supergbamidi's conversion of ROM: NAME_NN.mid and NAME_NN.sf2 for each song. For every song, the driver
-runs under driver_emu.py for as long as the MIDI file lasts, and each note it starts is matched with a MIDI note on the
-MIDI channel of its track, with the same key, that starts within a frame of it. For each pair, the script checks:
+FOLDER holds supergbamidi's conversion of ROM: NAME_NN.mid and NAME_NN.sf2 for each song, or NAME_mp2k_NN.mid and
+NAME_mp2k_NN.sf2 if detection finds another of the game's drivers first. For every song, the driver runs under
+driver_emu.py for as long as the MIDI file lasts and two frames more, and each note it starts is matched with a MIDI
+note on the MIDI channel of its track, with the same key, that starts within a frame and a half of it. For each pair,
+the script checks:
 
   - the velocity, and the track's volume when the note starts;
   - the sound: the SoundFont zone that the note's program and key choose has to play the driver's sample, square
-    wave duty, wave pattern or noise type;
+    wave duty, wave pattern or noise type. Track 9 plays on the drum channel, so its zones come from bank 128;
   - the pitch on every frame of the note until its release, from the zone's root key, tuning and sample rate and the
     channel's pitch bend, against the driver's rate for a sample, or its frequency setting for a PSG channel, which can
     be two steps of the 11-bit register from equal temperament;
-  - the release, which has to come within a frame of the MIDI note's end.
+  - the release, which has to come within a frame and a half of the MIDI note's end, unless the MIDI note ends where
+    the key starts again, or the file ends before the driver releases the note.
 
-A MIDI note that the driver doesn't play, or a driver note that the MIDI file doesn't have, counts as a difference. MIDI
-events land on their own ticks, where the driver plays them on the frame whose ticks reach them, so a frame's
-difference either way is allowed.
+A MIDI note that the driver doesn't play, or a driver note that the MIDI file doesn't have, counts as a difference. A
+driver note that starts in the file's last half frame or after it is left out, since it can be the loop starting again.
+MIDI events land on their own ticks, where the driver plays them on the frame whose ticks reach them, so a difference of
+a frame and a half either way is allowed. A song named in --songs that has no MIDI file mustn't play any notes.
 """
 import argparse
 import bisect
 import io
 import math
 import multiprocessing
-import re
 import struct
 import sys
 from pathlib import Path
 
 from unicorn import UC_HOOK_CODE
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # for gbarom.py, in tools/
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # for conversion.py and gbarom.py, in tools/
+import conversion
 import driver_emu
+from compare_trace import parse_range
 from gbarom import ROM_BASE, load_rom
 
 FRAME_RATE = 16777216 / 280896
 TRACK_VOLUME = 18  # a track's volume, in its MusicPlayerTrack
+TRACK_PITCH = 8  # a track's key and fine pitch offsets, in its MusicPlayerTrack
 SPECIAL_TEST = bytes.fromhex('0100d4e5300010e3')  # the newer mixer's test for reversed and compressed samples
+CAMELOT_PULSE = bytes.fromhex('0260d3e5062c82e00460d3e5066c92e00660e041')  # Camelot's mixer, which has synth voices
+FREQ_TABLE = [2147483648, 2275179671, 2410468894, 2553802834, 2705659852, 2866546760, 3037000500, 3217589947,
+              3408917802, 3611622603, 3826380858, 4053909305]  # the driver's rates for the 12 semitones, from key 168
 
 
 def read_midi(path):
-    """Returns the file's notes as (channel, key, velocity, on seconds, off seconds, program), its volume changes and
-    pitch bends as (seconds, channel, value), each channel's bend range in semitones, and its length in seconds."""
+    """Returns the file's notes as (channel, key, velocity, on seconds, off seconds, program, seconds at the start of
+    the tick before the off), its volume changes and pitch bends as (seconds, channel, value), each channel's bend range
+    in semitones, and its length in seconds."""
     data = Path(path).read_bytes()
     division = struct.unpack('>H', data[12:14])[0]
     events = []
@@ -121,10 +131,11 @@ def read_midi(path):
     for tick, _, _, kind, ch, a, b in events:
         t = seconds(tick)
         if kind == 'on':
-            open_notes[(ch, a)] = [ch, a, b, t, None, program.get(ch, 0)]
+            open_notes[(ch, a)] = [ch, a, b, t, None, program.get(ch, 0), None]
             notes.append(open_notes[(ch, a)])
         elif kind == 'off' and (ch, a) in open_notes:
-            open_notes.pop((ch, a))[4] = t
+            note = open_notes.pop((ch, a))
+            note[4], note[6] = t, seconds(max(tick - 1, 0))
         elif kind == 'program':
             program[ch] = a
         elif kind == 'bend':
@@ -212,9 +223,11 @@ def value_at(changes, ch, t, default):
 def driver_notes(rom, song, frames):
     """Runs the driver and returns its notes and the mixer's rate in Hz. The notes are dicts of track, key, velocity,
     start and release frames (the end, for a note the driver didn't release), the track's volume at the start, what
-    the note plays, its frequency on each frame, and whether it sounds. The channels are read just before the PSG and
-    mixer routines run each frame, when the notes the tracks started in the frame still have their start flag."""
-    emu = driver_emu.EngineEmulator(rom)
+    the note plays, its frequency on each frame, whether it sounds, whether its channel stopped by itself before the
+    driver released it, and the frames in which its pitch is behind its track's. The channels are read just before the
+    PSG and mixer routines run each frame, when the notes the tracks started in the frame still have their start
+    flag."""
+    emu = driver_emu.emulator(rom)
     emu.play(song)
     snapshot = []
 
@@ -225,11 +238,15 @@ def driver_notes(rom, song, frames):
     emu.uc.hook_add(UC_HOOK_CODE, before_output, begin=psg_routine, end=psg_routine)
     player_tracks = emu.player[1]
 
-    notes, current = [], {}
+    notes, current, pitches = [], {}, {}
     for f in range(frames):
         snapshot[:] = []
         emu.frame()
         after = {(c.kind, c.index): c for c in emu.channels()}
+        before = pitches
+        pitches = {t: bytes(emu.uc.mem_read(player_tracks + driver_emu.TRACK_SIZE * t + TRACK_PITCH, 2))
+                   for t in range(emu.player[2])}
+        started = set()
         for c in snapshot:
             name = (c.kind, c.index)
             note = current.get(name)
@@ -237,13 +254,16 @@ def driver_notes(rom, song, frames):
             if note and (starts or not c.status & 0xC7):
                 if note['release'] is None:
                     note['release'] = f
+                    note['stopped'] = not starts
                 current.pop(name)
             if starts and not c.status & 0x40 and c.track >= 0:
                 volume = emu.u8(player_tracks + driver_emu.TRACK_SIZE * c.track + TRACK_VOLUME)
-                note = dict(track=c.track, key=c.midi_key, velocity=c.velocity, start=f, release=None,
-                            type=c.type, wave=c.wav, volume=volume, frequencies={}, sounds=False)
+                note = dict(track=c.track, key=c.midi_key, play_key=c.key, velocity=c.velocity, start=f,
+                            release=None, type=c.type, wave=c.wav, volume=volume, frequencies={}, sounds=False,
+                            stopped=False, lagging=False, behind=set())
                 notes.append(note)
                 current[name] = note
+                started.add(c.track)
             note = current.get(name)
             if note:
                 if c.status & 0x40 and note['release'] is None:
@@ -253,6 +273,15 @@ def driver_notes(rom, song, frames):
                 # envelope's level. A PSG channel that stops in the frame never sounded in it.
                 late = after[name]
                 note['sounds'] = note['sounds'] or bool(late.envelope and (late.status or c.kind == 'd'))
+
+        # A note that a track starts clears the track's change of pitch, so the driver doesn't pass the change on to
+        # the track's other notes, which stay behind until a later change of the track's pitch reaches them.
+        for note in current.values():
+            track = note['track']
+            if note['start'] < f and pitches.get(track) != before.get(track, pitches.get(track)):
+                note['lagging'] = track in started
+            if note['lagging']:
+                note['behind'].add(f)
         if not emu.playing():
             break
     for note in notes:
@@ -261,10 +290,27 @@ def driver_notes(rom, song, frames):
     return notes, emu.rate()
 
 
-def sound_name(rom, note, special):
+def synth_type(rom, note, camelot):
+    """Returns the type of synth voice that Camelot's mixer (`camelot`) plays for a note, from its sample's data: 0 for
+    a pulse wave, 1 for a saw wave and anything else for a triangle wave, or None for a note that isn't a synth."""
+    offset = note['wave'] - ROM_BASE
+    if not camelot or note['type'] & 0x0F or not 0 <= offset <= len(rom) - 18:
+        return None
+    if rom[offset + 12:offset + 16] != bytes(4):
+        return None
+    return struct.unpack('<b', rom[offset + 17:offset + 18])[0]
+
+
+def sound_name(rom, note, special, camelot):
     """Returns the name the SoundFont gives the note's sound, from its type and wave field. Only a mixer that tests for
-    them (`special`) plays reversed samples backwards."""
+    them (`special`) plays reversed samples backwards, and only Camelot's mixer (`camelot`) has synth voices, which get
+    a sample for each key they play at, unless they play a triangle wave."""
     psg = note['type'] & 7
+    synth = synth_type(rom, note, camelot)
+    if synth in (0, 1):
+        return '%s %08X %d' % ('Pulse' if synth == 0 else 'Saw', note['wave'], note['play_key'])
+    if synth is not None:
+        return 'Triangle %08X' % note['wave']
     if psg == 0:
         offset = note['wave'] - ROM_BASE
         reversed_sample = note['type'] & 0x10 and special
@@ -301,6 +347,15 @@ def register_step_cents(note, frequency):
     return 1200 * math.log2(period / (period - 1)) if period > 1 else 0.0
 
 
+def synth_rate(rom, name):
+    """Returns the rate in Hz that the driver gives a sample for the key that a pulse or saw synth voice's sample is
+    made for, from the sample's name. The sample plays the key at that pitch at the mixer's rate."""
+    _, wave, key = name.split()
+    header = int(wave, 16) - ROM_BASE
+    frequency = struct.unpack('<I', rom[header + 4:header + 8])[0]
+    return frequency * (FREQ_TABLE[int(key) % 12] >> (14 - int(key) // 12)) >> 32
+
+
 def zone_hz(zone, key, cents_from_bend):
     """Returns the rate a zone plays its sample at for `key` and a pitch bend, in the units driver_hz() uses: a square
     sample has 64 points a cycle, a wave pattern 32, and noise and samples one point for each step."""
@@ -317,19 +372,23 @@ def zone_hz(zone, key, cents_from_bend):
     return rate
 
 
-def check_song(rom, midi_path, sf2_path, frames_limit, report):
+def check_song(rom, song, midi_path, sf2_path, frames_limit, report):
     """Checks one song, and passes report() its number, the notes checked, the differences and the largest pitch
     error. Returns true if there are no differences."""
     notes, volumes, bends, ranges, length = read_midi(midi_path)
     volumes, bends = by_channel(volumes), by_channel(bends)
     presets = read_sf2(sf2_path)
-    frames = min(frames_limit, int(length * FRAME_RATE))
-    song = int(re.search(r'_(\d+)\.mid$', str(midi_path)).group(1))
+    # The file ends at frame `end`. The driver plays a note up to a frame after the file has it, so it runs two frames
+    # longer, for the notes at the end.
+    end = length * FRAME_RATE
+    frames = min(frames_limit, math.ceil(end) + 2)
     played, mix_rate = driver_notes(rom, song, frames)
     special = SPECIAL_TEST in rom
+    camelot = CAMELOT_PULSE in rom
 
     midi = [dict(channel=n[0], key=n[1], velocity=n[2], on=n[3] * FRAME_RATE,
-                 off=(n[4] if n[4] is not None else length) * FRAME_RATE, program=n[5], matched=False) for n in notes]
+                 off=(n[4] if n[4] is not None else length) * FRAME_RATE, program=n[5],
+                 last_tick=(n[6] if n[6] is not None else length) * FRAME_RATE, matched=False) for n in notes]
     by_key = {}
     for m in midi:
         by_key.setdefault((m['channel'], m['key']), []).append(m)
@@ -338,7 +397,7 @@ def check_song(rom, midi_path, sf2_path, frames_limit, report):
     # envelope never rises above 0, such as one on a track's default voice before it chooses one, doesn't count.
     groups = {}
     for d in played:
-        if d['start'] < frames - 1 and d['sounds']:
+        if d['start'] < min(end + 1, frames - 1) and d['sounds']:
             groups.setdefault((d['track'], d['key'], d['start']), []).append(d)
 
     problems = []
@@ -348,8 +407,11 @@ def check_song(rom, midi_path, sf2_path, frames_limit, report):
         velocity = min(127, sum(d['velocity'] for d in group))
         candidates = [m for m in by_key.get((track, key), []) if not m['matched'] and -1.5 <= m['on'] - start <= 1.5]
         if not candidates:
-            problems.append('frame %d: the driver plays key %d on track %d, which the MIDI file doesn\'t' % (
-                start, key, track))
+            # A note in the file's last half frame or after it can be the loop starting again, which the file leaves
+            # out.
+            if start < end - 0.5:
+                problems.append('frame %d: the driver plays key %d on track %d, which the MIDI file doesn\'t' % (
+                    start, key, track))
             continue
         # The driver's notes go in order, so each takes the earliest MIDI note left that fits, preferring notes of the
         # same velocity.
@@ -366,25 +428,30 @@ def check_song(rom, midi_path, sf2_path, frames_limit, report):
             midi_volume = value_at(volumes, track, start / FRAME_RATE, 100)
             problems.append('%s: volume %d, the driver\'s %d' % (where, midi_volume, group[0]['volume']))
 
-        # The zone that the note's program and key choose has to play the driver's sound.
-        bank = 128 if track == 9 and (128, m['program']) in presets else 0
+        # The zone that the note's program and key choose has to play the driver's sound. Track 9 plays on the drum
+        # channel, which takes its presets from bank 128.
+        bank = 128 if track == 9 else 0
         zones = [z for z in presets.get((bank, m['program']), []) if z['low'] <= key <= z['high']]
         if not zones:
-            problems.append('%s: program %d has no zone for the key' % (where, m['program']))
+            problems.append('%s: program %d in bank %d has no zone for the key' % (where, m['program'], bank))
             continue
         zone = zones[0]
-        name = sound_name(rom, group[0], special)
+        name = sound_name(rom, group[0], special, camelot)
         if zone['sample']['name'] != name:
             problems.append('%s: plays %s; the driver plays %s' % (where, zone['sample']['name'], name))
             continue
+        if name.startswith(('Pulse', 'Saw')):
+            zone = dict(zone, sample=dict(zone['sample'], rate=synth_rate(rom, name)))
 
-        # The pitch on each frame until the release. A bend lands on its tick, which can be up to a frame from the
-        # frame the driver plays it on, so the pitch is read across the frame and the frames either side, and the
-        # closest counts. A zone that keeps the pitch wheel from moving it doesn't follow the bend.
+        # The pitch on each frame until the release, or until the file's last half frame. A bend lands on its tick,
+        # which can be up to a frame from the frame the driver plays it on, so the pitch is read across the frame and
+        # the frames either side, and the closest counts. A zone that keeps the pitch wheel from moving it doesn't
+        # follow the bend. While the note is behind its track's pitch, which the MIDI channel shares with the track's
+        # newer note, it isn't compared.
         bend_range = 0 if zone['no_bend'] else ranges.get(track, 2)
         for d in group:
             for f, frequency in sorted(d['frequencies'].items()):
-                if f >= frames - 1 or f >= d['release']:
+                if f >= min(end - 0.5, frames - 1) or f >= d['release'] or f in d['behind']:
                     continue
                 want = driver_hz(d, frequency, mix_rate)
                 errors = []
@@ -399,27 +466,40 @@ def check_song(rom, midi_path, sf2_path, frames_limit, report):
                     problems.append('%s: %+.1f cents on frame %d (%s)' % (where, error, f, name))
                     break
 
-        # The release, unless the MIDI note ended first because the key was played again, or at the end of the file,
-        # or the driver hadn't released it when the check stopped.
+        # The release, unless the driver hadn't released the note when the check stopped. The MIDI note can end first
+        # where the key starts again, or at the end of the file. A channel that stops by itself, at the end of a sample
+        # without a loop, can stop between ticks, and then the MIDI note ends on the first tick after it.
         release = max(d['release'] for d in group)
-        ends_file = m['off'] >= length * FRAME_RATE - 1.5
-        if abs(m['off'] - release) > 1.5 and m['off'] > release - 1.5 and not ends_file and release < frames - 1:
+        ends_file = m['off'] >= end - 1.5
+        again = any(o is not m and abs(o['on'] - m['off']) < 0.01 for o in by_key[(track, key)])
+        stopped = all(d['stopped'] for d in group) and m['last_tick'] <= release + 1.5
+        late = m['off'] > release + 1.5 and not stopped
+        early = m['off'] < release - 1.5 and not again and not ends_file
+        if (late or early) and release < frames - 1:
             problems.append('%s: released on frame %d, the MIDI note ends at %.1f' % (where, release, m['off']))
 
     for m in midi:
-        if not m['matched'] and m['on'] < frames - 2:
+        if not m['matched'] and m['on'] < min(end, frames - 2):
             problems.append('%.1f: the MIDI file plays key %d on channel %d, which the driver doesn\'t' % (
                 m['on'], m['key'], m['channel']))
     report(song, checked, problems, worst_cents)
     return not problems
 
 
-def parse_range(text):
-    songs = []
-    for part in text.split(','):
-        a, _, b = part.partition('-')
-        songs += list(range(int(a), int(b or a) + 1))
-    return songs
+def has_tracks(rom, song):
+    """Returns true if the song table's entry for `song` has a header with tracks and a music player, as the songs that
+    supergbamidi's --info lists with an address do."""
+    def u32(address):
+        o = address - ROM_BASE
+        return struct.unpack('<I', rom[o:o + 4])[0] if 0 <= o <= len(rom) - 4 else 0
+
+    addr = driver_emu.addresses_for(rom)
+    players = 0
+    while players < 64 and 0x02000000 <= u32(addr.player_table + 12 * players) < 0x03008000:
+        players += 1
+    header = u32(addr.song_table + 8 * song) - ROM_BASE
+    player = u32(addr.song_table + 8 * song + 4) & 0xFFFF
+    return 0 <= header < len(rom) and rom[header] > 0 and player < players
 
 
 def main():
@@ -431,10 +511,11 @@ def main():
     p.add_argument('-v', '--verbose', action='store_true', help='list every difference, not just the first ten')
     p.add_argument('-j', '--jobs', type=int, default=1, help='songs to check at once (default: 1)')
     a = p.parse_args()
-    wanted = set(parse_range(a.songs)) if a.songs else None
-    midis = [m for m in sorted(Path(a.folder).glob('*_[0-9]*.mid'))
-             if wanted is None or int(m.stem.rsplit('_', 1)[1]) in wanted]
-    jobs = [(a.rom, str(m), a.frames, a.verbose) for m in midis]
+    midis = dict(conversion.midi_files(a.folder, 'mp2k'))
+    if not midis:
+        raise SystemExit('found no MIDI files to check in %s' % a.folder)
+    songs = sorted(set(parse_range(a.songs))) if a.songs else sorted(midis)
+    jobs = [(a.rom, song, str(midis[song]) if song in midis else None, a.frames, a.verbose) for song in songs]
     if a.jobs > 1:
         with multiprocessing.Pool(a.jobs) as pool:
             results = pool.map(check_job, jobs)
@@ -443,14 +524,26 @@ def main():
 
     for text, _ in results:
         print(text, end='')
-    failed = sum(1 for _, ok in results if not ok)
+    results = [ok for _, ok in results if ok is not None]
+    if not results:
+        raise SystemExit('found none of the songs to check')
+    failed = results.count(False)
     print('%d of %d songs match the driver' % (len(results) - failed, len(results)))
     raise SystemExit(1 if failed else 0)
 
 
 def check_job(job):
-    """Checks one song for main(), and returns its report and whether it matches."""
-    rom_path, midi, frames, verbose = job
+    """Checks one song for main(), and returns its report and whether it matches, or None for a song that has neither a
+    MIDI file nor tracks. The driver mustn't play any notes in a song that has tracks but no MIDI file."""
+    rom_path, song, midi, frames, verbose = job
+    rom = load_rom(rom_path)
+    if midi is None:
+        if not has_tracks(rom, song):
+            return 'song %d: no MIDI file, and the song has no tracks\n' % song, None
+        played = sum(1 for d in driver_notes(rom, song, frames)[0] if d['sounds'])
+        if played:
+            return 'song %d: no MIDI file, but the driver plays %d notes\n' % (song, played), False
+        return 'song %d: no MIDI file, and the driver plays no notes\n' % song, True
     out = io.StringIO()
 
     def report(song, checked, problems, worst):
@@ -459,7 +552,7 @@ def check_job(job):
         for line in problems if verbose else problems[:10]:
             out.write('    ' + line + '\n')
 
-    ok = check_song(load_rom(rom_path), Path(midi), Path(midi).with_suffix('.sf2'), frames, report)
+    ok = check_song(rom, song, Path(midi), Path(midi).with_suffix('.sf2'), frames, report)
     return out.getvalue(), ok
 
 

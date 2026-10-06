@@ -41,7 +41,7 @@ for path in "$@"; do
         echo "$name: same music as set.gsflib, already converted"
         ;;
     *)
-        echo "$name: no Konami, Rare, Quintet, Nintendo R&D2 or MP2K sound driver found: this game's music uses" \
+        echo "$name: no Konami, Rare, Quintet, Nintendo R&D2, Brownie Brown or MP2K sound driver found: this game's music uses" \
              "another engine, or a driver version supergbamidi doesn't know" >&2
         status=1
         ;;

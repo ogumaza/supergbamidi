@@ -4,17 +4,19 @@
 """Run a game's MusicPlayer2000 (MP2K) sound engine under the Unicorn ARM emulator.
 
 This is the reference for checking supergbamidi's model of the engine. It calls the engine's init, song start and
-per-frame routines directly (no video, and only the two BIOS calls the engine makes), and captures what the engine
-produces:
+per-frame routines directly (no video, and of the BIOS only the CpuSet, CpuFastSet and Div calls that the engine
+makes), and captures what the engine produces:
 
     trace       every sound channel's state after each frame, one line per channel that plays
-    render      the DirectSound mixer's output: 8-bit stereo samples at the engine's rate
+    render      the DirectSound mixer's output: 8-bit stereo samples at the engine's rate, or 9-bit ones in Camelot's
 
     driver_emu.py ROM trace SONG FRAMES
     driver_emu.py ROM render SONG FRAMES OUT.wav [--tracks 0,3]
 
-The routine addresses are chosen by the ROM's game code. Those of Pokemon Emerald (BPEE) and The Legend of Zelda: A
-Link to the Past & Four Swords (AZLE) are built in. Another game needs its own values; see GAMES and docs/mp2k.md.
+The routine addresses are chosen by the ROM's game code. Those of Pokemon Emerald (BPEE), The Legend of Zelda: A Link
+to the Past & Four Swords (AZLE), The Legend of Zelda: The Minish Cap (BZME), Kingdom Hearts: Chain of Memories (B8CE),
+Super Robot Taisen: Original Generation 2 (B2RE) and Golden Sun: The Lost Age (AGFE), whose version of the engine
+Camelot changed, are built in. Another game needs its own values; see GAMES and docs/mp2k.md.
 """
 import argparse
 import struct
@@ -23,14 +25,17 @@ import wave
 from pathlib import Path
 
 import numpy as np
-from unicorn import UC_ARCH_ARM, UC_HOOK_INTR, UC_HOOK_MEM_READ, UC_HOOK_MEM_UNMAPPED, UC_MODE_ARM, Uc
+from unicorn import UC_ARCH_ARM, UC_HOOK_CODE, UC_HOOK_INTR, UC_HOOK_MEM_READ, UC_HOOK_MEM_UNMAPPED, \
+    UC_HOOK_MEM_WRITE, UC_MODE_ARM, Uc
 from unicorn.arm_const import UC_ARM_REG_CPSR, UC_ARM_REG_LR, UC_ARM_REG_PC, UC_ARM_REG_R0, UC_ARM_REG_R1, \
-    UC_ARM_REG_R2, UC_ARM_REG_SP
+    UC_ARM_REG_R2, UC_ARM_REG_R3, UC_ARM_REG_R4, UC_ARM_REG_R5, UC_ARM_REG_SP
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # for gbarom.py, in tools/
 from gbarom import ROM_BASE, load_rom
 
 RETURN_TRAP = 0x0F000000
+CAMELOT_SCRATCH = 0x0F100000  # where CamelotEmulator mixes the channels of muted tracks
+DMA3_CONTROL = 0x040000DC
 SOUND_INFO_PTR = 0x03007FF0  # the engine keeps its SoundInfo's address here
 
 # Offsets and sizes in the engine's structures.
@@ -61,7 +66,57 @@ class AddressesAZLE(Addresses):
     player_table = 0x083c3a3c
 
 
-GAMES = {b'BPEE': Addresses, b'AZLE': AddressesAZLE}
+class AddressesBZME(Addresses):
+    """BZME (The Legend of Zelda: The Minish Cap), with the mono mixer."""
+    init = 0x080aff48
+    song_start = 0x080affcc
+    main = 0x080affc0
+    vsync = 0x080b0674
+    song_table = 0x08a11dbc
+    player_table = 0x08a11c3c
+
+
+class AddressesB8CE(Addresses):
+    """B8CE (Kingdom Hearts: Chain of Memories)."""
+    init = 0x0811fdec
+    song_start = 0x0811fe70
+    main = 0x0811fe64
+    vsync = 0x08120558
+    song_table = 0x09d6f744
+    player_table = 0x09d6f60c
+
+
+class AddressesB2RE(Addresses):
+    """B2RE (Super Robot Taisen: Original Generation 2), with the mono mixer."""
+    init = 0x08001ae0
+    song_start = 0x08001b64
+    main = 0x08001b58
+    vsync = 0x080021ec
+    song_table = 0x084730cc
+    player_table = 0x0847309c
+
+
+class AddressesAGFE(Addresses):
+    """AGFE (Golden Sun: The Lost Age), with Camelot's sequencer and mixer, which CamelotEmulator runs."""
+    init = 0x081c0c1c        # the game's sound init: m4aSoundInit, then the mixer's rate
+    song_start = 0x081c1fc0
+    main = 0x08000630        # Camelot's SoundMain, which the VBlank handler calls
+    vsync = 0x080005e8       # Camelot's m4aSoundVSync
+    song_table = 0x081c4530
+    player_table = 0x081c44d0
+    camelot = True
+    iwram_copies = ((0x080006b8, 0x03000100, 0x1000), (0x080178b4, 0x030001e4, 0x38))  # the boot code's, to IWRAM
+    code_ranges = ((0x08000000, 0x08020000), (0x081c0000, 0x081c4000))  # where calls through LR need fixing
+    mixer_code = (0x03000100, 0x03001100)  # the mixer, in IWRAM, which writes instructions into its own loops
+    fixed_loop = 0x03000c74  # the last instruction before the fixed-pitch loop, which it has just written
+    mix_channel = 0x03000880  # where the mixer starts to mix a DirectSound channel (r4) into its sums (r5), in ARM
+    output = 0x03000d40      # the mixer's output stage, which the VBlank handler calls after SoundMain
+    output_place = 0x03000d24  # where the output stage keeps the frame's place in the right FIFO's buffer
+    dma_counter = 0x03001139  # where the VBlank handler copies the DMA counter for SoundMain
+
+
+GAMES = {b'BPEE': Addresses, b'AZLE': AddressesAZLE, b'BZME': AddressesBZME, b'B8CE': AddressesB8CE,
+         b'B2RE': AddressesB2RE, b'AGFE': AddressesAGFE}
 
 
 def addresses_for(rom):
@@ -128,6 +183,12 @@ class EngineEmulator:
         self.muted = set()
         self.call(addr.init)
         self.info = self.u32(SOUND_INFO_PTR)
+        # SoundMain runs the sequencer, then the PSG routine, then the mixer, so muted tracks are silenced at the start
+        # of the PSG routine.
+        psg_routine = self.u32(self.info + 40) & ~1
+        uc.hook_add(UC_HOOK_CODE, self._mute, begin=psg_routine, end=psg_routine)
+        # The mono mixer's init sends FIFO A to both sides and leaves FIFO B out of the sound control register.
+        self.mono = not self.u16(0x04000082) & 0x3000
         self.players = []
         for i in range(64):
             entry = addr.player_table + 12 * i
@@ -138,11 +199,20 @@ class EngineEmulator:
 
     def _swi(self, uc, intno, user):
         # Unicorn calls this after the SWI instruction, without taking the exception. The engine's init copies its
-        # mixer to IWRAM and clears its structures with CpuSet.
+        # mixer to IWRAM and clears its structures with CpuSet, and some games' compilers divide with Div.
         pc = uc.reg_read(UC_ARM_REG_PC)
         thumb = uc.reg_read(UC_ARM_REG_CPSR) & 0x20
         number = self.u16(pc - 2) & 0xFF if thumb else (self.u32(pc - 4) >> 16) & 0xFF
         src, dst, control = (uc.reg_read(r) for r in (UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2))
+        if number == 0x06:
+            # r0 / r1, rounded toward zero, with the remainder in r1 and the quotient's magnitude in r3.
+            numerator = src - (1 << 32) if src & 0x80000000 else src
+            denominator = dst - (1 << 32) if dst & 0x80000000 else dst
+            quotient = abs(numerator) // abs(denominator) * (-1 if (numerator < 0) != (denominator < 0) else 1)
+            uc.reg_write(UC_ARM_REG_R0, quotient & 0xFFFFFFFF)
+            uc.reg_write(UC_ARM_REG_R1, (numerator - quotient * denominator) & 0xFFFFFFFF)
+            uc.reg_write(UC_ARM_REG_R3, abs(quotient) & 0xFFFFFFFF)
+            return
         if number == 0x0B:
             unit = 4 if control & (1 << 26) else 2
             count = control & 0x1FFFFF
@@ -204,17 +274,18 @@ class EngineEmulator:
         period = self.u8(info + 11)
         per_frame = self.u32(info + 16)
         offset = (period - (counter - 1)) * per_frame if counter > 1 else 0
-        self._mute()
         self.call(self.addr.main)
         self.fixed_vcount = None
         buffer = info + SOUND_INFO_PCM_BUFFER + offset
         right = np.frombuffer(bytes(self.uc.mem_read(buffer, per_frame)), dtype=np.int8)
+        if self.mono:
+            return right, right
         left = np.frombuffer(bytes(self.uc.mem_read(buffer + PCM_DMA_BUF_SIZE, per_frame)), dtype=np.int8)
         return right, left
 
-    def _mute(self):
-        # A channel whose volumes are 0 is mixed silently. The sequencer sets them again when the track's volume or
-        # pan changes, so they're cleared before every frame.
+    def _mute(self, uc, address, size, user):
+        # A channel whose volumes are 0 is mixed silently. The sequencer sets them again when its track starts a note
+        # on it or changes its volume or pan, so they're cleared after the sequencer in every frame.
         if not self.muted:
             return
         for c in self.channels():
@@ -259,6 +330,111 @@ class EngineEmulator:
         return 16777216 / (0x10000 - reload)
 
 
+class CamelotEmulator(EngineEmulator):
+    """Camelot's version of the engine: its mixer is in the code the game copies to IWRAM at boot, and the VBlank
+    handler copies the DMA counter for it, runs SoundMain and then the mixer's output stage."""
+
+    def __init__(self, rom):
+        addr = addresses_for(rom)
+        # Camelot calls a routine with `mov lr, rN` and the second half of a BL alone, which the ARM7 runs as a jump to
+        # LR. Unicorn's cores either take it for the first half of a Thumb-2 instruction or switch to ARM mode, so each
+        # such call is changed to `blx lr`, which does the same.
+        rom = bytearray(rom)
+        for lo, hi in addr.code_ranges:
+            for at in range(lo + 2, hi, 2):
+                o = at - ROM_BASE
+                if rom[o:o + 2] == b'\x00\xf8' and (rom[o - 2] | rom[o - 1] << 8) & 0xFFC7 == 0x4686:
+                    rom[o:o + 2] = b'\xf0\x47'
+        self.pending_copies = addr.iwram_copies
+        self.restarted = False
+        super().__init__(bytes(rom))
+
+    def call(self, address, args=(), thumb=True):
+        if self.pending_copies:
+            self.copy_mixer()
+        super().call(address, args, thumb)
+
+    def copy_mixer(self):
+        """Copies the code to IWRAM, as the game's boot code does before the engine's init."""
+        uc = self.uc
+        for src, dst, size in self.pending_copies:
+            uc.mem_write(dst, bytes(uc.mem_read(src, size)))
+        self.pending_copies = ()
+
+        # The mixer writes instructions into its loops, which the ARM7 runs at once, having no cache. Unicorn runs a
+        # translation of the code, so each write drops the translations it changes. The fixed-pitch loop's first pass
+        # is translated with the writes before it, so a new translation starts at the loop's last instruction before it.
+        lo, hi = self.addr.mixer_code
+        uc.hook_add(UC_HOOK_MEM_WRITE, self._code_write, begin=lo, end=hi - 1)
+        uc.hook_add(UC_HOOK_CODE, self._fixed_loop, begin=self.addr.fixed_loop, end=self.addr.fixed_loop)
+
+        # The mixer leaves out a channel whose volumes come to 0, which then doesn't move on through its sample, so a
+        # muted track's channels are mixed into sums of their own instead.
+        uc.mem_map(CAMELOT_SCRATCH, 0x1000)
+        uc.hook_add(UC_HOOK_CODE, self._mix_channel, begin=self.addr.mix_channel, end=self.addr.mix_channel)
+
+        # The mixer has DMA channel 3 copy the points it needs for a frame to the stack, and mixes them from there.
+        uc.hook_add(UC_HOOK_MEM_WRITE, self._dma3, begin=DMA3_CONTROL, end=DMA3_CONTROL + 3)
+
+    def _code_write(self, uc, access, address, size, value, user):
+        uc.ctl_remove_cache(address, address + size)
+
+    def _fixed_loop(self, uc, address, size, user):
+        if self.restarted:
+            self.restarted = False
+            return
+        self.restarted = True
+        uc.ctl_remove_cache(address, address + 0x40)
+        uc.reg_write(UC_ARM_REG_PC, address)
+
+    def _dma3(self, uc, access, address, size, value, user):
+        # A write that enables the channel with an immediate start copies at once, from the source to the destination
+        # address, a word or a halfword at a time, each moving up, down or not at all.
+        control = value if address == DMA3_CONTROL and size == 4 else None
+        if control is None or not control & 0x80000000 or control & 0x30000000:
+            return
+        unit = 4 if control & 0x04000000 else 2
+        count = control & 0xFFFF or 0x10000
+        src, dst = self.u32(DMA3_CONTROL - 8), self.u32(DMA3_CONTROL - 4)
+        steps = {0: unit, 1: -unit, 2: 0, 3: unit}
+        dst_step, src_step = steps[(control >> 21) & 3], steps[(control >> 23) & 3]
+        for i in range(count):
+            uc.mem_write(dst + i * dst_step, bytes(uc.mem_read(src + i * src_step, unit)))
+
+    def _mute(self, uc, address, size, user):
+        # The mixer leaves out a channel whose volumes are 0, so _mix_channel() mutes tracks instead.
+        pass
+
+    def _mix_channel(self, uc, address, size, user):
+        if self.muted and self.track_index(self.u32(uc.reg_read(UC_ARM_REG_R4) + 44)) in self.muted:
+            uc.reg_write(UC_ARM_REG_R5, CAMELOT_SCRATCH)
+
+    def frame(self):
+        """Runs one frame. Returns the mixer's output for it as two arrays, right and left. The output stage writes two
+        8-bit points for each of the mixer's, which add up to a 9-bit point, and each array holds their average."""
+        self.fixed_vcount = 160
+        self.call(self.addr.vsync)
+        self.uc.mem_write(self.addr.dma_counter, bytes([self.u8(self.info + 4)]))
+        self.call(self.addr.main)
+        self.call(self.addr.output, (8,))
+        self.fixed_vcount = None
+        place = self.u32(self.addr.output_place)
+        count = 2 * self.u32(self.info + 16)
+        right = np.frombuffer(bytes(self.uc.mem_read(place, count)), dtype=np.int8).astype(np.float64)
+        left = np.frombuffer(bytes(self.uc.mem_read(place + 2 * PCM_DMA_BUF_SIZE, count)), dtype=np.int8)
+        left = left.astype(np.float64)
+        return (right[0::2] + right[1::2]) / 2, (left[0::2] + left[1::2]) / 2
+
+    def rate(self):
+        """Returns the mixer's rate in Hz: the timer runs at twice the rate, for the output's two points each."""
+        return super().rate() / 2
+
+
+def emulator(rom):
+    """Returns the engine of a game, ready to play a song."""
+    return CamelotEmulator(rom) if getattr(addresses_for(rom), 'camelot', False) else EngineEmulator(rom)
+
+
 def write_wav(path, right, left, rate):
     stereo = np.stack([left, right], axis=1).astype(np.float64) * 256
     data = np.clip(stereo, -32768, 32767).astype('<i2')
@@ -270,7 +446,7 @@ def write_wav(path, right, left, rate):
 
 
 def trace(rom, song, frames):
-    emu = EngineEmulator(rom)
+    emu = emulator(rom)
     emu.play(song)
     for f in range(frames):
         emu.frame()
@@ -284,8 +460,9 @@ def trace(rom, song, frames):
 def render(rom, song, frames, tracks=None):
     """Returns the mixer's output for the first `frames` frames of `song` as right and left arrays, and its rate in Hz.
     If `tracks` is given, the DirectSound channels of the song's other tracks are mixed silently. They still take up
-    channels, so the result is what the game plays with those tracks muted."""
-    emu = EngineEmulator(rom)
+    channels, so the result is what the game plays with those tracks muted. Camelot's mixer adds an echo of its earlier
+    output, which the muted tracks leave out too."""
+    emu = emulator(rom)
     emu.play(song)
     if tracks is not None:
         emu.muted = set(range(16)) - set(tracks)

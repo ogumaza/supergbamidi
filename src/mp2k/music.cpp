@@ -4,7 +4,7 @@
 
 #include "music.h"
 
-#include <cstdint>
+#include <cstdio>
 #include <memory>
 #include <string>
 #include <utility>
@@ -150,6 +150,7 @@ private:
         ConvertOptions opt;
         opt.loops = settings.loops;
         opt.track_mask = settings.track_mask;
+        opt.frame_timing = settings.frame_timing;
         opt.voice_channels = settings.voice_channels;
         opt.out_dir = settings.out_dir;
         opt.base_name = settings.base_name;

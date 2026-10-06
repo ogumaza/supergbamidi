@@ -101,7 +101,8 @@ Sf2Records ReadSf2(const std::string& path);
 
 } // namespace supergbamidi::test
 
-// Each driver's tests, in konami_test.cpp, rare_test.cpp, quintet_test.cpp, mp2k_test.cpp and rd2_test.cpp.
+// Each driver's tests, in konami_test.cpp, rare_test.cpp, quintet_test.cpp, mp2k_test.cpp, rd2_test.cpp and
+// brownie_test.cpp.
 namespace supergbamidi::konami
 {
 
@@ -136,6 +137,13 @@ namespace supergbamidi::rd2
 void RunTests();
 
 } // namespace supergbamidi::rd2
+
+namespace supergbamidi::brownie
+{
+
+void RunTests();
+
+} // namespace supergbamidi::brownie
 
 #define SUPERGBAMIDI_CHECK(cond)                                                          \
     do                                                                                    \

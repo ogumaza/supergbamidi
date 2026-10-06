@@ -77,6 +77,8 @@ def main():
 
     listed = songs_with_tracks(a.supergbamidi, a.rom)
     songs = [s for s in parse_range(a.songs) if s in listed] if a.songs else listed
+    if not songs:
+        raise SystemExit('found none of the songs to check in the song list of supergbamidi --info')
     jobs = [(a.supergbamidi, a.rom, s, a.frames) for s in songs]
     if a.jobs > 1:
         with multiprocessing.Pool(a.jobs) as pool:

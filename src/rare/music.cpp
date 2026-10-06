@@ -151,6 +151,7 @@ private:
         ConvertOptions opt;
         opt.loops = settings.loops;
         opt.track_mask = settings.track_mask;
+        opt.frame_timing = settings.frame_timing;
         opt.bank = shared_ && song < int(banks_.size()) ? banks_[size_t(song)] : 0;
         opt.out_dir = settings.out_dir;
         opt.base_name = settings.base_name;

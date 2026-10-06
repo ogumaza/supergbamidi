@@ -52,6 +52,9 @@ int TrackCount(Revision r);
 // before it, where the table holds the noise channel's settings. The notes below it are 16 entries apart.
 constexpr int kDungeonDiceNoiseNote = 72;
 
+// The frequency of a square channel's note 0, C2, in Hz: 440 Hz × 2^(-33/12).
+constexpr double kC2 = 65.40639132514966;
+
 // Returns the size of a song table entry in revision `r`: the song's base address, and the offset of each track.
 uint32_t SongEntrySize(Revision r);
 
@@ -104,11 +107,12 @@ struct Command
     uint32_t addr = 0;   // address of the opcode byte
     uint32_t length = 0; // bytes including arguments
     uint8_t opcode = 0;
-    int vol = -1;       // kNote/kVolume/kPsgNote
-    int sample = -1;    // kNote: sample index
+    int vol = -1;       // kNote/kVolume/kPsgNote, and Dungeon Dice Monsters' kNextNote/kSampleAtNote/kSetVolume
+    int sample = -1;    // kNote: sample index (Dungeon Dice Monsters: sample map entry, also for kNextNote)
     int semitone = 0;   // kNote: signed semitone offset
-    int note = -1;      // kPsgNote: note number
-    int value = 0;      // generic argument (kCall: offset of the commands); kPitchBend: 1/32 semitones
+    int note = -1;      // kPsgNote/kSampleAtNote: note number
+    int value = 0;      // generic argument (kCall: offset of the commands); kPitchBend: 1/32 semitones, or 1/16 in
+                        // Dungeon Dice Monsters
     int count = 0;      // kCall: commands to play
     uint32_t delay = 0; // kDelay: frames
 };

@@ -20,6 +20,7 @@ struct ConvertOptions
 {
     int loops = 2;                // times a looping song's loop is played
     uint16_t track_mask = 0xFFFF; // channels to include (bit c = channel c)
+    bool frame_timing = false;    // each event on the frame the driver plays it in, rather than on the beat
     int bank = 0;                 // the bank of the song's presets
     std::string out_dir = ".";
     std::string base_name = "song";
@@ -29,10 +30,10 @@ struct ConvertOptions
 struct SongSummary
 {
     bool ok = false;                       // converted, or skipped for having no notes
-    bool silent = false;                   // no notes at all: nothing was written
+    bool silent = false;                   // no notes on the chosen channels: nothing was written
     double seconds = 0;                    // the converted length, at the GBA's speed
     double loop_start = -1, loop_end = -1; // seconds; -1 if the song doesn't loop
-    int tracks = 0;                        // channels with notes
+    int tracks = 0;                        // chosen channels with notes
     double bpm = 0;                        // the first tempo, at the GBA's speed
     std::string midi_path, sf2_path;
     std::vector<std::string> warnings;

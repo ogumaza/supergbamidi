@@ -18,7 +18,6 @@
 #include "music.h"
 #include "program.h"
 #include "quintet/sequencer.h"
-#include "quintet/song.h"
 #include "sf2.h"
 
 namespace supergbamidi::quintet
@@ -30,10 +29,6 @@ namespace
 // ticks long.
 constexpr uint32_t kSongTick = 37;
 constexpr uint32_t kTicksPerQuarter = 96 * kSongTick;
-
-// The CPU cycles in a frame, and a second's.
-constexpr uint64_t kFrameCycles = 280896;
-constexpr uint64_t kSecondCycles = 16777216;
 
 // The longest conversion, in frames: about an hour.
 constexpr uint32_t kMaxFrames = 60 * 60 * 60;
@@ -95,8 +90,9 @@ struct FrameData
 struct Plan
 {
     bool loops = false;
-    uint32_t loop_start = 0; // the latest of the looping channels' loop points and the other channels' ends
+    uint32_t loop_start = 0; // the latest of the looping channels' loop points and the others' ends, or a loop later
     uint32_t loop_end = 0;   // the loop start plus the length LoopLength() gives for the channels' loops
+    uint32_t next_end = 0;   // as far again: the end of the song's next pass through its loop
     uint32_t end = 0;
 };
 
@@ -120,8 +116,9 @@ int MidiTempo(const FrameData& d)
 // Returns each event's MIDI tick. The driver times a channel's notes by counting its ticks from the last time it reset
 // the count: at the song's start, at a loop and at a tempo change. It plays each note at the start of the frame that
 // its count reaches. So the first note after a reset starts its frame, and the notes after it keep to their ticks, 37
-// MIDI ticks each at the first channel's tempo, within the frames the driver plays them in.
-std::vector<uint32_t> EventTicks(const Simulation& sim)
+// MIDI ticks each at the first channel's tempo, within the frames the driver plays them in, or with `frame_timing`, at
+// the start of those frames.
+std::vector<uint32_t> EventTicks(const Simulation& sim, bool frame_timing)
 {
     std::vector<uint32_t> ticks(sim.events.size());
     std::array<bool, kChannels> reset;
@@ -135,6 +132,11 @@ std::vector<uint32_t> EventTicks(const Simulation& sim)
         const size_t c = e.channel;
         const uint32_t start = sim.frame_ticks[e.frame];
         const uint32_t next = sim.frame_ticks[e.frame + 1];
+        if (frame_timing)
+        {
+            ticks[i] = start;
+            continue;
+        }
 
         // A loop resets the channel's count, and so does a tempo: on the first channel, every channel's. A loop point
         // read before the first note after a reset belongs to that note's frame.
@@ -172,8 +174,9 @@ std::vector<uint32_t> EventTicks(const Simulation& sim)
 }
 
 // Runs the model until every channel has looped, ended or stopped at its loop point, and the song has played its loop
-// `loops` times, and works out the MIDI file's timing.
-Simulation Simulate(const Rom& rom, const DriverInfo& info, int song, int loops)
+// `loops` times, and works out the MIDI file's timing. With `second`, the loop starts at the song's second pass through
+// it, and the song plays the first pass before it.
+Simulation Simulate(const Rom& rom, const DriverInfo& info, int song, int loops, bool frame_timing, bool second)
 {
     Simulation sim;
     Sequencer seq(rom, info, song);
@@ -223,11 +226,11 @@ Simulation Simulate(const Rom& rom, const DriverInfo& info, int song, int loops)
             }
         }
 
-        // Once every channel has looped, ended or stopped at its loop point, the loop is known, and the song goes on
-        // until it has played enough times. The channels of a song may loop at different points and lengths, so the
-        // loop starts where every looping channel has started its loop and every other channel has ended or stopped,
-        // and lasts until every looping channel is back where its loop started, if that isn't too long (see
-        // LoopLength()): `times` passes of the channel with the longest loop.
+        // Once every channel has looped, ended or stopped at its loop point, the loop is known. The song then continues
+        // for the required number of passes, and with `second`, one more before them. Channels may have different loop
+        // points and lengths. The overall loop starts once all looping channels have entered their loops and the others
+        // have ended or stopped. LoopLength() finds how long it takes them to return to their loop starts, subject to
+        // its length limit: `times` passes of the longest channel loop.
         if (!planned)
         {
             planned = true;
@@ -278,9 +281,10 @@ Simulation Simulate(const Rom& rom, const DriverInfo& info, int song, int loops)
         {
             break;
         }
-        if (planned && passes[size_t(loop_channel)].size() >= size_t(loops) * times)
+        const size_t needed = (size_t(loops) + (second ? 1 : 0)) * times; // the loop channel's passes in the song
+        if (planned && passes[size_t(loop_channel)].size() >= needed)
         {
-            const int last = passes[size_t(loop_channel)][size_t(loops) * times - 1];
+            const int last = passes[size_t(loop_channel)][needed - 1];
             if (sim.frame_ticks[f] >= sim.frame_ticks[sim.events[size_t(last)].frame] + run_on)
             {
                 break;
@@ -288,12 +292,14 @@ Simulation Simulate(const Rom& rom, const DriverInfo& info, int song, int loops)
         }
     }
 
-    sim.event_ticks = EventTicks(sim);
+    sim.event_ticks = EventTicks(sim, frame_timing);
 
     // The loop starts where every looping channel has started its loop and every other channel has ended or stopped,
     // that far after the loop channel's loop point, and ends as far after the end of the loop channel's `times`th pass.
-    // The song ends as far after its last pass, or where the last channel ends or stops if the song doesn't loop. A
-    // song that the model gave up on ends where it stopped.
+    // With `second`, it starts and ends a loop later, as far after the ends of its `times`th and twice `times`th
+    // passes. The song's next pass through the loop ends a loop after it. The song ends as far after its last pass, or
+    // where the last channel ends or stops if the song doesn't loop. A song that the model gave up on ends where it
+    // stopped.
     Plan& plan = sim.plan;
     if (loop_channel >= 0)
     {
@@ -314,13 +320,23 @@ Simulation Simulate(const Rom& rom, const DriverInfo& info, int song, int loops)
 
         const uint32_t first_pass = sim.event_ticks[size_t(p[0])] - sim.event_ticks[size_t(loop_point[c])];
         const uint32_t delay = start - sim.event_ticks[size_t(loop_point[c])];
-        const size_t last = size_t(loops) * times;
+
+        // Where the loop channel's `n`th pass ends, moved as far on as the loop starts after its loop point: the loop
+        // start for 0, and if the model stopped before that pass ended, where it would at the first pass's length.
+        const auto pass_end = [&](size_t n)
+        {
+            return n == 0          ? start
+                   : p.size() >= n ? sim.event_ticks[size_t(p[n - 1])] + delay
+                                   : start + uint32_t(n) * first_pass;
+        };
+
+        const size_t skip = second ? times : 0; // the loop channel's passes before the loop
+        const size_t last = size_t(loops) * times + skip;
         plan.loops = true;
-        plan.loop_start = start;
-        plan.loop_end =
-            p.size() >= times ? sim.event_ticks[size_t(p[times - 1])] + delay : start + uint32_t(times) * first_pass;
-        plan.end = p.size() >= last ? std::min(sim.event_ticks[size_t(p[last - 1])] + delay, sim.frame_ticks.back())
-                                    : sim.frame_ticks.back();
+        plan.loop_start = pass_end(skip);
+        plan.loop_end = pass_end(skip + times);
+        plan.next_end = pass_end(skip + 2 * times);
+        plan.end = p.size() >= last ? std::min(pass_end(last), sim.frame_ticks.back()) : sim.frame_ticks.back();
     }
     else
     {
@@ -959,6 +975,85 @@ private:
     std::vector<WaveShape> shape_list_;
 };
 
+// Returns true if each channel's second pass through its loop plays the same notes as its first: the same keys and
+// programs at the same ticks from the pass's start, with the same levels, bend and tempo. Every note has the same
+// velocity. The notes' ends aren't compared: the first pass can be a fraction of a frame longer than the next, as the
+// driver drops the part of a frame it has counted when it loops, and the sound hardware's clocks, which aren't tied to
+// the frames, can end a note a frame earlier or later from pass to pass. `sim` has to hold three passes of the song's
+// loop, so that every channel's second pass is complete.
+bool FirstPassRepeats(const Rom& rom, const DriverInfo& info, const Simulation& sim)
+{
+    NoteMaker maker(rom, info, sim);
+    for (int c = 0; c < kChannels; c++)
+    {
+        // Where the channel's first pass starts, at its loop point, and where it and the second pass end.
+        std::vector<uint32_t> bounds;
+        for (size_t i = 0; i < sim.events.size() && bounds.size() < 3; i++)
+        {
+            const Event& e = sim.events[i];
+            if (e.channel == c && e.kind == Event::kLoopPoint && bounds.size() < 2)
+            {
+                bounds.assign(1, sim.event_ticks[i]);
+            }
+            else if (e.channel == c && e.kind == Event::kLoop && !bounds.empty())
+            {
+                bounds.push_back(sim.event_ticks[i]);
+            }
+        }
+        if (bounds.size() < 3)
+        {
+            continue;
+        }
+
+        std::array<std::vector<std::tuple<uint32_t, int, int, int, int, double, int>>, 2> passes;
+        for (const Note& n : maker.Make(c))
+        {
+            for (size_t k = 0; k < 2; k++)
+            {
+                if (n.on >= bounds[k] && n.on < bounds[k + 1])
+                {
+                    const auto frame = std::upper_bound(sim.frame_ticks.begin(), sim.frame_ticks.end(), n.on) - 1;
+                    int cc10 = 64, cc11 = 0;
+                    LevelsToControllers(n.sounds[0].left, n.sounds[0].right, cc10, cc11);
+                    passes[k].emplace_back(n.on - bounds[k], n.key, n.program, cc10, cc11, n.sounds[0].bend,
+                                           MidiTempo(sim.frames[size_t(frame - sim.frame_ticks.begin())]));
+                }
+            }
+        }
+        if (passes[0] != passes[1])
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+// Returns true if each channel starts the same number of notes in the marked loop and the next pass. When a channel
+// loops, the driver discards its fractional frame, which differs between channels, so a channel's later passes can
+// start up to a frame earlier relative to the loop channel than its first did. The copy of a note at the loop's start
+// can then fall before the end marker, causing a looping player to play it twice.
+bool SeamRepeats(const Rom& rom, const DriverInfo& info, const Simulation& sim)
+{
+    NoteMaker maker(rom, info, sim);
+    const Plan& plan = sim.plan;
+    for (int c = 0; c < kChannels; c++)
+    {
+        const std::vector<Note> notes = maker.Make(c);
+        const auto starts = [&](uint32_t from, uint32_t to)
+        {
+            return std::count_if(notes.begin(), notes.end(), [&](const Note& n) { return n.on >= from && n.on < to; });
+        };
+
+        if (starts(plan.loop_start, plan.loop_end) != starts(plan.loop_end, plan.next_end))
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 // Returns the MIDI file's tempo changes before the end, as (MIDI tick, tempo).
 std::vector<std::pair<uint32_t, int>> TempoMap(const Simulation& sim)
 {
@@ -1038,7 +1133,6 @@ std::vector<Sf2Zone> SwitchZones(int first, int frames, int second)
 // Returns the warnings for instruments with nothing to play.
 std::vector<std::string> AddPresets(SoundfontBuilder& sf, const NoteMaker& maker, int bank)
 {
-    static constexpr const char* kDuty[4] = {"12.5%", "25%", "50%", "75%"};
     std::vector<std::string> warnings;
     for (const auto& [inst, program] : maker.Programs())
     {
@@ -1049,15 +1143,15 @@ std::vector<std::string> AddPresets(SoundfontBuilder& sf, const NoteMaker& maker
         {
         case Instrument::kSquare:
             {
-                // The first sample is made before the second, so that their numbers don't depend on the order in
-                // which the compiler evaluates a call's arguments.
+                // The first sample is made before the second, so that their numbers don't depend on the order in which
+                // the compiler evaluates a call's arguments.
                 const int first = sf.SquareSample(inst.first);
                 const int second = sf.SquareSample(inst.second);
                 zones = SwitchZones(first, inst.frames, second);
-                name = std::string("Square ") + kDuty[inst.first & 3];
+                name = std::string("Square ") + kDutyNames[inst.first & 3];
                 if (inst.frames)
                 {
-                    name += std::string(" to ") + kDuty[inst.second & 3];
+                    name += std::string(" to ") + kDutyNames[inst.second & 3];
                 }
                 break;
             }
@@ -1197,12 +1291,26 @@ bool WriteMidi(const std::string& path, const std::string& title, const std::str
             mt.PitchBend(0, c, 8192);
         }
 
+        // A player that jumps back to the loop's start keeps the settings that the loop's end left, so they're all
+        // written again from the channel's first event there, unless the loop starts with the song.
         int cc10 = 64, cc11 = 0, bend = 8192;
+        bool before_loop = plan.loops && plan.loop_start > 0;
+        const auto forget = [&](uint32_t tick)
+        {
+            if (before_loop && tick >= plan.loop_start)
+            {
+                before_loop = false;
+                program = -1;
+                cc10 = cc11 = bend = -1;
+            }
+        };
+
         for (const Note& n : list)
         {
+            forget(n.on);
             if (n.program != program)
             {
-                if (n.program / 128 != program / 128)
+                if (program < 0 || n.program / 128 != program / 128)
                 {
                     mt.Bank(n.on, c, bank + n.program / 128);
                 }
@@ -1220,6 +1328,7 @@ bool WriteMidi(const std::string& path, const std::string& title, const std::str
                     break;
                 }
 
+                forget(tick);
                 int n10 = cc10, n11 = cc11;
                 LevelsToControllers(s.left, s.right, n10, n11);
                 if (n10 != cc10)
@@ -1243,6 +1352,7 @@ bool WriteMidi(const std::string& path, const std::string& title, const std::str
                 }
                 for (const SweepStep& step : s.sweeps)
                 {
+                    forget(step.tick);
                     const int w = BendValue(step.bend, range);
                     if (step.tick < n.off && w != bend)
                     {
@@ -1264,15 +1374,27 @@ SongSummary Run(const Rom& rom, const DriverInfo& info, int song, const ConvertO
                 bool write)
 {
     SongSummary sum;
-    SongHeader header;
-    if (song < 0 || song >= int(info.song_addresses.size()) ||
-        !ReadSongHeader(rom, info.song_addresses[size_t(song)], header))
+    if (song < 0 || song >= int(info.song_addresses.size()))
     {
         sum.warnings.push_back("its header can't be read");
         return sum;
     }
 
-    const Simulation sim = Simulate(rom, info, song, opt.loops);
+    // Start the marked loop on the second pass if it differs from the first. The intro may leave a different octave or
+    // other setting from the end of the loop. A channel may continue changing on later passes; the marker still starts
+    // at the second. Compare notes on the beat, as in the default MIDI output, so `frame_timing` moves the same loops
+    // rather than also moving those that differ only through rounding to frames. Also move the marker if a note at the
+    // loop's start would play twice, under either timing mode.
+    Simulation sim = Simulate(rom, info, song, opt.loops, opt.frame_timing, false);
+    if (sim.plan.loops)
+    {
+        const Simulation beat = Simulate(rom, info, song, 3, false, false);
+        if (!FirstPassRepeats(rom, info, beat) || !SeamRepeats(rom, info, beat) ||
+            !SeamRepeats(rom, info, Simulate(rom, info, song, 3, true, false)))
+        {
+            sim = Simulate(rom, info, song, opt.loops, opt.frame_timing, true);
+        }
+    }
     sum.warnings = sim.warnings;
 
     NoteMaker maker(rom, info, sim);
@@ -1312,7 +1434,7 @@ SongSummary Run(const Rom& rom, const DriverInfo& info, int song, const ConvertO
     const std::string title = rom.Title() + " #" + TwoDigits(song);
     char about[160];
     std::snprintf(about, sizeof about, "%s (%s) song %d, header at 0x%08X, converted by %s", rom.Title().c_str(),
-                  rom.GameCode().c_str(), song, unsigned(header.address), kProgramName);
+                  rom.GameCode().c_str(), song, unsigned(info.song_addresses[size_t(song)]), kProgramName);
     const std::string stem =
         Utf8(PathFromUtf8(opt.out_dir) / PathFromUtf8(SafeFileName(opt.base_name) + "_" + TwoDigits(song)));
     std::string error;

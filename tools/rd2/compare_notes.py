@@ -5,9 +5,10 @@
 
     compare_notes.py ROM SUPERGBAMIDI FOLDER [--songs 0-33] [--frames 12000]
 
-FOLDER holds supergbamidi's conversion of ROM: NAME_NN.mid and NAME_NN.sf2 for each sequence. For every sequence, the
-driver runs under driver_emu.py for as long as the MIDI file lasts, with hooks in its note on routine, and each note it
-starts with a voice has to be in the MIDI file, and the other way round:
+FOLDER holds supergbamidi's conversion of ROM: NAME_NN.mid and NAME_NN.sf2 for each sequence, or NAME_rd2_NN.mid and
+NAME_rd2_NN.sf2 if detection finds another of the game's drivers first. For every sequence, the driver runs under
+driver_emu.py for as long as the MIDI file lasts, with hooks in its note on routine, and each note it starts with a
+voice has to be in the MIDI file, and the other way round:
 
   - on its track's channel, with the key and velocity the conversion gives it, starting within the frame the driver
     starts it in or the frame before (a MIDI note keeps to its own tick, where the driver waits for the next frame);
@@ -18,7 +19,8 @@ starts with a voice has to be in the MIDI file, and the other way round:
   - and in each frame that its voice is the newest of its track's, with the pitch bend for the voice's pitch in that
     frame, which slides, the track's bend and the LFO change.
 
-SUPERGBAMIDI is used for its --info report, which names the driver's tables.
+A sequence named in --songs that has no MIDI file mustn't play any notes. SUPERGBAMIDI is used for its --info report,
+which names the driver's tables and gives each sequence's length.
 """
 import argparse
 import bisect
@@ -29,7 +31,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # for gbarom.py, in tools/
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # for conversion.py and gbarom.py, in tools/
+import conversion
 import driver_emu
 from compare_trace import parse_range
 from gbarom import ROM_BASE, load_rom
@@ -183,9 +186,9 @@ def read_midi(path):
         elif kind == 'program':
             program[ch] = a
         elif kind == 'cc' and a == 0:
-            bank[ch] = b << 7 | (bank.get(ch, 0) & 0x7F)
-        elif kind == 'cc' and a == 32:
-            bank[ch] = (bank.get(ch, 0) & ~0x7F) | b
+            # supergbamidi gives the SoundFont's bank number in CC0 alone, as FluidSynth reads it by default, and sets
+            # CC32 to 0.
+            bank[ch] = b
         elif kind == 'bend':
             times, values = bends.setdefault(ch, ([], []))
             times.append(t)
@@ -207,13 +210,16 @@ def bend_at(bends, ch, t):
     return values[i - 1] if i else 8192
 
 
-def driver_tables(tool, rom_path):
-    """Returns the pitch and frequency tables' addresses from supergbamidi's --info report."""
+def driver_info(tool, rom_path):
+    """Returns the pitch and frequency tables' addresses from supergbamidi's --info report, and the frames that each
+    sequence it lists lasts, from its length in minutes and seconds."""
     text = subprocess.run([tool, '--driver', 'rd2', '--info', rom_path], capture_output=True, encoding='utf-8',
                           check=True).stdout
     pitch = int(re.search(r'pitch table: 0x([0-9A-F]+)', text).group(1), 16)
     frequency = int(re.search(r'frequency table: 0x([0-9A-F]+)', text).group(1), 16)
-    return pitch, frequency
+    lengths = {int(m.group(1)): math.ceil((int(m.group(2)) * 60 + float(m.group(3))) * FRAME_RATE)
+               for m in re.finditer(r'^\s+(\d+)\s+0x[0-9A-F]{8}\s+\d+\s+(\d+):(\d+\.\d+)', text, re.M)}
+    return (pitch, frequency), lengths
 
 
 class Rom:
@@ -359,7 +365,7 @@ def check_song(rom, raw_rom, tables, song, midi_path, sf2_path, frames_limit):
                     problems.append('frame %d: track %d key %d plays %.1f cents off' % (f, note['track'], key, cents))
 
             # Each frame's bend while its voice is the newest of its track's.
-            bend_range = ranges.get(channel, 0)
+            bend_range = ranges.get(channel, 2)
             for g in range(f, min(len(played) if end is None else end, len(played), int(end_frame))):
                 if played[g][2][note['track']] != v or played[g][1][v] is None:
                     continue
@@ -381,24 +387,36 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('rom', metavar='ROM', help='the game (.gba)')
     p.add_argument('supergbamidi', metavar='SUPERGBAMIDI', help='the supergbamidi program that made the conversion')
-    p.add_argument('folder', metavar='FOLDER', help='the conversion: NAME_NN.mid and NAME_NN.sf2')
+    p.add_argument('folder', metavar='FOLDER', help='the conversion: NAME_NN.mid and NAME_NN.sf2, or NAME_rd2_NN')
     p.add_argument('--songs', help='sequences to check, such as 0-33 (default: every one in FOLDER)')
     p.add_argument('--frames', type=int, default=12000, help='frames to check in each sequence (default: 12000)')
     a = p.parse_args()
 
     raw_rom = load_rom(a.rom)
     rom = Rom(raw_rom)
-    tables = driver_tables(a.supergbamidi, a.rom)
-    folder = Path(a.folder)
-    midis = {int(m.group(1)): path for path in sorted(folder.glob('*.mid'))
-             for m in [re.search(r'_(\d+)\.mid$', path.name)] if m}
-    songs = parse_range(a.songs) if a.songs else sorted(midis)
-    failed = 0
-    total = 0
+    tables, lengths = driver_info(a.supergbamidi, a.rom)
+    midis = dict(conversion.midi_files(a.folder, 'rd2'))
+    if not midis:
+        raise SystemExit('found no MIDI files to check in %s' % a.folder)
+    songs = sorted(set(parse_range(a.songs))) if a.songs else sorted(midis)
+    count = failed = total = 0
     for song in songs:
-        if song not in midis:
+        midi = midis.get(song)
+        if midi is None:
+            # A sequence without a MIDI file mustn't play any notes.
+            if song not in lengths:
+                print('sequence %d: no MIDI file, and --info lists no such sequence' % song)
+                continue
+            count += 1
+            played = sum(1 for started, _, _ in driver_emu.notes(raw_rom, song, min(a.frames, lengths[song] + 2))
+                         for note in started if note['velocity'])
+            if played:
+                failed += 1
+                print('sequence %d: no MIDI file, but the driver plays %d notes' % (song, played))
+            else:
+                print('sequence %d: no MIDI file, and the driver plays no notes' % song)
             continue
-        midi = midis[song]
+        count += 1
         checked, problems = check_song(rom, raw_rom, tables, song, midi, midi.with_suffix('.sf2'), a.frames)
         total += checked
         if problems:
@@ -408,7 +426,9 @@ def main():
                 print('    ' + problem)
         else:
             print('sequence %d: all %d notes match' % (song, checked))
-    print('%d of %d sequences match the driver, %d notes checked' % (len(songs) - failed, len(songs), total))
+    if not count:
+        raise SystemExit('found none of the sequences to check')
+    print('%d of %d sequences match the driver, %d notes checked' % (count - failed, count, total))
     raise SystemExit(1 if failed else 0)
 
 

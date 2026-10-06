@@ -24,6 +24,7 @@ enum class Driver
     kQuintet,
     kRd2,
     kMp2k,
+    kBrownie,
 };
 
 // Settings that override detection, from the command line. 0 means detect.
@@ -42,6 +43,7 @@ struct ConvertSettings
     int loops = 2;                // times a looping song's loop is played
     uint16_t track_mask = 0xFFFF; // tracks to include (bit t = track t)
     bool voice_channels = false;  // a MIDI channel for each of the driver's sound channels, where it can
+    bool frame_timing = false;    // each event on the frame the driver plays it in, rather than on the beat
     std::string out_dir = ".";
     std::string base_name = "song";
 };
@@ -55,7 +57,7 @@ struct SongReport
     double seconds = 0;     // duration including the requested number of loop passes
     double loop_start = -1; // seconds; -1 if the song doesn't loop
     double loop_end = -1;
-    int tracks = 0; // tracks that play notes
+    int tracks = 0; // chosen tracks that play notes
     double bpm = 0;
     std::string midi_path, sf2_path;
     std::vector<std::string> warnings;
@@ -105,13 +107,22 @@ public:
     virtual bool Trace(int song, long long frames, std::FILE* out, std::vector<std::string>& warnings) const = 0;
 };
 
+// A sound driver that a game has, as OpenAllMusic() finds it.
+struct FoundMusic
+{
+    Driver driver = Driver::kAny;
+    std::unique_ptr<Music> music;
+};
+
 // Finds the sound driver of the game in `rom`, which has to outlive the result, and reads its tables. Returns null and
 // sets `error` if the game has none of the drivers, or the tables of the first one it finds can't be read.
 std::unique_ptr<Music> OpenMusic(const Rom& rom, const Overrides& overrides, std::string& error);
 
-// Finds every sound driver that `overrides` allows in the game in `rom`, in the order OpenMusic() looks for them, since
-// a game can have more than one. Leaves out drivers whose tables can't be read.
-std::vector<std::unique_ptr<Music>> OpenAllMusic(const Rom& rom, const Overrides& overrides);
+// Finds every sound driver that `overrides` allows in the game in `rom`, which has to outlive the results, and reads
+// their tables, since a game can have more than one. They come in the order OpenMusic() looks for them, so the first is
+// the one it returns. Returns none and sets `error` as OpenMusic() does, and leaves out a later driver whose tables
+// can't be read.
+std::vector<FoundMusic> OpenAllMusic(const Rom& rom, const Overrides& overrides, std::string& error);
 
 // The most times as long as the longest of its tracks' loops that a song's loop can be.
 constexpr uint64_t kMaxLoopFactor = 8;
@@ -157,4 +168,11 @@ namespace mp2k
 std::unique_ptr<Music> OpenMusic(const Rom& rom, const Overrides& overrides, std::string& error);
 
 } // namespace mp2k
+
+namespace brownie
+{
+
+std::unique_ptr<Music> OpenMusic(const Rom& rom, const Overrides& overrides, std::string& error);
+
+} // namespace brownie
 } // namespace supergbamidi

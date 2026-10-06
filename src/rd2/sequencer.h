@@ -26,6 +26,9 @@ constexpr int kVoices = kSampleVoices + kPsgVoices;
 constexpr int kPlayerTracks = 10;
 constexpr int kTrackSlots = 24;
 
+// The deepest F4 can nest: the driver keeps 3 return addresses.
+constexpr int kMaxDepth = 3;
+
 // The mixer's rate and the samples it mixes each frame.
 constexpr uint32_t kMixRate = 10512;
 constexpr uint32_t kFrameSamples = 176;
@@ -96,40 +99,40 @@ struct Voice
 // The driver's record of a track, with each field's offset.
 struct Track
 {
-    uint32_t position = 0;              // 0x00: the next byte to read
-    uint32_t samples = 0;               // 0x04: the table of the bank's samples
-    bool active = false;                // 0x08: true while a player has it
-    int voices = -1;                    // 0x0C: the first of its voices, the newest
-    uint16_t lfo_delay = 0;             // 0x10: E5
-    uint32_t lfo_rate = 0x22;           // 0x14: E6
-    uint32_t lfo_depth = 0;             // 0x18: E7
-    uint8_t slide = 0;                  // 0x1C: 1 while the next note slides
-    uint8_t slide_flags = 0;            // 0x1D: Dx's low nibble
-    uint8_t slide_note = 0;             // 0x1E
-    uint16_t slide_delay = 0;           // 0x20
-    uint16_t slide_length = 0;          // 0x22: the slide's length in 256ths of the note's
-    std::array<uint32_t, 3> stack = {}; // 0x24: F4's return addresses
-    int depth = 0;                      // 0x30
-    int32_t counter = 0;                // 0x34: the time left before the next command, in units of 1/150 tick
-    uint16_t bank = 0;                  // 0x40: C7's slot in the player's list of banks
-    uint16_t instrument = 0;            // 0x42: C2
-    uint16_t length = 0x7F;             // 0x44: the notes' length, in ticks
-    uint16_t wait = 0;                  // 0x46: C0's wait
-    uint8_t velocity = 0x7F;            // 0x48
-    uint8_t legato = 0;                 // 0x49: C5 and C6
-    uint8_t mute = 0;                   // 0x4A
-    uint8_t pan = 0x40;                 // 0x4B: C3
-    uint8_t echo = 0;                   // 0x4C: E3
-    uint8_t volume = 0x80;              // 0x4D: E0
-    uint8_t volume2 = 0x80;             // 0x4E
-    int8_t bend = 0;                    // 0x4F: E1
-    uint8_t bend_range = 2;             // 0x50: E2
-    uint8_t transpose = 0;              // 0x51: E9
-    uint8_t priority = 3;               // 0x52: C4
-    uint8_t timed_notes = 0;            // 0x53: C8 and C9, which make notes wait for their length
-    int number = -1;                    // the player's number for the track, 0-9
-    uint64_t units = 0;                 // the time the track has read up to, in units from the sequence's start
-    std::map<uint32_t, uint64_t> seen;  // the time it first read the command at each address
+    uint32_t position = 0;                      // 0x00: the next byte to read
+    uint32_t samples = 0;                       // 0x04: the table of the bank's samples
+    bool active = false;                        // 0x08: true while a player has it
+    int voices = -1;                            // 0x0C: the first of its voices, the newest
+    uint16_t lfo_delay = 0;                     // 0x10: E5
+    uint32_t lfo_rate = 0x22;                   // 0x14: E6
+    uint32_t lfo_depth = 0;                     // 0x18: E7
+    uint8_t slide = 0;                          // 0x1C: 1 while the next note slides
+    uint8_t slide_flags = 0;                    // 0x1D: Dx's low nibble
+    uint8_t slide_note = 0;                     // 0x1E
+    uint16_t slide_delay = 0;                   // 0x20
+    uint16_t slide_length = 0;                  // 0x22: the slide's length in 256ths of the note's
+    std::array<uint32_t, kMaxDepth> stack = {}; // 0x24: F4's return addresses
+    int depth = 0;                              // 0x30
+    int32_t counter = 0;                        // 0x34: the time left before the next command, in units of 1/150 tick
+    uint16_t bank = 0;                          // 0x40: C7's slot in the player's list of banks
+    uint16_t instrument = 0;                    // 0x42: C2
+    uint16_t length = 0x7F;                     // 0x44: the notes' length, in ticks
+    uint16_t wait = 0;                          // 0x46: C0's wait
+    uint8_t velocity = 0x7F;                    // 0x48
+    uint8_t legato = 0;                         // 0x49: C5 and C6
+    uint8_t mute = 0;                           // 0x4A
+    uint8_t pan = 0x40;                         // 0x4B: C3
+    uint8_t echo = 0;                           // 0x4C: E3
+    uint8_t volume = 0x80;                      // 0x4D: E0
+    uint8_t volume2 = 0x80;                     // 0x4E
+    int8_t bend = 0;                            // 0x4F: E1
+    uint8_t bend_range = 2;                     // 0x50: E2
+    uint8_t transpose = 0;                      // 0x51: E9
+    uint8_t priority = 3;                       // 0x52: C4
+    uint8_t timed_notes = 0;                    // 0x53: C8 and C9, which make notes wait for their length
+    int number = -1;                            // the player's number for the track, 0-9
+    uint64_t units = 0;                         // the time the track has read up to, in units from the sequence's start
+    std::map<uint32_t, uint64_t> seen;          // the time it first read the command at each address
 };
 
 // The driver's record of a player, with each field's offset.
@@ -206,10 +209,9 @@ struct Event
     uint16_t instrument = 0;
     uint32_t length = 0; // in units
     Lookup lookup;
-    uint8_t type = 0;        // the voice's type
-    uint32_t sample = 0;     // a sample voice's sample
-    uint32_t psg = 0;        // a PSG voice's setting, as the voice has it
-    uint32_t note_pitch = 0; // the voice's pitch for the note
+    uint8_t type = 0;    // the voice's type
+    uint32_t sample = 0; // a sample voice's sample
+    uint32_t psg = 0;    // a PSG voice's setting, as the voice has it
 };
 
 // A model of the driver that plays a sequence a frame at a time.

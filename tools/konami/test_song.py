@@ -45,7 +45,7 @@ from gbarom import ROM_BASE, load_rom
 
 
 def test_tracks(rave_master):
-    """Returns 16 test tracks for WCT 2004 or 12 for Rave Master, using samples 7, 9, 10 and 11.
+    """Returns 16 test tracks for WCT 2004 or 12 for Rave Master, using samples 9, 10 and 11.
     Rave Master uses 80-8F for duty and wave commands. Its F3 has no extra bytes, and echo opcodes and 00-7F do
     nothing."""
     duty = 0x80 if rave_master else 0x00

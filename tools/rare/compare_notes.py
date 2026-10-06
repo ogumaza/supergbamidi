@@ -5,31 +5,33 @@
 
     compare_notes.py ROM FOLDER [--songs 0-22] [--frames 12000]
 
-FOLDER holds supergbamidi's conversion of ROM: NAME_NN.mid and NAME_NN.sf2 for each song. For every song, the driver
-runs under driver_emu.py for as long as the MIDI file lasts, and each note it plays is matched with a MIDI note on the
-same channel and key that starts within a frame of it. For each pair, the script checks:
+FOLDER holds supergbamidi's conversion of ROM: NAME_NN.mid and NAME_NN.sf2 for each song, or NAME_rare_NN.mid and
+NAME_rare_NN.sf2 if detection finds another of the game's drivers first. For every song, the driver runs under
+driver_emu.py for as long as the MIDI file lasts, and each note it plays is matched with a MIDI note on the same channel
+and key that starts within a frame and a half of it. For each pair, the script checks:
 
   - the velocity, and the channel's volume when the note starts;
   - the sample: the SoundFont zone that the note's program and key choose has to play the driver's sample;
   - the pitch on every frame of the note, from the zone's root key, tuning and sample rate and the channel's pitch bend,
     against the step the driver moves the sample on by;
-  - the release, which has to come within a frame of the MIDI note's end, unless the MIDI file ends the note earlier
-    because the key starts again there.
+  - the release, which has to come within a frame and a half of the MIDI note's end, unless the MIDI file ends the note
+    earlier because the key starts again there.
 
 A MIDI note that the driver doesn't play, or a driver note that the MIDI file doesn't have, counts as a difference. MIDI
-events land on their own ticks, where the driver plays them at the start of the frame that reaches them, so a frame's
-difference either way is allowed.
+events land on their own ticks, where the driver plays them at the start of the frame that reaches them, so a difference
+of a frame and a half either way is allowed.
 """
 import argparse
 import bisect
 import math
-import re
 import struct
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # for gbarom.py, in tools/
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # for conversion.py and gbarom.py, in tools/
+import conversion
 import driver_emu
+from compare_trace import parse_range
 from gbarom import load_rom
 
 FRAME_RATE = 16777216 / 280896
@@ -223,10 +225,10 @@ def driver_notes(rom, song, frames):
             prev = last[v.index]
             # A note that the driver releases and starts again in one frame shows as its envelope starting again: its
             # phase goes back, or it's in its first frame's phase 2 again, or its attack falls.
-            active = v.state in (0x11, 0x12)
+            active = v.active()
             restarted = prev is not None and (v.phase < prev.phase or v.phase == prev.phase == 2 or
                                               (v.phase == prev.phase == 1 and v.level < prev.level))
-            begins = active and (prev is None or prev.state not in (0x11, 0x12) or
+            begins = active and (prev is None or not prev.active() or
                                  (prev.state == 0x12 and v.state == 0x11) or prev.instrument != v.instrument or
                                  prev.key != v.key or restarted)
             note = current[v.index]
@@ -259,12 +261,11 @@ def driver_notes(rom, song, frames):
     return notes, volume, emu.rate()
 
 
-def check_song(rom, midi_path, sf2_path, frames_limit, report):
+def check_song(rom, song, midi_path, sf2_path, frames_limit, report):
     notes, programs, volumes, bends, ranges, length = read_midi(midi_path)
     volumes, bends = by_channel(volumes), by_channel(bends)
     presets = read_sf2(sf2_path)
     frames = min(frames_limit, int(length * FRAME_RATE))
-    song = int(re.search(r'_(\d+)\.mid$', str(midi_path)).group(1))
     played, volume, mix_rate = driver_notes(rom, song, frames)
 
     midi = [dict(channel=n[0], key=n[1], velocity=n[2], on=n[3] * FRAME_RATE,
@@ -384,14 +385,6 @@ def check_song(rom, midi_path, sf2_path, frames_limit, report):
     return not problems
 
 
-def parse_range(text):
-    songs = []
-    for part in text.split(','):
-        a, _, b = part.partition('-')
-        songs += list(range(int(a), int(b or a) + 1))
-    return songs
-
-
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('rom', metavar='ROM', help='the game (.gba)')
@@ -401,6 +394,9 @@ def main():
     p.add_argument('-v', '--verbose', action='store_true', help='list every difference, not just the first ten')
     a = p.parse_args()
     rom = load_rom(a.rom)
+    files = conversion.midi_files(a.folder, 'rare')
+    if not files:
+        raise SystemExit('found no MIDI files to check in %s' % a.folder)
     wanted = set(parse_range(a.songs)) if a.songs else None
     failed = total = 0
 
@@ -410,13 +406,17 @@ def main():
         for line in problems if a.verbose else problems[:10]:
             print('    ' + line)
 
-    for midi in sorted(Path(a.folder).glob('*_[0-9][0-9].mid')):
-        song = int(midi.stem.rsplit('_', 1)[1])
+    for song, midi in files:
         if wanted is not None and song not in wanted:
             continue
         total += 1
-        if not check_song(rom, midi, midi.with_suffix('.sf2'), a.frames, report):
+        if not check_song(rom, song, midi, midi.with_suffix('.sf2'), a.frames, report):
             failed += 1
+    # supergbamidi writes no files for a song that plays no notes.
+    for song in sorted((wanted or set()) - {s for s, _ in files}):
+        print('song %d: no MIDI file to check' % song)
+    if not total:
+        raise SystemExit('found none of the songs to check')
     print('%d of %d songs match the driver' % (total - failed, total))
     raise SystemExit(1 if failed else 0)
 

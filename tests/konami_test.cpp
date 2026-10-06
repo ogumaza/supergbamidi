@@ -37,8 +37,8 @@ namespace
 {
 
 using test::Be32;
-using test::Le32;
 using test::ReadAll;
+using test::ReadSf2;
 using test::TempPath;
 
 // The size of a song table entry with 16 tracks, as the tests' songs have.
@@ -385,6 +385,34 @@ void TestLoopStartEarliest()
     SUPERGBAMIDI_CHECK_EQ(seq.LoopStartFrame(), 4);
 }
 
+void TestLoopStartLast()
+{
+    // As in TestLoopStart, but track 5 passes a second loop point, at frame 8: wait 5, loop point, wait 3, loop point,
+    // wait 2, note, wait 3, rest, wait 1, loop the song. Each loop takes the track back to the second loop point, so
+    // the song loops at frame 14 and every 6 frames after it.
+    Image m = SyntheticImage();
+    m.Bytes(kSongBase + 0x07, {0xFE});
+    m.Bytes(kSongBase + 0x80, {0x05, 0xF3, 0xAA, 0xBB, 0x03, 0xF3, 0xAA, 0xBB, 0x02, 0xB7, 0x05, 0x0C, 0x03, 0xE0, 0x01,
+                               0xFF, 0x01, 0x00});
+    const Rom rom = m.ToRom();
+    UltimateMastersSequencer seq(rom, SongsAt(kSongTable), 0);
+
+    std::vector<int> looped_at;
+    for (int f = 0; f < 30; f++)
+    {
+        seq.Step();
+        if (seq.LoopedLastFrame())
+        {
+            looped_at.push_back(f);
+
+            // The loop goes back to the frame where track 5 passed the second loop point, and stays there.
+            SUPERGBAMIDI_CHECK_EQ(seq.LoopStartFrame(), 8);
+        }
+    }
+
+    SUPERGBAMIDI_CHECK(looped_at == (std::vector<int>{14, 20, 26}));
+}
+
 void TestBendKept()
 {
     // Track 4: note, wait 1, bend by +16/32, wait 1, note, wait 1, vibrato of depth 16, wait 2, end. The other tracks
@@ -417,20 +445,22 @@ void TestBendKept()
     }
 }
 
-// A channel event of a MIDI file, and the name of the track it's on.
+// A channel event of a MIDI file, the name of the track it's on, and the frame it's on.
 struct MidiEvent
 {
     std::string track;
-    uint32_t tick;
+    uint32_t frame;
     uint8_t status, data1, data2;
 };
 
-// Returns every channel event of every track of the MIDI file at `path`. It's a minimal Standard MIDI File reader, for
-// checking converter output.
+// Returns every channel event of every track of the MIDI file at `path`, at the frame its tick stands for under the
+// file's tempo map. It's a minimal Standard MIDI File reader, for checking converter output.
 std::vector<MidiEvent> ReadEvents(const std::string& path)
 {
     const std::vector<uint8_t> f = ReadAll(path);
     std::vector<MidiEvent> events;
+    std::vector<uint32_t> ticks;
+    std::vector<std::pair<uint32_t, uint32_t>> tempos = {{0, 500000}}; // tick, microseconds a quarter note
     size_t i = 14;
     while (i + 8 <= f.size() && std::memcmp(&f[i], "MTrk", 4) == 0)
     {
@@ -458,6 +488,10 @@ std::vector<MidiEvent> ReadEvents(const std::string& path)
                 {
                     name.assign(reinterpret_cast<const char*>(&f[p + 3]), len);
                 }
+                if (type == 0x51)
+                {
+                    tempos.emplace_back(tick, uint32_t(f[p + 3] << 16 | f[p + 4] << 8 | f[p + 5]));
+                }
 
                 p += 3 + len;
                 continue;
@@ -470,41 +504,36 @@ std::vector<MidiEvent> ReadEvents(const std::string& path)
 
             // Program changes and channel pressure have one data byte, the other channel messages two.
             const bool one_byte = (status & 0xF0) == 0xC0 || (status & 0xF0) == 0xD0;
-            events.push_back({name, tick, status, f[p], uint8_t(one_byte ? 0 : f[p + 1])});
+            events.push_back({name, 0, status, f[p], uint8_t(one_byte ? 0 : f[p + 1])});
+            ticks.push_back(tick);
             p += one_byte ? 1 : 2;
         }
 
         i = end;
     }
 
-    return events;
-}
-
-// Returns the data of the chunk `id` (such as "phdr") in the pdta list of the SoundFont at `path`, or nothing if
-// there's no such chunk.
-std::vector<uint8_t> ReadPdtaChunk(const std::string& path, const char* id)
-{
-    const std::vector<uint8_t> f = ReadAll(path);
-
-    // Walk the chunks after the RIFF header, and into the pdta list, to the chunk.
-    size_t i = 12;
-    while (i + 8 <= f.size())
+    // Each event's tick in seconds, then in frames.
+    const double division = (f[12] << 8) | f[13];
+    for (size_t e = 0; e < events.size(); e++)
     {
-        const size_t size = Le32(&f[i + 4]);
-        if (std::memcmp(&f[i], "LIST", 4) == 0 && i + 12 <= f.size() && std::memcmp(&f[i + 8], "pdta", 4) == 0)
+        double seconds = 0;
+        uint32_t at = 0, tempo = 500000;
+        for (const auto& [when, value] : tempos)
         {
-            i += 12;
-            continue;
-        }
-        if (std::memcmp(&f[i], id, 4) == 0 && i + 8 + size <= f.size())
-        {
-            return std::vector<uint8_t>(f.begin() + std::ptrdiff_t(i + 8), f.begin() + std::ptrdiff_t(i + 8 + size));
-        }
+            if (when > ticks[e])
+            {
+                break;
+            }
 
-        i += 8 + size + (size & 1);
+            seconds += double(when - at) * tempo / division / 1e6;
+            at = when;
+            tempo = value;
+        }
+        seconds += double(ticks[e] - at) * tempo / division / 1e6;
+        events[e].frame = uint32_t(std::lround(seconds / kFrameSeconds));
     }
 
-    return {};
+    return events;
 }
 
 // A preset header of a SoundFont.
@@ -517,7 +546,7 @@ struct PresetHeader
 // Returns the preset headers of the SoundFont at `path`, in the file's order.
 std::vector<PresetHeader> ReadPresets(const std::string& path)
 {
-    const std::vector<uint8_t> phdr = ReadPdtaChunk(path, "phdr");
+    const std::vector<uint8_t> phdr = ReadSf2(path).chunks["phdr"];
     std::vector<PresetHeader> presets;
     for (size_t h = 0; h + 2 * 38 <= phdr.size(); h += 38) // the last header only ends the list
     {
@@ -532,7 +561,7 @@ std::vector<PresetHeader> ReadPresets(const std::string& path)
 // order. Each zone starts with its key range.
 std::vector<std::array<int, 3>> ReadZoneKeys(const std::string& path)
 {
-    const std::vector<uint8_t> igen = ReadPdtaChunk(path, "igen");
+    const std::vector<uint8_t> igen = ReadSf2(path).chunks["igen"];
     std::vector<std::array<int, 3>> zones;
     for (size_t g = 0; g + 4 <= igen.size(); g += 4)
     {
@@ -566,6 +595,7 @@ void TestConversion()
     const fs::path dir = TempPath("out");
     fs::create_directories(dir);
     ConvertOptions opt;
+    opt.frame_timing = true;
     opt.loops = 1;
     opt.out_dir = Utf8(dir);
     opt.base_name = "synthetic";
@@ -581,11 +611,11 @@ void TestConversion()
 
     const std::vector<MidiEvent> events = ReadEvents(sum.midi_path);
 
-    auto has = [&](const std::string& track, uint32_t tick, uint8_t type)
+    auto has = [&](const std::string& track, uint32_t frame, uint8_t type)
     {
         for (const MidiEvent& e : events)
         {
-            if (e.track == track && e.tick == tick && (e.status & 0xF0) == type)
+            if (e.track == track && e.frame == frame && (e.status & 0xF0) == type)
             {
                 return true;
             }
@@ -644,6 +674,7 @@ void TestSilentSongs()
     }
 
     ConvertOptions opt;
+    opt.frame_timing = true;
     opt.out_dir = Utf8(dir);
     opt.base_name = "silent";
 
@@ -688,6 +719,7 @@ void TestSharedSoundfont()
     const fs::path dir = TempPath("shared");
     fs::create_directories(dir, ec);
     ConvertOptions opt;
+    opt.frame_timing = true;
     opt.out_dir = Utf8(dir);
     SoundfontBuilder shared(rom, info);
 
@@ -740,6 +772,7 @@ void TestEchoRouting()
     const fs::path dir = TempPath("echo");
     fs::create_directories(dir, ec);
     ConvertOptions opt;
+    opt.frame_timing = true;
     opt.out_dir = Utf8(dir);
 
     const SongSummary sum = ConvertSong(rom, info, 2, opt, nullptr);
@@ -749,13 +782,70 @@ void TestEchoRouting()
     {
         if (e.track == "Voice 0" && (e.status & 0xF0) == 0xB0 && e.data1 == cc::kReverb)
         {
-            sends.emplace_back(e.tick, e.data2);
+            sends.emplace_back(e.frame, e.data2);
         }
     }
 
     const std::vector<std::pair<uint32_t, int>> kExpected = {{0, 0}, {0, 127}, {5, 0}, {15, 127}};
     SUPERGBAMIDI_CHECK(sum.ok);
     SUPERGBAMIDI_CHECK(sends == kExpected);
+    fs::remove_all(dir, ec);
+}
+
+// Song 2's sample track plays a note at volume 16, and then from its loop point a note at 16 and one at 8. The first
+// time through, the loop's first note has the level and program that the note before it left, but a player that jumps
+// back to the loop's start comes from the note at volume 8, so they're written again there.
+void TestLoopSettingsAgain()
+{
+    Image m = SyntheticImage();
+    constexpr uint32_t kBase = kRomBase + 0x600;
+    m.Song(kSongTable, 2, kBase, 0x40, {{4, 0}});
+    m.Bytes(kBase, {0x00, 0xA8, 0x10, 0x05, 0x0A, 0xF3, 0x00, 0x00, 0x00, 0xA8,
+                    0x10, 0x05, 0x0A, 0xA8, 0x08, 0x05, 0x0A, 0xFF, 0x01, 0x00});
+    m.Bytes(kBase + 0x40, {0x00, 0xFD});
+    const Rom rom = m.ToRom();
+
+    DriverOverrides ov;
+    ov.song_table = kSongTable;
+    ov.song_count = 3;
+    ov.sample_table = kSampleTable;
+    ov.mix_rate = 16000;
+    DriverInfo info;
+    std::string err;
+    SUPERGBAMIDI_CHECK(DetectDriver(rom, ov, info, err));
+
+    std::error_code ec;
+    const fs::path dir = TempPath("loop_again");
+    fs::create_directories(dir, ec);
+    ConvertOptions opt;
+    opt.frame_timing = true;
+    opt.out_dir = Utf8(dir);
+
+    const SongSummary sum = ConvertSong(rom, info, 2, opt, nullptr);
+
+    std::vector<std::pair<uint32_t, int>> levels, programs;
+    for (const MidiEvent& e : ReadEvents(sum.midi_path))
+    {
+        if (e.track == "Voice 0" && (e.status & 0xF0) == 0xB0 && e.data1 == cc::kExpression)
+        {
+            levels.emplace_back(e.frame, e.data2);
+        }
+        if (e.track == "Voice 0" && (e.status & 0xF0) == 0xC0)
+        {
+            programs.emplace_back(e.frame, e.data1);
+        }
+    }
+
+    SUPERGBAMIDI_CHECK(sum.ok);
+    SUPERGBAMIDI_CHECK_EQ(sum.loop_start_frame, 10);
+    SUPERGBAMIDI_CHECK_EQ(levels.size(), 6);
+    SUPERGBAMIDI_CHECK_EQ(programs.size(), 2);
+    if (levels.size() == 6 && programs.size() == 2)
+    {
+        SUPERGBAMIDI_CHECK(levels[2] == std::make_pair(10u, levels[1].second));
+        SUPERGBAMIDI_CHECK(levels[3].second != levels[2].second && levels[4] == std::make_pair(30u, levels[1].second));
+        SUPERGBAMIDI_CHECK(programs[1] == std::make_pair(10u, programs[0].second));
+    }
     fs::remove_all(dir, ec);
 }
 
@@ -790,6 +880,7 @@ void TestNoiseKeys()
     std::error_code ec;
     fs::create_directories(dir, ec);
     ConvertOptions opt;
+    opt.frame_timing = true;
     opt.out_dir = Utf8(dir);
 
     const SongSummary sum = ConvertSong(rom, info, 3, opt, nullptr);
@@ -848,9 +939,10 @@ void TestPsgPastTable()
     std::error_code ec;
     fs::create_directories(dir, ec);
     ConvertOptions opt;
+    opt.frame_timing = true;
     opt.out_dir = Utf8(dir);
 
-    // The note-ons (tick, key) and pitch bends (tick, value) of Square 1.
+    // The note-ons (frame, key) and pitch bends (frame, value) of Square 1.
     struct Square1
     {
         std::vector<std::pair<uint32_t, int>> notes, bends;
@@ -873,11 +965,11 @@ void TestPsgPastTable()
         {
             if (e.track == "Square 1" && (e.status & 0xF0) == 0x90 && e.data2 > 0)
             {
-                square.notes.emplace_back(e.tick, e.data1);
+                square.notes.emplace_back(e.frame, e.data1);
             }
-            if (e.track == "Square 1" && (e.status & 0xF0) == 0xE0 && e.tick > 0)
+            if (e.track == "Square 1" && (e.status & 0xF0) == 0xE0 && e.frame > 0)
             {
-                square.bends.emplace_back(e.tick, e.data1 | (e.data2 << 7));
+                square.bends.emplace_back(e.frame, e.data1 | (e.data2 << 7));
             }
         }
 
@@ -936,6 +1028,7 @@ void TestSampleKeys()
     std::error_code ec;
     fs::create_directories(dir, ec);
     ConvertOptions opt;
+    opt.frame_timing = true;
     opt.out_dir = Utf8(dir);
 
     const SongSummary sum = ConvertSong(rom, info, 2, opt, nullptr);
@@ -976,6 +1069,7 @@ void TestLoopWithoutDelay()
     std::error_code ec;
     fs::create_directories(dir, ec);
     ConvertOptions opt;
+    opt.frame_timing = true;
     opt.out_dir = Utf8(dir);
     ConvertOptions looped = opt;
     looped.loops = 10;
@@ -1025,6 +1119,7 @@ void TestFrameLimit()
     std::error_code ec;
     fs::create_directories(dir, ec);
     ConvertOptions opt;
+    opt.frame_timing = true;
     opt.out_dir = Utf8(dir);
     opt.loops = 100;
 
@@ -1099,6 +1194,7 @@ void TestManyPresets()
     std::error_code ec;
     fs::create_directories(dir, ec);
     ConvertOptions opt;
+    opt.frame_timing = true;
     opt.out_dir = Utf8(dir);
 
     // In a SoundFont of its own, the presets go on into bank 1. Only the preset of the track on channel 10, the last
@@ -1425,6 +1521,23 @@ void TestRevisionDetection()
     SUPERGBAMIDI_CHECK(none.found && none.info.revision == Revision::kUltimateMasters);
     SUPERGBAMIDI_CHECK(none.info.log[0] ==
                        "command reader not recognised, assuming the Ultimate Masters revision of the driver");
+
+    // Without its tables given, a cartridge that holds only the command reader has no song table to find. The reader
+    // still shows that the game has the driver, so detection fails with an error that names it, where a cartridge
+    // without the reader shows no sign of the driver.
+    Image reader_only(0x1000);
+    reader_only.Halfwords(kCode, CommandReader(0x2DFE, 0x2DFA));
+    DriverInfo info;
+    std::string reader_error, blank_error;
+
+    const bool found_reader_only = DetectDriver(reader_only.ToRom(), DriverOverrides(), info, reader_error);
+    const bool found_blank = DetectDriver(Image(0x1000).ToRom(), DriverOverrides(), info, blank_error);
+
+    SUPERGBAMIDI_CHECK(!found_reader_only);
+    SUPERGBAMIDI_CHECK(reader_error ==
+                       "found the command reader of the WCT 2004 revision of Konami's driver, at 0x08000800, but not "
+                       "its song table (--song-table and --song-count override detection)");
+    SUPERGBAMIDI_CHECK(!found_blank && blank_error.empty());
 }
 
 void TestWct2004Decoding()
@@ -1621,6 +1734,7 @@ void TestWct2004Panning()
     std::error_code ec;
     fs::create_directories(dir, ec);
     ConvertOptions opt;
+    opt.frame_timing = true;
     opt.out_dir = Utf8(dir);
 
     const SongSummary sum = ConvertSong(rom, info, 0, opt, nullptr);
@@ -1630,7 +1744,7 @@ void TestWct2004Panning()
     std::map<std::string, int> pan;
     for (const MidiEvent& e : ReadEvents(sum.midi_path))
     {
-        if ((e.status & 0xF0) == 0xB0 && e.data1 == 10)
+        if ((e.status & 0xF0) == 0xB0 && e.data1 == cc::kPan)
         {
             pan[e.track] = e.data2;
         }
@@ -1831,11 +1945,12 @@ void TestEternalDuelistConversion()
     std::error_code ec;
     fs::create_directories(dir, ec);
     ConvertOptions opt;
+    opt.frame_timing = true;
     opt.out_dir = Utf8(dir);
 
     const SongSummary sum = ConvertSong(rom, info, 0, opt, nullptr);
 
-    // Each track's note-ons (tick, program), bends (tick, value) and bend range.
+    // Each track's note-ons (frame, program), bends (frame, value) and bend range.
     std::map<std::string, std::vector<std::pair<uint32_t, int>>> notes, bends;
     std::map<std::string, int> program, range;
     for (const MidiEvent& e : ReadEvents(sum.midi_path))
@@ -1847,13 +1962,13 @@ void TestEternalDuelistConversion()
         }
         if (kind == 0x90 && e.data2 > 0)
         {
-            notes[e.track].emplace_back(e.tick, program[e.track]);
+            notes[e.track].emplace_back(e.frame, program[e.track]);
         }
-        if (kind == 0xE0 && e.tick > 0)
+        if (kind == 0xE0 && e.frame > 0)
         {
-            bends[e.track].emplace_back(e.tick, e.data1 | (e.data2 << 7));
+            bends[e.track].emplace_back(e.frame, e.data1 | (e.data2 << 7));
         }
-        if (kind == 0xB0 && e.data1 == 6)
+        if (kind == 0xB0 && e.data1 == cc::kDataEntry)
         {
             range[e.track] = e.data2;
         }
@@ -2005,6 +2120,7 @@ void TestDungeonDiceSequencer()
     DungeonDiceSong(m, kTable, 1, kBase1, 0x260, {{0, 0x00}});
     m.Bytes(kBase1, calls);
     m.Bytes(kBase1 + 0x260, {0x00, 0xFD});
+
     const Rom rom = m.ToRom();
     DriverInfo info = SongsAt(kTable);
     info.revision = Revision::kDungeonDiceMonsters;
@@ -2250,11 +2366,12 @@ void TestDungeonDiceConversion()
     std::error_code ec;
     fs::create_directories(dir, ec);
     ConvertOptions opt;
+    opt.frame_timing = true;
     opt.out_dir = Utf8(dir);
 
     const SongSummary sum = ConvertSong(rom, info, 0, opt, nullptr);
 
-    // Each track's note-ons (tick, key, program), bends (tick, value) and pans after the first, which centres it.
+    // Each track's note-ons (frame, key, program), bends (frame, value) and pans after the first, which centres it.
     std::map<std::string, std::vector<std::array<int, 3>>> notes;
     std::map<std::string, std::vector<std::pair<uint32_t, int>>> bends;
     std::map<std::string, int> program;
@@ -2269,13 +2386,13 @@ void TestDungeonDiceConversion()
         }
         if (kind == 0x90 && e.data2 > 0)
         {
-            notes[e.track].push_back({int(e.tick), e.data1, program[e.track]});
+            notes[e.track].push_back({int(e.frame), e.data1, program[e.track]});
         }
-        if (kind == 0xE0 && e.tick > 0)
+        if (kind == 0xE0 && e.frame > 0)
         {
-            bends[e.track].emplace_back(e.tick, e.data1 | (e.data2 << 7));
+            bends[e.track].emplace_back(e.frame, e.data1 | (e.data2 << 7));
         }
-        if (kind == 0xB0 && e.data1 == 10 && !centred.insert(e.track).second)
+        if (kind == 0xB0 && e.data1 == cc::kPan && !centred.insert(e.track).second)
         {
             pans[e.track].push_back(e.data2);
         }
@@ -2509,6 +2626,7 @@ void TestMusic()
     Overrides as_rare;
     as_rare.driver = Driver::kRare;
     std::string found_error, given_error, rare_error;
+    std::vector<std::string> trace_warnings;
 
     const std::unique_ptr<Music> found = supergbamidi::OpenMusic(scan, Overrides(), found_error);
     const std::unique_ptr<Music> by_hand = supergbamidi::OpenMusic(synthetic, given, given_error);
@@ -2524,6 +2642,11 @@ void TestMusic()
     SUPERGBAMIDI_CHECK(by_hand && by_hand->InspectSong(0, three_loops).seconds == 45 * kFrameSeconds);
     SUPERGBAMIDI_CHECK(by_hand && by_hand->InspectSong(0, three_loops).loop_end == 15 * kFrameSeconds);
     SUPERGBAMIDI_CHECK(!rare && rare_error == "no Rare sound driver found (try --song-table)");
+
+    // Only the song table's entries can be traced: song 2 is past the scan image's two, and so is song 1 << 30, whose
+    // entry's address would wrap around to song 0's. Neither writes anything.
+    SUPERGBAMIDI_CHECK(found && !found->Trace(2, 1, stdout, trace_warnings));
+    SUPERGBAMIDI_CHECK(found && !found->Trace(1 << 30, 1, stdout, trace_warnings));
 }
 
 } // namespace
@@ -2534,11 +2657,13 @@ void RunTests()
     TestSequencer();
     TestLoopStart();
     TestLoopStartEarliest();
+    TestLoopStartLast();
     TestBendKept();
     TestConversion();
     TestSilentSongs();
     TestSharedSoundfont();
     TestEchoRouting();
+    TestLoopSettingsAgain();
     TestNoiseKeys();
     TestPsgPastTable();
     TestSampleKeys();

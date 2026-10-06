@@ -107,8 +107,8 @@ class Bank:
     def __init__(self, count):
         self.data = bytearray(2 * count)
 
-    def add(self, data, align=2):
-        while len(self.data) % align:
+    def add(self, data):
+        while len(self.data) % 2:
             self.data.append(0)
         at = len(self.data)
         self.data += data

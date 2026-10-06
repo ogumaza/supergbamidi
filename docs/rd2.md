@@ -1,9 +1,8 @@
 # Nintendo R&D2's GBA sound driver
 
-This document describes the sound driver that Nintendo R&D2 wrote for *The
-Legend of Zelda: A Link to the Past* on the Game Boy Advance: its data, its
-sequencer, its voices and its mixer, in enough detail to play the sequences
-the way the driver does. The cartridge, *The Legend of Zelda: A Link to the
+This document covers the sequence format, sequencer, voices and mixer in
+Nintendo R&D2's sound driver for *The Legend of Zelda: A Link to the Past*
+on the Game Boy Advance. The cartridge, *The Legend of Zelda: A Link to the
 Past & Four Swords*, plays the rest of its music with Nintendo's MP2K. The
 document is based on the driver's code in the US release (game code `AZLE`),
 and the addresses given as examples come from there. Other games put the

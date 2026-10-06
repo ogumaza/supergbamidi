@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <limits>
 #include <map>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -122,14 +123,37 @@ struct Simulation
     std::vector<TimedEvent> events;
     std::vector<uint64_t> frame_ticks; // the MIDI tick each frame starts at, and the one after the last frame
     Plan plan;
+    bool frame_timing = false; // each event at the start of the frame the driver plays it in, rather than its time
     std::vector<std::string> warnings;
 };
 
+// Returns the MIDI tick of an event at `units` that the driver plays in `frame`: its time, or with frame timing, the
+// start of the frame.
+uint64_t EventTick(const Simulation& sim, uint64_t units, uint32_t frame)
+{
+    return sim.frame_timing ? sim.frame_ticks[std::min<size_t>(frame, sim.frame_ticks.size() - 1)] : units;
+}
+
+// Returns the MIDI tick of a time in the sequence, `units`: the time, or with frame timing, the start of the first
+// frame that reaches it.
+uint64_t TimeTick(const Simulation& sim, uint64_t units)
+{
+    if (!sim.frame_timing)
+    {
+        return units;
+    }
+
+    const auto it = std::lower_bound(sim.frame_ticks.begin(), sim.frame_ticks.end(), units);
+    return it == sim.frame_ticks.end() ? sim.frame_ticks.back() : *it;
+}
+
 // Runs the model until every track has looped or ended and the sequence has played its loop `loops` times. A track's
-// units are the MIDI file's ticks: each frame lasts the tempo's units, and each command comes at its track's time.
-Simulation Simulate(const Rom& rom, const DriverInfo& info, int song, int loops)
+// units are the MIDI file's ticks: each frame lasts the tempo's units, and each command comes at its track's time, or
+// with `frame_timing`, at the start of the frame the driver plays it in.
+Simulation Simulate(const Rom& rom, const DriverInfo& info, int song, int loops, bool frame_timing)
 {
     Simulation sim;
+    sim.frame_timing = frame_timing;
     Sequencer seq(rom, info, song);
     sim.frame_ticks.push_back(0);
 
@@ -210,11 +234,10 @@ Simulation Simulate(const Rom& rom, const DriverInfo& info, int song, int loops)
             }
         }
 
-        // Once every track has looped or ended, the loop is known, and the sequence goes on until it has played enough
-        // times. The tracks of a sequence may loop at different points and lengths, and each goes on looping in its
-        // own way, so the loop starts where every looping track has started its loop, and where every track without a
-        // loop has read its last command and released its notes, and lasts until every looping track is back where
-        // its loop started, if that isn't too long (see LoopLength()).
+        // Once every track has looped or ended, the loop is known. The sequence then continues for the required number
+        // of passes. Tracks may have different loop points and lengths. The overall loop starts once all looping tracks
+        // have entered their loops and the others have read their last command and released their notes. It ends when
+        // all looping tracks return to their loop starts, subject to the length limit in LoopLength().
         if (!planned)
         {
             planned = true;
@@ -395,7 +418,7 @@ public:
         std::vector<Note> notes;
         std::map<uint32_t, size_t> by_id;
         std::array<uint32_t, kVoices> voice_note = {};
-        const uint64_t end = sim_.plan.end;
+        const uint64_t end = TimeTick(sim_, sim_.plan.end);
 
         auto close = [&](uint32_t id, uint64_t tick)
         {
@@ -417,9 +440,9 @@ public:
             if (e.kind == Event::kNote && e.voice >= 0)
             {
                 // A voice that plays a new note in legato ends its last one.
-                close(voice_note[size_t(e.voice)], e.units);
+                close(voice_note[size_t(e.voice)], EventTick(sim_, e.units, te.frame));
                 voice_note[size_t(e.voice)] = 0;
-                if (e.velocity == 0 || e.track < 0 || !(mask_ >> e.track & 1) || e.units >= end)
+                if (e.velocity == 0 || e.track < 0 || !(mask_ >> e.track & 1) || e.units >= sim_.plan.end)
                 {
                     continue;
                 }
@@ -427,7 +450,7 @@ public:
                 Note n;
                 n.track = e.track;
                 n.velocity = std::clamp(int(std::lround(127 * std::sqrt(e.velocity / 127.0))), 1, 127);
-                n.on = e.units;
+                n.on = EventTick(sim_, e.units, te.frame);
                 n.length = e.length;
                 n.frame = te.frame;
                 n.program = ProgramOf(e, n.key);
@@ -475,18 +498,19 @@ public:
 private:
     // Returns the tick at which a note's release or stop ends it in the MIDI file. A command's comes at its time. The
     // PSG voices' update comes at the start of its frame, and the mixer at the end, before the next frame: a release
-    // there keeps to the note's length within the frame it starts, and a stop comes at that frame's start.
+    // there keeps to the note's length within the frame it starts, and a stop comes at that frame's start. With frame
+    // timing, each comes at the start of the frame the driver plays it in.
     uint64_t OffTick(const Note& n, const Event& e, uint32_t frame) const
     {
         if (e.phase == Event::kCommands)
         {
-            return e.units;
+            return EventTick(sim_, e.units, frame);
         }
 
         const size_t g = std::min<size_t>(e.phase == Event::kMixer ? frame + 1 : frame, sim_.frame_ticks.size() - 1);
         const uint64_t hi = sim_.frame_ticks[g];
         const uint64_t lo = g > 0 ? std::min(sim_.frame_ticks[g - 1] + 1, hi) : 0;
-        return e.kind == Event::kRelease ? std::clamp(n.on + n.length, lo, hi) : hi;
+        return e.kind == Event::kRelease && !sim_.frame_timing ? std::clamp(n.on + n.length, lo, hi) : hi;
     }
 
     // Returns the program of a note's instrument, and sets the note's key: a sample voice's note, a square's or the
@@ -730,12 +754,19 @@ struct Levels
     int player_volume = 0x80;
 };
 
-// Returns each track's levels and the ticks they change at. They change when the track's pan or volume changes, when
-// the player's volume does, and when F8 starts the track with another track's settings. Changes at the same tick are
-// one change.
-std::array<std::vector<std::pair<uint64_t, Levels>>, kPlayerTracks> TrackChanges(const Simulation& sim)
+// A change of a track's levels: its tick, the levels from there on, and whether it sets the track's pan.
+struct LevelChange
 {
-    std::array<std::vector<std::pair<uint64_t, Levels>>, kPlayerTracks> changes;
+    uint64_t tick = 0;
+    Levels levels;
+    bool pan = false;
+};
+
+// Returns each track's changes of levels. They change when the track's pan or volume changes, when the player's volume
+// does, and when F8 starts the track with another track's settings. Changes at the same tick are one change.
+std::array<std::vector<LevelChange>, kPlayerTracks> TrackChanges(const Simulation& sim)
+{
+    std::array<std::vector<LevelChange>, kPlayerTracks> changes;
     std::array<Levels, kPlayerTracks> levels;
     for (const TimedEvent& te : sim.events)
     {
@@ -767,53 +798,68 @@ std::array<std::vector<std::pair<uint64_t, Levels>>, kPlayerTracks> TrackChanges
             }
         }
 
+        const uint64_t tick = EventTick(sim, e.units, te.frame);
+        const bool pan = e.kind == Event::kPan || e.kind == Event::kTrackStart;
         for (int n : changed)
         {
             auto& list = changes[size_t(n)];
-            if (!list.empty() && list.back().first == e.units)
+            if (list.empty() || list.back().tick != tick)
             {
-                list.pop_back();
+                list.push_back({tick, levels[size_t(n)], false});
             }
-            list.push_back({e.units, levels[size_t(n)]});
+            list.back().levels = levels[size_t(n)];
+            list.back().pan = list.back().pan || pan;
         }
     }
 
     return changes;
 }
 
-// Writes a track's levels: CC10 for pan and CC11 for loudness, at the start and whenever they change.
-void WriteLevels(MidiTrack& mt, int c, const std::vector<std::pair<uint64_t, Levels>>& changes)
+// Writes a track's CC10 for pan and CC11 for loudness at the start and whenever they change. A player that jumps back
+// to `loop`, the loop's start, retains the levels from the loop's end, as the game does until the loop sets them. So
+// CC11 is written again at the first level-change record at or after `loop`, and CC10, which follows the pan alone, at
+// the first record that sets the pan, even if their values haven't changed.
+void WriteLevels(MidiTrack& mt, int c, const std::vector<LevelChange>& changes, std::optional<uint64_t> loop)
 {
     int cc10 = -1, cc11 = -1;
+    bool again10 = loop.has_value(), again11 = loop.has_value();
 
-    auto write = [&](uint64_t tick, const Levels& l)
+    auto write = [&](const LevelChange& change)
     {
+        const bool looped = loop && change.tick >= *loop;
+        const bool write10 = looped && again10 && change.pan, write11 = looped && again11;
+        again10 = again10 && !write10;
+        again11 = again11 && !write11;
+
+        const Levels& l = change.levels;
         const auto [left, right] = TrackLevels(l.pan, l.volume, l.player_volume);
         int n10 = cc10 < 0 ? 64 : cc10, n11 = cc11 < 0 ? 0 : cc11;
         LevelsToControllers(left, right, n10, n11);
-        if (n10 != cc10)
+        if (n10 != cc10 || write10)
         {
-            mt.Control(uint32_t(tick), c, cc::kPan, cc10 = n10);
+            mt.Control(uint32_t(change.tick), c, cc::kPan, cc10 = n10);
         }
-        if (n11 != cc11)
+        if (n11 != cc11 || write11)
         {
-            mt.Control(uint32_t(tick), c, cc::kExpression, cc11 = n11);
+            mt.Control(uint32_t(change.tick), c, cc::kExpression, cc11 = n11);
         }
     };
 
-    if (changes.empty() || changes[0].first != 0)
+    if (changes.empty() || changes[0].tick != 0)
     {
-        write(0, Levels());
+        write(LevelChange());
     }
-    for (const auto& [tick, levels] : changes)
+    for (const LevelChange& change : changes)
     {
-        write(tick, levels);
+        write(change);
     }
 }
 
 // Writes a track's pitch bends: each frame's, at the frame's start, and each note's first frame's at its note on, so
-// that the note starts with it.
-void WriteBends(MidiTrack& mt, int c, const Simulation& sim, int n, const std::vector<const Note*>& notes, int range)
+// that the note starts with it, wherever it changes, and the first from `loop`, the loop's start, on, since a player
+// that jumps back there keeps the bend that the loop's end left.
+void WriteBends(MidiTrack& mt, int c, const Simulation& sim, int n, const std::vector<const Note*>& notes, int range,
+                std::optional<uint64_t> loop)
 {
     std::vector<std::pair<uint64_t, double>> bends;
     for (size_t f = 0; f < sim.frames.size() && sim.frame_ticks[f] < sim.plan.end; f++)
@@ -835,6 +881,12 @@ void WriteBends(MidiTrack& mt, int c, const Simulation& sim, int n, const std::v
     int bend = 8192;
     for (const auto& [tick, semitones] : bends)
     {
+        if (loop && tick >= *loop)
+        {
+            loop.reset();
+            bend = -1;
+        }
+
         const int v = BendValue(semitones, range);
         if (v != bend)
         {
@@ -843,10 +895,12 @@ void WriteBends(MidiTrack& mt, int c, const Simulation& sim, int n, const std::v
     }
 }
 
-// Writes a track's notes, each with its program, which the track starts with `program`. A MIDI channel can't play a key
-// twice at once, so a note ends where the next one with its key starts, and two notes of a key that start together are
-// one MIDI note, the first.
-void WriteNotes(MidiTrack& mt, int c, const std::vector<const Note*>& notes, int bank, int program)
+// Writes a track's notes, each with its program, which starts as `program` and is written again at the first note at or
+// after `loop`, the loop's start, since a looping player retains the program from the loop's end. A MIDI channel can't
+// play a key twice at once, so a new note on a sounding key ends the earlier one, and two notes on the same key that
+// start together become one MIDI note, the first, lasting as long as the longer of them.
+void WriteNotes(MidiTrack& mt, int c, const std::vector<const Note*>& notes, int bank, int program,
+                std::optional<uint64_t> loop)
 {
     std::vector<uint64_t> offs(notes.size());
     std::vector<bool> merged(notes.size());
@@ -877,9 +931,15 @@ void WriteNotes(MidiTrack& mt, int c, const std::vector<const Note*>& notes, int
             continue;
         }
 
+        if (loop && note->on >= *loop)
+        {
+            loop.reset();
+            program = -1;
+        }
+
         if (note->program != program)
         {
-            if (note->program / 128 != program / 128)
+            if (program < 0 || note->program / 128 != program / 128)
             {
                 mt.Bank(uint32_t(note->on), c, bank + note->program / 128);
             }
@@ -898,7 +958,7 @@ bool WriteMidi(const std::string& path, const std::string& title, const std::str
 {
     constexpr uint16_t kDivision = kTicksPerQuarter;
     const Plan& plan = sim.plan;
-    const uint32_t end = uint32_t(plan.end);
+    const uint32_t end = uint32_t(TimeTick(sim, plan.end));
     MidiFile midi(kDivision);
 
     MidiTrack& conductor = midi.AddTrack();
@@ -909,12 +969,16 @@ bool WriteMidi(const std::string& path, const std::string& title, const std::str
     {
         conductor.Tempo(uint32_t(tick), QuarterMicros(tempo));
     }
+    const uint64_t loop_start = TimeTick(sim, plan.loop_start);
     if (plan.loops)
     {
-        conductor.Meta(uint32_t(plan.loop_start), 0x06, "loopStart");
-        conductor.Meta(uint32_t(plan.loop_end), 0x06, "loopEnd");
+        conductor.Meta(uint32_t(loop_start), 0x06, "loopStart");
+        conductor.Meta(uint32_t(TimeTick(sim, plan.loop_end)), 0x06, "loopEnd");
     }
     conductor.SetEnd(end);
+
+    // The loop's start, from which each track writes its settings again, unless the loop starts with the sequence.
+    const std::optional<uint64_t> loop = plan.loops && loop_start > 0 ? std::optional(loop_start) : std::nullopt;
 
     const auto changes = TrackChanges(sim);
     for (int n = 0; n < kPlayerTracks; n++)
@@ -964,11 +1028,11 @@ bool WriteMidi(const std::string& path, const std::string& title, const std::str
             mt.Control(0, c, cc::kRpnMsb, 127);
             mt.Control(0, c, cc::kRpnLsb, 127);
             mt.PitchBend(0, c, 8192);
-            WriteBends(mt, c, sim, n, list, range);
+            WriteBends(mt, c, sim, n, list, range, loop);
         }
 
-        WriteLevels(mt, c, changes[size_t(n)]);
-        WriteNotes(mt, c, list, bank, program);
+        WriteLevels(mt, c, changes[size_t(n)], loop);
+        WriteNotes(mt, c, list, bank, program, loop);
     }
 
     return midi.Write(path, error);
@@ -985,7 +1049,7 @@ SongSummary Run(const Rom& rom, const DriverInfo& info, int song, const ConvertO
         return sum;
     }
 
-    const Simulation sim = Simulate(rom, info, song, opt.loops);
+    const Simulation sim = Simulate(rom, info, song, opt.loops, opt.frame_timing);
     sum.warnings = sim.warnings;
 
     NoteMaker maker(rom, info, sim, opt.track_mask);

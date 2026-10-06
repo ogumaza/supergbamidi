@@ -121,7 +121,7 @@ sample at its own rate. On the square and wave tracks, pitch `n × 32` is note
 |---|---|---|
 | `00`-`7F` | duty/wave | sets the track's *duty byte* to `op - 4` |
 | `80`-`8F` | duty/wave | sets the duty byte to `(op & 0x3F) << 6` (low byte) |
-| `90`-`9F` | - | not seen; handled by code this game never runs |
+| `90`-`9F` | - | handled by code that supergbamidi doesn't model |
 | `A0`-`A7 ss` | note | sample note, volume `op & 7`, sample `ss` |
 | `A8`-`AF vv ss` | note | sample note, volume `vv`, sample `ss` |
 | `B0`-`B7 ss tt` | note | as `A0`, plus signed semitone offset `tt` |
@@ -136,7 +136,7 @@ sample at its own rate. On the square and wave tracks, pitch `n × 32` is note
 | `F2 bb` | pitch bend | bend = `bb - 0x40` in 1/32 semitones (±2 semitones), for `bb` up to `7F` |
 | `F2 xh ll` | pitch bend | a first byte above `7F` takes the next one too: bend = `0xhll - 0x400` (-32 to +96 semitones); `x` is ignored |
 | `F3` | loop point | sample tracks (4-15) skip the next 2 bytes |
-| `F4`-`F6`, `FA`-`FC` | - | not seen; handled by code this game never runs |
+| `F4`-`F6`, `FA`-`FC` | - | handled by code that supergbamidi doesn't model |
 | `F7 ff` | echo feedback | echo bus 0 feedback = `ff`/256 |
 | `F8 dd` | echo delay | echo bus 0 delay = `dd × 32` mixer samples |
 | `F9 vb` | echo routing | DirectSound voice `v` (0-11) to echo bus `b - 1` (0-2); `b` = 0 takes it off buses 0 and 1 |
@@ -145,7 +145,7 @@ sample at its own rate. On the square and wave tracks, pitch `n × 32` is note
 | `FF 00` | stop song | everything is silenced on the next frame |
 | `FF nn` | loop song | `nn` ≠ 0: all tracks jump back to their loop points |
 
-A sample number above `EF` selects code this game never runs.
+A sample number above `EF` selects code that supergbamidi doesn't model.
 
 #### Notes on sample tracks (`A0`-`BF`)
 
@@ -239,7 +239,7 @@ note. Each sample is a 12-byte header followed by signed 8-bit PCM:
 | 12 | s8[] | PCM data |
 
 A looped sample plays `[0, length)` and then repeats `[loop start, length)`. A
-negative length selects a mode this game never uses.
+negative length selects a mode that supergbamidi doesn't model.
 
 The step is relative to the mixer's output rate, so the playback rate is
 `mixer rate × step / 4096`.
@@ -312,8 +312,9 @@ the dry mix.
 **Squares.** On a note, the driver writes `SOUNDxCNT_H` as `volume << 12 |
 duty byte` (no envelope) and `SOUNDxCNT_X` from the frequency table with the
 restart bit. Pitch updates write only the frequency. The frequency table holds
-one `u16` per 1/32 semitone of notes 0 to 104, 3360 in all; bit 15 is the
-restart flag. Note 0 is C2 (65.4 Hz); in `BY6J` the table is at `0x084C59B8`.
+one `u16` per 1/32 semitone of notes 0 to 83, 2688 in all; bit 15 is the
+restart flag. Note 0 is C2 (65.4 Hz), so the table ends at B8; in `BY6J` it's
+at `0x084C59B8`.
 
 **Wave.** The driver triggers the wave channel once at init and never
 restarts it. For each note it loads a 16-byte wave RAM image into the idle
@@ -329,9 +330,10 @@ the wave channel with its duty byte, `80`, as the wave (see [Output stage in
 WCT 2004](#output-stage-in-wct-2004)), and so gets wave 0 of that table.
 
 **Pitches past the frequency table.** The driver doesn't check the pitch it
-looks up. Note `FF`, which a song can play as if it were note -1, reads the
-word 16 KB past the table's start, well past its end, and any other pitch
-outside notes 0 to 104 reads outside the table too. Whatever data lies there
+looks up, so any pitch outside notes 0 to 83 reads outside the table. From
+note 84 up it reads the words after the table, which hold other data rather
+than higher frequencies, and note `FF`, which a song can play as if it were
+note -1, reads the word 16 KB past the table's start. Whatever data lies there
 sets the frequency. On a square channel, the channel only restarts if the
 word's bit 15 is set: otherwise a note that's playing goes on at the new
 frequency, and a silent channel stays silent. `supergbamidi` does the same.
@@ -881,6 +883,11 @@ be laid out like the driver's:
   ends exactly where the next begins (tracks may share data);
 * each song ends exactly where the next begins;
 * some track plays a note.
+
+If the scan finds no song table either, detection fails. A game with a
+recognised command reader has the driver, so its error names the reader and
+points to `--song-table`; without the reader, the game is taken to have another
+driver.
 
 A sample table found by scanning must be followed directly by its sample
 headers, in increasing order. GSF rips zero the entries of unused samples,

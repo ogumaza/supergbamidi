@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <utility>
 
 #include "files.h"
@@ -135,6 +136,60 @@ void MidiTrack::PitchBend(uint32_t tick, int ch, int value)
 {
     value = std::clamp(value, 0, 16383);
     AddEvent(tick, kBend, {uint8_t(0xE0 | ch), uint8_t(value & 0x7F), uint8_t(value >> 7)});
+}
+
+void MidiTrack::Retime(const std::function<uint32_t(uint32_t)>& place)
+{
+    for (Event& e : events_)
+    {
+        e.tick = place(e.tick);
+    }
+    end_ = place(end_);
+
+    // Each note off ends the latest note on of its key on its channel, in the order they were added.
+    std::map<std::pair<int, int>, size_t> sounding;
+    std::vector<bool> left_out(events_.size());
+    for (size_t i = 0; i < events_.size(); i++)
+    {
+        const std::vector<uint8_t>& b = events_[i].bytes;
+        const int kind = b[0] & 0xF0;
+        if (kind != 0x80 && kind != 0x90)
+        {
+            continue;
+        }
+
+        const std::pair<int, int> key = {b[0] & 0x0F, b[1]};
+        if (kind == 0x90 && b[2])
+        {
+            sounding[key] = i;
+            continue;
+        }
+
+        const auto it = sounding.find(key);
+        if (it != sounding.end())
+        {
+            if (events_[it->second].tick == events_[i].tick)
+            {
+                left_out[it->second] = left_out[i] = true;
+            }
+            sounding.erase(it);
+        }
+    }
+
+    size_t kept = 0;
+    for (size_t i = 0; i < events_.size(); i++)
+    {
+        if (left_out[i])
+        {
+            continue;
+        }
+        if (kept != i)
+        {
+            events_[kept] = std::move(events_[i]);
+        }
+        kept++;
+    }
+    events_.resize(kept);
 }
 
 std::vector<uint8_t> MidiTrack::Encode() const

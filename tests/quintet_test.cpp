@@ -674,8 +674,8 @@ void TestLoopStarts()
 void TestLoopAfterTempoChange()
 {
     // Square 1 plays two notes at tempo 200, slows to tempo 60 and loops two notes, and square 2 loops four notes from
-    // its start. The loop starts at square 1's loop point, after two notes at a faster tempo than the loop's, and the
-    // song still plays it twice in full. The passes differ by a frame or two, as the driver rounds the notes to frames.
+    // its start, so that its first pass starts at the faster tempo. The loop starts at the second pass, a loop after
+    // square 1's loop point, and the song still plays it twice in full.
     Cart cart(Revision::kA);
     cart.Songs({Song({Channel()
                           .Bytes({0x7F, 200, 0x5E, 15})
@@ -695,16 +695,16 @@ void TestLoopAfterTempoChange()
     const SongSummary sum = ConvertSong(rom, info, 0, opt, nullptr);
 
     const double length = sum.loop_end - sum.loop_start;
-    SUPERGBAMIDI_CHECK(sum.ok && sum.loop_start > 0);
-    SUPERGBAMIDI_CHECK(std::fabs(sum.seconds - (sum.loop_start + 2 * length)) < 0.05);
+    SUPERGBAMIDI_CHECK(sum.ok && sum.loop_start > length);
+    SUPERGBAMIDI_CHECK(std::fabs(sum.seconds - (sum.loop_start + 2 * length)) < 0.001);
 }
 
 void TestLoopLengths()
 {
-    // Square 1 loops three notes and square 2 four, both from the start, and the wave channel plays two notes and
-    // ends. The loop starts where the wave channel ends, after two notes, and lasts until both squares are back where
-    // they started, twelve notes, and the song plays it twice. The driver rounds the notes to frames, which the checks
-    // allow for.
+    // Square 1 loops three notes and square 2 four, both from the start, and the wave channel plays two notes and ends.
+    // The loop starts where the wave channel ends, after two notes, and lasts until both squares are back where they
+    // started, twelve notes, and the song plays it twice. The driver rounds the notes to frames, which the checks allow
+    // for.
     Cart cart(Revision::kA);
     cart.Songs({Song({Channel().Bytes({0x7F, 90, 0x5E, 15, 0xBF}).Note(0, 3).Note(2, 3).Note(4, 3).End(),
                       Channel().Bytes({0x7F, 90, 0x5E, 15, 0xBF}).Note(0, 3).Note(2, 3).Note(4, 3).Note(5, 3).End(),
@@ -721,6 +721,164 @@ void TestLoopLengths()
     SUPERGBAMIDI_CHECK(sum.ok && sum.loop_start > 0);
     SUPERGBAMIDI_CHECK(std::fabs(sum.loop_end - sum.loop_start - 12 * note) < 0.1);
     SUPERGBAMIDI_CHECK(std::fabs(sum.seconds - (sum.loop_start + 24 * note)) < 0.1);
+}
+
+// Square 1's loop sets octave 2 after its first note, so the first time through, that note plays at the octave 3 set
+// before the loop, and every time after at octave 2. The loop starts at the second pass, which the driver goes on
+// repeating, and the song plays the first pass and then the loop twice. A loop that plays the same each time starts at
+// its first pass.
+void TestLoopAtSecondPass()
+{
+    for (const bool moves : {true, false})
+    {
+        Cart cart(Revision::kA);
+        cart.Songs({Song({Channel()
+                              .Bytes({0x7F, 90, 0x5E, 15, 0x4F, uint8_t(moves ? 3 : 2), 0xBF})
+                              .Note(0, 3)
+                              .Bytes({0x4F, 2})
+                              .Note(4, 3)
+                              .End()})});
+        const Rom rom = cart.ToRom();
+        const DriverInfo info = Detect(rom);
+        ConvertOptions opt;
+        opt.out_dir = Utf8(test::g_temp);
+        opt.base_name = moves ? "second_pass" : "first_pass";
+
+        const SongSummary sum = ConvertSong(rom, info, 0, opt, nullptr);
+
+        // The keys of the notes from the loop's start on.
+        const MidiEvents midi = ReadMidi(sum.midi_path);
+        uint32_t loop_start = ~0u;
+        for (const auto& [tick, bytes] : midi.Find(0xFF))
+        {
+            if (bytes.size() > 3 && bytes[1] == 0x06 && std::string(bytes.begin() + 3, bytes.end()) == "loopStart")
+            {
+                loop_start = tick;
+            }
+        }
+
+        std::vector<int> keys;
+        for (const auto& [tick, bytes] : midi.Find(0x90))
+        {
+            if (tick >= loop_start)
+            {
+                keys.push_back(bytes[1]);
+            }
+        }
+
+        // At tempo 90, the two quarter notes take 2 × 96 × 37 / 90 = 78.9 frames, which the driver plays in 78.
+        const double kPass = 78 * 280896.0 / 16777216;
+        SUPERGBAMIDI_CHECK(sum.ok);
+        SUPERGBAMIDI_CHECK(std::fabs(sum.loop_start - (moves ? kPass : 0)) < 0.001);
+        SUPERGBAMIDI_CHECK(std::fabs(sum.loop_end - sum.loop_start - kPass) < 0.001);
+        SUPERGBAMIDI_CHECK(std::fabs(sum.seconds - sum.loop_start - 2 * kPass) < 0.001);
+        SUPERGBAMIDI_CHECK(keys == std::vector<int>({60, 64, 60, 64}));
+    }
+}
+
+// Square 1 loops two quarter notes from its start, and square 2 the same after a rest of 56 ticks. At tempo 90, a frame
+// is 90 of the MIDI file's ticks and a tick is 37, so square 2's loop point is 2 MIDI ticks into frame 23, and square
+// 1's is at the start of frame 0. Each loop drops the part of a frame that the channel has counted, 84 MIDI ticks for
+// square 1 and 86 for square 2, so square 2's second pass starts 2 ticks before the end of a loop from its loop point,
+// and its first note would play twice at the seam. The loop starts at the second pass, where both squares start each
+// pass as the one before.
+void TestLoopSeam()
+{
+    Cart cart(Revision::kA);
+    cart.Songs(
+        {Song({Channel().Bytes({0x7F, 90, 0x5E, 15, 0x4F, 3, 0xBF}).Note(0, 3).Note(4, 3).End(),
+               Channel().Bytes({0x5E, 15, 0x4F, 3}).Rest(5).Rest(10).Bytes({0xBF}).Note(7, 3).Note(11, 3).End()})});
+    const Rom rom = cart.ToRom();
+    const DriverInfo info = Detect(rom);
+    ConvertOptions opt;
+    opt.out_dir = Utf8(test::g_temp);
+    opt.base_name = "loop_seam";
+
+    const SongSummary sum = ConvertSong(rom, info, 0, opt, nullptr);
+
+    // Each square's notes from the loop's start to its end.
+    const MidiEvents midi = ReadMidi(sum.midi_path);
+    uint32_t loop_start = ~0u, loop_end = 0;
+    for (const auto& [tick, bytes] : midi.Find(0xFF))
+    {
+        const std::string text = bytes.size() > 3 ? std::string(bytes.begin() + 3, bytes.end()) : "";
+        if (bytes[1] == 0x06 && text == "loopStart")
+        {
+            loop_start = tick;
+        }
+        else if (bytes[1] == 0x06 && text == "loopEnd")
+        {
+            loop_end = tick;
+        }
+    }
+
+    std::array<int, 2> notes = {};
+    for (const int c : {0, 1})
+    {
+        for (const auto& [tick, bytes] : midi.Find(uint8_t(0x90 + c)))
+        {
+            notes[size_t(c)] += tick >= loop_start && tick < loop_end ? 1 : 0;
+        }
+    }
+
+    // Square 1's first pass ends at frame 78, and the loop starts as much after that as square 2's loop point is into
+    // the song, 2072 MIDI ticks, and lasts 78 frames.
+    const double kFrame = 280896.0 / 16777216;
+    SUPERGBAMIDI_CHECK(sum.ok);
+    SUPERGBAMIDI_CHECK(std::fabs(sum.loop_start - (78 + 2072 / 90.0) * kFrame) < 1e-6);
+    SUPERGBAMIDI_CHECK(std::fabs(sum.loop_end - sum.loop_start - 78 * kFrame) < 1e-6);
+    SUPERGBAMIDI_CHECK(notes == (std::array<int, 2>{2, 2}));
+}
+
+// Square 1 plays a note at volume 15, and then loops a note at volume 15 and one at 8. The first time through, the
+// loop's first note has the level that the note before it left, but a player that jumps back to the loop's start comes
+// from the note at volume 8, so the level is written again there.
+void TestLoopSettingsAgain()
+{
+    Cart cart(Revision::kA);
+    cart.Songs({Song({Channel()
+                          .Bytes({0x7F, 90, 0x5E, 15, 0x4F, 3})
+                          .Note(0, 3)
+                          .Bytes({0xBF, 0x5E, 15})
+                          .Note(4, 3)
+                          .Bytes({0x5E, 8})
+                          .Note(7, 3)
+                          .End()})});
+    const Rom rom = cart.ToRom();
+    const DriverInfo info = Detect(rom);
+    ConvertOptions opt;
+    opt.out_dir = Utf8(test::g_temp);
+    opt.base_name = "loop_again";
+
+    const SongSummary sum = ConvertSong(rom, info, 0, opt, nullptr);
+
+    const MidiEvents midi = ReadMidi(sum.midi_path);
+    uint32_t loop_start = ~0u;
+    for (const auto& [tick, bytes] : midi.Find(0xFF))
+    {
+        if (bytes.size() > 3 && bytes[1] == 0x06 && std::string(bytes.begin() + 3, bytes.end()) == "loopStart")
+        {
+            loop_start = tick;
+        }
+    }
+
+    std::vector<std::pair<uint32_t, int>> levels;
+    for (const auto& [tick, bytes] : midi.Find(0xB0))
+    {
+        if (bytes[1] == cc::kExpression)
+        {
+            levels.emplace_back(tick, bytes[2]);
+        }
+    }
+
+    // The setup's level of 0, the first note's, the same again at the loop's start, and then the note at volume 8's.
+    SUPERGBAMIDI_CHECK(sum.ok && loop_start > 0);
+    SUPERGBAMIDI_CHECK(levels.size() > 3);
+    if (levels.size() > 3)
+    {
+        SUPERGBAMIDI_CHECK(levels[2] == std::make_pair(loop_start, levels[1].second));
+        SUPERGBAMIDI_CHECK(levels[3].first > loop_start && levels[3].second < levels[2].second);
+    }
 }
 
 void TestHourLimit()
@@ -958,13 +1116,10 @@ void TestConversion()
     int start_cc10 = -1, cc10 = -1, cc11 = -1;
     for (const auto& [tick, bytes] : cc)
     {
-        start_cc10 = bytes[1] == 10 && tick == 0 ? bytes[2] : start_cc10;
-        cc10 = bytes[1] == 10 && tick > 0 ? bytes[2] : cc10;
-        cc11 = bytes[1] == 11 && tick == 0 && bytes[2] ? bytes[2] : cc11;
+        start_cc10 = bytes[1] == cc::kPan && tick == 0 ? bytes[2] : start_cc10;
+        cc10 = bytes[1] == cc::kPan && tick > 0 ? bytes[2] : cc10;
+        cc11 = bytes[1] == cc::kExpression && tick == 0 && bytes[2] ? bytes[2] : cc11;
     }
-
-    int n10 = 0, n11 = 0;
-    LevelsToControllers(30, 0, n10, n11);
 
     bool between = false;
     for (const auto& [tick, bytes] : bends)
@@ -982,9 +1137,11 @@ void TestConversion()
         return e.second.size() > 1 && e.second[1] == 0x06;
     };
 
+    // A level of 30 of 128 on the left alone is panned hard left, and CC11 is 127 × sqrt(30/128 / (sqrt(2) × 127/128)),
+    // about 52.
     SUPERGBAMIDI_CHECK(sum.ok && sum.loop_start == 0 && sum.loop_end > 0);
-    SUPERGBAMIDI_CHECK_EQ(cc11, n11);
-    SUPERGBAMIDI_CHECK_EQ(start_cc10, n10);
+    SUPERGBAMIDI_CHECK_EQ(cc11, 52);
+    SUPERGBAMIDI_CHECK_EQ(start_cc10, 0);
     SUPERGBAMIDI_CHECK_EQ(cc10, -1);
     SUPERGBAMIDI_CHECK(between);
     SUPERGBAMIDI_CHECK(std::any_of(tempos.begin(), tempos.end(), is_tempo));
@@ -1048,6 +1205,9 @@ void RunTests()
     TestLoopStarts();
     TestLoopAfterTempoChange();
     TestLoopLengths();
+    TestLoopAtSecondPass();
+    TestLoopSeam();
+    TestLoopSettingsAgain();
     TestHourLimit();
     TestRegisters();
     TestWaveVolumes();

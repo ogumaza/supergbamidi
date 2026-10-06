@@ -20,6 +20,11 @@ constexpr uint8_t kFlagExist = 0x80;
 // The player's status once every track has ended.
 constexpr uint32_t kPlayerStopped = 0x80000000u;
 
+// The settings that a track sets, for the conversion's reports.
+constexpr uint8_t kSetVolume = 0x01;
+constexpr uint8_t kSetPan = 0x02;
+constexpr uint8_t kSetPitch = 0x04;
+
 // The driver's tick: each frame adds the tempo to a counter, and each 150 in it is a tick.
 constexpr int kTickCounter = 150;
 
@@ -39,7 +44,7 @@ uint32_t MulHigh(uint32_t a, uint32_t b)
 }
 
 // Returns a key's entry in the driver's table of sample rates: the semitone in the low 4 bits, and the octaves below
-// key 180 in the high 4.
+// keys 168-179 in the high 4.
 uint32_t ScaleEntry(int key)
 {
     return uint32_t(((14 - key / 12) << 4) | (key % 12));
@@ -60,6 +65,28 @@ uint32_t KeyToFrequency(uint32_t frequency, int key, int fine)
     const uint32_t low = kFreqTable[ScaleEntry(key) & 0xF] >> (ScaleEntry(key) >> 4);
     const uint32_t high = kFreqTable[ScaleEntry(key + 1) & 0xF] >> (ScaleEntry(key + 1) >> 4);
     return MulHigh(frequency, low + MulHigh(high - low, fraction));
+}
+
+uint32_t CamelotKeyToFrequency(uint32_t frequency, int key, int fine)
+{
+    key &= 0xFF;
+    uint32_t fraction = uint32_t(fine & 0xFF) << 24;
+    if (key > 178)
+    {
+        key = 178;
+        fraction = 255u << 24;
+    }
+
+    // The table holds each semitone's step to the next, which from B is to 2^32, and wraps to the same in 32 bits.
+    const uint32_t semitone = ScaleEntry(key) & 0xF;
+    const uint32_t octaves = ScaleEntry(key) >> 4;
+    const uint32_t step = (semitone == 11 ? 0 : kFreqTable[semitone + 1]) - kFreqTable[semitone];
+    return MulHigh(frequency, (kFreqTable[semitone] >> octaves) + MulHigh(step >> octaves, fraction));
+}
+
+uint32_t SampleFrequency(const DriverInfo& info, uint32_t frequency, int key, int fine)
+{
+    return info.camelot_sequencer ? CamelotKeyToFrequency(frequency, key, fine) : KeyToFrequency(frequency, key, fine);
 }
 
 uint32_t KeyToPsgFrequency(int channel, int key, int fine)
@@ -140,6 +167,14 @@ const std::vector<Action>& Sequencer::Step()
         bool stopped = false;
         while (tempo_c_ >= kTickCounter)
         {
+            if (clock_ == restate_from_)
+            {
+                for (Track& track : tracks_)
+                {
+                    track.restate = kSetVolume | kSetPan | kSetPitch;
+                }
+            }
+
             uint32_t playing = 0;
             for (int t = 0; t < TrackCount(); t++)
             {
@@ -234,14 +269,15 @@ void Sequencer::RunTrack(int t)
 
     track.wait--;
 
-    // The LFO's shape is a triangle wave from -64 to 64, scaled by the depth.
-    if (track.lfo_speed && track.mod)
+    // The LFO's shape is a triangle wave from -64 to 64, scaled by the depth. Camelot's sequencer counts the LFO's
+    // delay down before it looks at the speed, so it counts it down at a speed of 0 too.
+    if ((track.lfo_speed || info_.camelot_sequencer) && track.mod)
     {
         if (track.lfo_delay_c)
         {
             track.lfo_delay_c--;
         }
-        else
+        else if (track.lfo_speed)
         {
             const uint32_t phase = uint32_t(track.lfo_speed_c) + track.lfo_speed;
             track.lfo_speed_c = uint8_t(phase);
@@ -376,6 +412,7 @@ bool Sequencer::RunCommand(int t)
     case kCmdKeySh:
         track.key_shift = int8_t(arg());
         track.flags |= kFlagPitChange;
+        track.sets |= kSetPitch;
         break;
 
     case kCmdVoice:
@@ -396,21 +433,25 @@ bool Sequencer::RunCommand(int t)
     case kCmdVol:
         track.vol = arg();
         track.flags |= kFlagVolChange;
+        track.sets |= kSetVolume;
         break;
 
     case kCmdPan:
         track.pan = int8_t(uint8_t(arg() - 0x40));
         track.flags |= kFlagVolChange;
+        track.sets |= kSetPan;
         break;
 
     case kCmdBend:
         track.bend = int8_t(uint8_t(arg() - 0x40));
         track.flags |= kFlagPitChange;
+        track.sets |= kSetPitch;
         break;
 
     case kCmdBendR:
         track.bend_range = arg();
         track.flags |= kFlagPitChange;
+        track.sets |= kSetPitch;
         break;
 
     case kCmdLfoS:
@@ -447,6 +488,7 @@ bool Sequencer::RunCommand(int t)
     case kCmdTune:
         track.tune = int8_t(uint8_t(arg() - 0x40));
         track.flags |= kFlagPitChange;
+        track.sets |= kSetPitch;
         break;
 
     case kCmdPort:
@@ -545,7 +587,11 @@ void Sequencer::Note(int t, int length_index)
 
     const int priority = std::min(255, priority_ + track.priority);
     const int psg = voice.PsgChannel();
-    const int c = psg > 4 ? -1 : FindChannel(t, psg, priority);
+    int c = -1;
+    if (psg <= 4)
+    {
+        c = psg || !info_.camelot_sequencer ? FindChannel(t, psg, priority) : FindCamelotChannel(t, priority);
+    }
     if (c < 0)
     {
         a.kind = Action::kNoteDropped;
@@ -593,10 +639,11 @@ void Sequencer::Note(int t, int length_index)
     else
     {
         ch.count = int32_t(track.offset);
-        ch.frequency = KeyToFrequency(rom_.U32(voice.wave + 4), pitch_key, track.pit_m);
+        ch.frequency = SampleFrequency(info_, rom_.U32(voice.wave + 4), pitch_key, track.pit_m);
     }
 
     ch.status = kStatusStart;
+    ch.synth = false;
     ch.audible = false;
     track.flags &= 0xF0;
 
@@ -814,6 +861,7 @@ void Sequencer::ClearModulation(Track& track)
     track.mod_m = 0;
     track.lfo_speed_c = 0;
     track.flags |= track.mod_t == 0 ? kFlagPitChange : kFlagVolChange;
+    track.sets |= track.mod_t == 0 ? kSetPitch : track.mod_t == 1 ? kSetVolume : kSetPan;
 }
 
 void Sequencer::UpdateTrack(Track& track)
@@ -856,8 +904,10 @@ void Sequencer::UpdateTrack(Track& track)
 
 void Sequencer::SetChannelVolume(Channel& c, const Track& track) const
 {
+    // Camelot's sequencer works out the left side's level from 128 less a drum kit voice's pan, where the driver takes
+    // it from 127, so every note's left side comes out a little louder.
     const int right = (c.velocity * (128 + c.rhythm_pan) * track.vol_mr) >> 14;
-    const int left = (c.velocity * (127 - c.rhythm_pan) * track.vol_ml) >> 14;
+    const int left = (c.velocity * ((info_.camelot_sequencer ? 128 : 127) - c.rhythm_pan) * track.vol_ml) >> 14;
     c.right = uint8_t(std::min(right, 255));
     c.left = uint8_t(std::min(left, 255));
 }
@@ -898,7 +948,7 @@ void Sequencer::UpdateChannels()
                 }
                 else
                 {
-                    ch.frequency = KeyToFrequency(rom_.U32(ch.wave + 4), key, track.pit_m);
+                    ch.frequency = SampleFrequency(info_, rom_.U32(ch.wave + 4), key, track.pit_m);
                 }
             }
 
@@ -954,6 +1004,77 @@ int Sequencer::FindChannel(int t, int psg, int priority) const
             continue;
         }
 
+        if (ch.priority < lowest)
+        {
+            lowest = ch.priority;
+            latest = order;
+            found = c;
+        }
+        else if (ch.priority == lowest && order >= latest)
+        {
+            latest = order;
+            found = c;
+        }
+    }
+
+    return found;
+}
+
+int Sequencer::FindCamelotChannel(int t, int priority) const
+{
+    // A sample takes the third free channel, in the list's order. With only one or two free, it takes the last of them,
+    // unless one of this track's released notes has a channel: then it takes the last of those.
+    const int count = info_.max_channels;
+    int free_count = 0;
+    int last_free = -1;
+    uint32_t released = 0;
+    for (int c = 0; c < count; c++)
+    {
+        const Channel& ch = channels_[size_t(c)];
+        if (!(ch.status & kStatusOn))
+        {
+            if (++free_count == 3)
+            {
+                return c;
+            }
+
+            last_free = c;
+        }
+        else if (ch.status & kStatusStop)
+        {
+            released |= 1u << c;
+        }
+    }
+
+    if (last_free >= 0)
+    {
+        for (int c = count - 1; c >= 0; c--)
+        {
+            if ((released & (1u << c)) && channels_[size_t(c)].track == t)
+            {
+                return c;
+            }
+        }
+
+        return last_free;
+    }
+
+    // With none free, it takes a released note if there is one, or else a note of lower priority, or of the same
+    // priority from this track or a later one: of those, the one with the lowest priority, from the latest track, and
+    // the first in the list of channels.
+    const uint32_t candidates = released ? released : (1u << count) - 1;
+    int found = -1;
+    int lowest = released ? 256 : priority;
+    int latest = released ? 0 : t + 1;
+    for (int c = count - 1; c >= 0; c--)
+    {
+        const Channel& ch = channels_[size_t(c)];
+        if (!(candidates & (1u << c)))
+        {
+            continue;
+        }
+
+        const int order = ch.track + 1;
         if (ch.priority < lowest)
         {
             lowest = ch.priority;
@@ -1279,7 +1400,8 @@ void Sequencer::RunDirect()
         }
         else if (c.status & kStatusStop)
         {
-            envelope = (envelope * c.release) >> 8;
+            // Camelot's mixer takes 256 less the release off the level each frame, in a straight line.
+            envelope = info_.camelot_mixer ? envelope + c.release - 256 : (envelope * c.release) >> 8;
             echo = envelope <= c.echo_volume;
         }
         else if ((c.status & kStatusEnvelope) == kPhaseDecay)
@@ -1323,6 +1445,18 @@ void Sequencer::RunDirect()
 
         c.envelope = uint8_t(envelope);
         CheckAudible(i);
+
+        // Camelot's mixer plays each side at 9/8 of the envelope, and leaves out a note that comes out silent on both,
+        // which doesn't move on through its sample.
+        if (info_.camelot_mixer)
+        {
+            const int level = envelope + (envelope >> 3);
+            if (((c.right * level) >> 9) == 0 && ((c.left * level) >> 9) == 0)
+            {
+                continue;
+            }
+        }
+
         MixChannel(c, wave);
         if (!c.status)
         {
@@ -1334,6 +1468,15 @@ void Sequencer::RunDirect()
 void Sequencer::MixChannel(Channel& c, const Wave& wave)
 {
     const int samples = info_.samples_per_frame;
+
+    // Camelot's mixer takes a sample that has no points left when it comes to mix it, as one of no length is from the
+    // start, as a synth voice from then on, unless it plays at a fixed pitch.
+    if (info_.camelot_mixer && !(c.type & kVoiceFixed) && (c.synth || c.count == 0))
+    {
+        c.synth = true;
+        MixSynth(c);
+        return;
+    }
 
     // A newer driver's mixer plays a reversed sample backwards from its end, and counts its way through a compressed
     // sample by the point rather than the address. A compressed voice with an uncompressed sample isn't mixed.
@@ -1427,11 +1570,49 @@ void Sequencer::MixChannel(Channel& c, const Wave& wave)
     c.position = position;
 }
 
+void Sequencer::MixSynth(Channel& c) const
+{
+    // A synth voice's sample data starts 0x80 and its type: 0 for a pulse wave, 1 for a saw wave, and anything else for
+    // a triangle wave. Its phase moves on by 8 times the step that a sample's position would, so a cycle of the wave
+    // lasts 64 of the sample's points.
+    const int type = int8_t(rom_.U8(c.wave + 17));
+    const uint32_t step = (c.frequency * info_.step_scale) << 3;
+    const int samples = info_.samples_per_frame;
+
+    // A pulse wave's duty follows a triangle wave whose phase is the top byte of the count, which moves on by the
+    // fourth byte of the sample's data each frame.
+    if (type == 0)
+    {
+        c.count = int32_t(uint32_t(c.count) + (uint32_t(rom_.U8(c.wave + 19)) << 24));
+        c.fraction += step * uint32_t(samples);
+        return;
+    }
+
+    // A saw wave goes through a filter that adds half its last output to each point, which the count keeps.
+    if (type == 1)
+    {
+        int32_t filter = c.count;
+        for (int i = 0; i < samples; i++)
+        {
+            c.fraction += step;
+            const int32_t point = int32_t(c.fraction >> 24) - 0x70 - int32_t((c.fraction >> 26) & 0x1F);
+            filter = point + (filter >> 1);
+        }
+
+        c.count = filter;
+        return;
+    }
+
+    c.fraction += step * uint32_t(samples);
+}
+
 void Sequencer::ReportTrack(int t)
 {
     Track& track = tracks_[size_t(t)];
     Action a;
     a.track = uint8_t(t);
+    const uint8_t again = track.sets & track.restate;
+    track.sets = 0;
 
     // The conversion's volume and pan, with the LFO's swing when it modulates them.
     int volume = track.vol;
@@ -1439,8 +1620,9 @@ void Sequencer::ReportTrack(int t)
     {
         volume = std::min(127, (volume * (track.mod_m + 128)) >> 7);
     }
-    if (volume != track.last_volume)
+    if (volume != track.last_volume || (again & kSetVolume))
     {
+        track.restate &= uint8_t(~kSetVolume);
         track.last_volume = volume;
         a.kind = Action::kVolume;
         a.a = uint8_t(volume);
@@ -1448,8 +1630,9 @@ void Sequencer::ReportTrack(int t)
     }
 
     const int pan = std::clamp(64 + track.pan + (track.mod_t == 2 ? track.mod_m / 2 : 0), 0, 127);
-    if (pan != track.last_pan)
+    if (pan != track.last_pan || (again & kSetPan))
     {
+        track.restate &= uint8_t(~kSetPan);
         track.last_pan = pan;
         a.kind = Action::kPan;
         a.a = uint8_t(pan);
@@ -1461,8 +1644,9 @@ void Sequencer::ReportTrack(int t)
     {
         pitch += 16 * track.mod_m;
     }
-    if (pitch != track.last_pitch)
+    if (pitch != track.last_pitch || (again & kSetPitch))
     {
+        track.restate &= uint8_t(~kSetPitch);
         track.last_pitch = pitch;
         a.kind = Action::kPitch;
         a.value = pitch;

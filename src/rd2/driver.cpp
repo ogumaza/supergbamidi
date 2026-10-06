@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "rd2/sequencer.h"
 #include "thumb.h"
 
 namespace supergbamidi::rd2
@@ -16,9 +17,6 @@ namespace
 
 // The most sequences detection reads, so that unrelated ROM data can't keep it busy.
 constexpr int kMaxSequences = 1024;
-
-// The tracks a player has room for.
-constexpr int kMaxTracks = 10;
 
 // The start of the driver's init routine, which stores the game's settings and sets up the sound hardware.
 constexpr const char* kInitPattern = "B530 49xx 6008 49xx 2000 7008 2080 7008 3904 4Axx 1C10 8008 3102 200D 7008";
@@ -49,14 +47,6 @@ constexpr TablePattern kVoiceClasses = {"49xx 7830 1840 7800 1C29 3152 7809", 0}
 
 // The instrument lookup, for instruments with a sample for each key.
 constexpr TablePattern kKeyEnvelope = {"8869 1859 4Axx 0070 1840 8800 8050 6022 48xx 6060", 8};
-
-std::string Hex(uint32_t v)
-{
-    char b[16];
-    std::snprintf(b, sizeof b, "0x%08X", unsigned(v));
-
-    return b;
-}
 
 // Returns the literal that the ldr of the first match of a table's pattern loads, or 0 if there's no match.
 uint32_t FindTable(const Rom& rom, const TablePattern& table, int index = -1)
@@ -107,7 +97,7 @@ uint32_t EntryCount(const Rom& rom, uint32_t table)
 bool PlausibleSequence(const Rom& rom, uint32_t at)
 {
     const int tracks = rom.S8(at);
-    if (tracks < 1 || tracks > kMaxTracks || !rom.Contains(at, 2 + 2 * uint32_t(tracks)))
+    if (tracks < 1 || tracks > kPlayerTracks || !rom.Contains(at, 2 + 2 * uint32_t(tracks)))
     {
         return false;
     }
@@ -125,6 +115,14 @@ bool PlausibleSequence(const Rom& rom, uint32_t at)
 }
 
 } // namespace
+
+std::string Hex(uint32_t v)
+{
+    char b[16];
+    std::snprintf(b, sizeof b, "0x%08X", unsigned(v));
+
+    return b;
+}
 
 bool DetectDriver(const Rom& rom, const DriverOverrides& overrides, DriverInfo& info, std::string& error)
 {

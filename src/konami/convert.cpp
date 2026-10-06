@@ -10,9 +10,11 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <utility>
 
+#include "beat_grid.h"
 #include "files.h"
 #include "konami/seqformat.h"
 #include "konami/sequencer.h"
@@ -28,15 +30,18 @@ namespace
 constexpr int kVelocity = 127;   // every note's velocity, as CC11 carries the loudness (see LevelsToControllers())
 constexpr int kTailFrames = 120; // frames the last notes ring for when every track ends without stopping the song
 
-// The number of entries in the driver's PSG frequency table: one for each 1/32 semitone of notes 0 to 104.
-constexpr int kPsgFreqEntries = 105 * 32;
+// The MIDI file's ticks in a quarter note: several to a frame at the tempos that songs have.
+constexpr uint16_t kQuarterTicks = 480;
+
+// The number of entries in the driver's PSG frequency table: one for each 1/32 semitone of notes 0 to 83 (C2 to B8).
+// Other data follows it.
+constexpr int kPsgFreqEntries = 84 * 32;
 
 // Returns the pitch that frequency register value `x` (0-2047) plays, to the nearest 1/32 semitone from PSG note 0. A
 // square channel plays 131072 / (2048 - x) Hz, and its note 0 is C2. The wave channel plays an octave lower, and so is
 // its note 0.
 int RegisterPitch(int x)
 {
-    constexpr double kC2 = 65.40639132514966; // Hz
     return int(std::lround(384 * std::log2(131072.0 / (2048 - x) / kC2)));
 }
 
@@ -1026,58 +1031,6 @@ struct ProgramRef
     int program = 0;
 };
 
-// A song's estimated beat length in ticks (PPQN), and the tempo that makes a tick last one frame.
-struct Timing
-{
-    int ppqn = 24;
-    uint32_t micros_per_quarter = 0;
-    double bpm = 0;
-};
-
-// Estimates a song's beat from the frames its notes start on. The driver counts time in frames, so the composer's beat
-// is lost: songs were quantised from a tempo whose 16th notes are rarely a whole number of frames (e.g. 8.75, written
-// as 9 9 9 8). The 16th note is estimated as the weighted mean of the most common gap between note starts and its
-// neighbours. This only affects how bars line up in an editor, as event times are frame-exact.
-Timing EstimateTiming(std::vector<uint32_t> onsets)
-{
-    std::sort(onsets.begin(), onsets.end());
-    onsets.erase(std::unique(onsets.begin(), onsets.end()), onsets.end());
-    std::map<uint32_t, int> hist;
-    for (size_t i = 1; i < onsets.size(); i++)
-    {
-        hist[onsets[i] - onsets[i - 1]]++;
-    }
-
-    uint32_t mode = 0;
-    int mode_count = 0;
-    for (uint32_t g = 5; g <= 12; g++)
-    {
-        if (hist[g] > mode_count)
-        {
-            mode = g;
-            mode_count = hist[g];
-        }
-    }
-
-    Timing t;
-    if (mode_count >= 8)
-    {
-        double sum = 0, n = 0;
-        for (uint32_t g = mode - 1; g <= mode + 1; g++)
-        {
-            sum += double(g) * hist[g];
-            n += hist[g];
-        }
-
-        t.ppqn = int(std::lround(4 * sum / n));
-    }
-
-    t.micros_per_quarter = uint32_t(std::lround(t.ppqn * kFrameSeconds * 1e6));
-    t.bpm = 60e6 / t.micros_per_quarter;
-
-    return t;
-}
-
 // The older revisions' PSG output in one frame: the record that their output stage hands each PSG channel, and the
 // sides each channel plays on.
 struct Wct2004Psg
@@ -1211,11 +1164,10 @@ struct Usage
     std::array<int, kTracks> max_dev{};                        // largest pitch deviation, 1/32 semitones
     std::array<std::map<int, std::set<int>>, kTracks> samples; // DS sample -> the semitones it's played at
     std::set<int> duties, waves, noise_notes;
-    std::vector<uint32_t> onsets; // note starts before the end of the first pass through the loop
 };
 
 // Collects sound usage for the tracks selected by `track_mask`.
-Usage CollectUsage(const std::array<std::vector<Event>, kTracks>& events, int loop_end, uint16_t track_mask)
+Usage CollectUsage(const std::array<std::vector<Event>, kTracks>& events, uint16_t track_mask)
 {
     Usage u;
     for (int t = 0; t < kTracks; t++)
@@ -1230,10 +1182,6 @@ Usage CollectUsage(const std::array<std::vector<Event>, kTracks>& events, int lo
             if (e.type == Event::kNoteOn)
             {
                 u.used[size_t(t)] = true;
-                if (loop_end < 0 || e.frame < uint32_t(loop_end))
-                {
-                    u.onsets.push_back(e.frame);
-                }
 
                 switch (e.kind)
                 {
@@ -1439,13 +1387,24 @@ std::array<int, kTracks> AssignChannels(const std::array<bool, kTracks>& used)
     return channel;
 }
 
-// Writes the conductor track: the title and tempo, the game and song it's from, its loop, and the driver's echo
-// settings, which MIDI can't express.
-void WriteConductor(MidiTrack& conductor, const std::string& title, const Timing& timing, const Rom& rom,
-                    const DriverInfo& info, int song, const Simulation& sim)
+// Returns the MIDI tick of a place `quarters` quarter notes into the song.
+uint32_t QuarterTick(double quarters)
+{
+    return uint32_t(std::lround(std::max(0.0, quarters) * kQuarterTicks));
+}
+
+// Writes the conductor track: the title and the tempo map, the game and song it's from, its loop, and the driver's echo
+// settings, which MIDI can't express. `song_tick` gives a frame's tick on the song's beat, and `loop_tick` the tick of
+// a loop marker on a frame.
+void WriteConductor(MidiTrack& conductor, const std::string& title, const BeatGrid& grid, const Rom& rom,
+                    const DriverInfo& info, int song, const Simulation& sim,
+                    const std::function<uint32_t(double)>& song_tick, const std::function<uint32_t(double)>& loop_tick)
 {
     conductor.Name(title);
-    conductor.Tempo(0, timing.micros_per_quarter);
+    for (const BeatGrid::Tempo& t : grid.Tempos())
+    {
+        conductor.Tempo(QuarterTick(t.quarter), uint32_t(std::lround(t.frames * kFrameSeconds * 1e6)));
+    }
     conductor.TimeSignature(0, 4, 2);
 
     SongHeader h;
@@ -1457,8 +1416,8 @@ void WriteConductor(MidiTrack& conductor, const std::string& title, const Timing
 
     if (sim.loop_end >= 0)
     {
-        conductor.Meta(uint32_t(sim.loop_start), 0x06, "loopStart");
-        conductor.Meta(uint32_t(sim.loop_end), 0x06, "loopEnd");
+        conductor.Meta(loop_tick(sim.loop_start), 0x06, "loopStart");
+        conductor.Meta(loop_tick(sim.loop_end), 0x06, "loopEnd");
     }
 
     int last_fb = -1, last_delay = -1;
@@ -1474,20 +1433,21 @@ void WriteConductor(MidiTrack& conductor, const std::string& title, const Timing
         {
             std::snprintf(text, sizeof text, "echo: delay %.0f ms, feedback %d/256 (sent as CC91 reverb)",
                           e.delay * 32 * 1000.0 / info.mix_rate, e.feedback);
-            conductor.Meta(f, 0x01, text);
+            conductor.Meta(song_tick(f), 0x01, text);
         }
 
         last_fb = e.feedback;
         last_delay = e.delay;
     }
 
-    conductor.SetEnd(uint32_t(sim.frames.size()));
+    conductor.SetEnd(song_tick(double(sim.frames.size())));
 }
 
-// Writes one track's events on MIDI channel `ch`, sending program changes and controllers only when they change.
-// `sound_of` gives the preset and key of a note-on event, and `range` is the pitch bend range in semitones.
-void WriteTrack(MidiTrack& mt, int ch, int range, const std::vector<Event>& events,
-                const std::function<NoteSound(const Event&)>& sound_of)
+// Writes one track's events on MIDI channel `ch`, sending program changes and controllers where they change, and where
+// each first comes from `loop`, the loop's start, on. `sound_of` gives the preset and key of a note-on event, `range`
+// is the pitch bend range in semitones, and `tick_of` gives a frame's tick on the track.
+void WriteTrack(MidiTrack& mt, int ch, int range, const std::vector<Event>& events, std::optional<uint32_t> loop,
+                const std::function<NoteSound(const Event&)>& sound_of, const std::function<uint32_t(double)>& tick_of)
 {
     // The first note's preset is selected before anything plays, and the controllers start reset.
     ProgramRef program;
@@ -1516,8 +1476,8 @@ void WriteTrack(MidiTrack& mt, int ch, int range, const std::vector<Event>& even
     mt.Control(0, ch, cc::kRpnLsb, 127);
     mt.PitchBend(0, ch, 8192);
 
-    // The channel's settings, and the key that's playing (-1 if none).
-    int cc10 = 64, cc11 = 0, cc91 = 0, bend = 8192, key = -1;
+    // The channel's settings, the echo that the track's events last gave, and the key that's playing (-1 if none).
+    int cc10 = 64, cc11 = 0, cc91 = 0, bend = 8192, echo = 0, key = -1;
 
     auto set_levels = [&](uint32_t tick, double l, double r)
     {
@@ -1544,7 +1504,17 @@ void WriteTrack(MidiTrack& mt, int ch, int range, const std::vector<Event>& even
 
     for (const Event& e : events)
     {
-        const uint32_t tick = e.frame;
+        const uint32_t tick = tick_of(e.frame);
+
+        // A player that jumps back to the loop's start keeps the settings that the loop's end left, so they're all
+        // written again from there.
+        if (loop && tick >= *loop)
+        {
+            loop.reset();
+            program = {-1, -1};
+            cc10 = cc11 = cc91 = bend = -1;
+        }
+
         switch (e.type)
         {
         case Event::kNoteOff:
@@ -1576,6 +1546,10 @@ void WriteTrack(MidiTrack& mt, int ch, int range, const std::vector<Event>& even
 
                 set_levels(tick, e.level_l, e.level_r);
                 set_bend(tick, e.dev);
+                if (echo != cc91)
+                {
+                    mt.Control(tick, ch, cc::kReverb, cc91 = echo);
+                }
                 mt.NoteOn(tick, ch, sound.key, kVelocity);
                 key = sound.key;
                 break;
@@ -1590,9 +1564,10 @@ void WriteTrack(MidiTrack& mt, int ch, int range, const std::vector<Event>& even
             break;
 
         case Event::kEcho:
-            if (e.echo != cc91)
+            echo = e.echo;
+            if (echo != cc91)
             {
-                mt.Control(tick, ch, cc::kReverb, cc91 = e.echo);
+                mt.Control(tick, ch, cc::kReverb, cc91 = echo);
             }
             break;
         }
@@ -1617,7 +1592,7 @@ SongSummary Run(const Rom& rom, const DriverInfo& info, int song, const ConvertO
     sum.loop_end_frame = sim.loop_end;
 
     const std::array<std::vector<Event>, kTracks> events = RenderTracks(rom, info, sim, sum.warnings);
-    const Usage usage = CollectUsage(events, sim.loop_end, opt.track_mask);
+    const Usage usage = CollectUsage(events, opt.track_mask);
     sum.tracks = int(std::count(usage.used.begin(), usage.used.end(), true));
     sum.silent = sum.tracks == 0; // placeholder entries, such as a "no music" song, play no notes at all
     if (sum.silent || !write)
@@ -1687,12 +1662,53 @@ SongSummary Run(const Rom& rom, const DriverInfo& info, int song, const ConvertO
         }
     }
 
-    const Timing timing = EstimateTiming(usage.onsets);
-    sum.bpm = timing.bpm;
+    // The song's beat, from the frames on which every track's notes start, whichever tracks the conversion includes, so
+    // that conversions of different tracks line up, and from the song's start. Each pass through the loop starts again
+    // on the beat.
+    std::vector<std::vector<uint32_t>> starts(kTracks);
+    for (int t = 0; t < kTracks; t++)
+    {
+        for (const Event& e : events[size_t(t)])
+        {
+            if (e.type == Event::kNoteOn)
+            {
+                starts[size_t(t)].push_back(e.frame);
+            }
+        }
+        if (!starts[size_t(t)].empty())
+        {
+            starts[size_t(t)].insert(starts[size_t(t)].begin(), 0);
+        }
+    }
+    std::vector<uint32_t> hints;
+    for (int f = sim.loop_end; sim.loop_end > sim.loop_start && f < int(end_frame); f += sim.loop_end - sim.loop_start)
+    {
+        hints.push_back(uint32_t(f));
+    }
+    const BeatGrid grid(starts, hints);
+    sum.bpm = 60 / (grid.Tempos().front().frames * kFrameSeconds);
 
-    MidiFile midi(uint16_t(timing.ppqn));
+    // Each event goes on the beat, or on the driver's frame, up to the song's end.
+    const auto song_tick = [&](double frame)
+    {
+        return QuarterTick(opt.frame_timing ? grid.Quarters(frame) : grid.Snap(frame));
+    };
+
+    // A loop marker comes no later than any track's events from its frame on.
+    const auto loop_tick = [&](double frame)
+    {
+        return QuarterTick(opt.frame_timing ? grid.Quarters(frame) : grid.Marker(frame));
+    };
+
+    const uint32_t end_tick = song_tick(end_frame);
+
+    // The loop's start, from which each track writes its settings again, unless the loop starts with the song.
+    const uint32_t loop_start = sim.loop_end >= 0 ? loop_tick(sim.loop_start) : 0;
+    const std::optional<uint32_t> loop = loop_start > 0 ? std::optional(loop_start) : std::nullopt;
+
+    MidiFile midi(kQuarterTicks);
     const std::string title = rom.Title() + " #" + TwoDigits(song);
-    WriteConductor(midi.AddTrack(), title, timing, rom, info, song, sim);
+    WriteConductor(midi.AddTrack(), title, grid, rom, info, song, sim, song_tick, loop_tick);
 
     for (int t = 0; t < kTracks; t++)
     {
@@ -1711,8 +1727,12 @@ SongSummary Run(const Rom& rom, const DriverInfo& info, int song, const ConvertO
         {
             return Resolve(programs, sf, t, e);
         };
-        WriteTrack(mt, channel[size_t(t)], range, events[size_t(t)], sound_of);
-        mt.SetEnd(end_frame);
+        const auto tick_of = [&](double frame)
+        {
+            return std::min(end_tick, QuarterTick(opt.frame_timing ? grid.Quarters(frame) : grid.Quarters(t, frame)));
+        };
+        WriteTrack(mt, channel[size_t(t)], range, events[size_t(t)], loop, sound_of, tick_of);
+        mt.SetEnd(end_tick);
     }
 
     const std::string stem =

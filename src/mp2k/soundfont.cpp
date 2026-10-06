@@ -6,6 +6,7 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <numeric>
 #include <string>
 #include <vector>
 
@@ -23,7 +24,8 @@ enum Kind
     kReversedKind,
     kSquareKind,
     kWaveKind,
-    kNoiseKind
+    kNoiseKind,
+    kTriangleKind
 };
 
 // The shortest time a SoundFont envelope can give a phase, in timecents: 1 ms.
@@ -115,11 +117,11 @@ int SampleFadeTime(int from, int to, int rate)
     return Timecents(100.0 / decibels * frames / kFrameRate);
 }
 
-// Returns the SoundFont time for a PSG fade to silence that takes `seconds`. The PSG's fade is a straight line in
-// level, which stays loud for most of its length, where a SoundFont's is a straight line in decibels, which drops
-// sooner. Stretching the SoundFont's keeps the loudness of the two close, as for Rare's driver, whose fades are
-// straight lines too.
-int PsgFadeTime(double seconds)
+// Returns the SoundFont duration for a fade to silence lasting `seconds` that falls linearly in level, as the PSG's
+// fades and Camelot's mixer's releases do. Such a fade stays loud for most of its length, where a SoundFont's falls
+// linearly in decibels and becomes quiet sooner, so the SoundFont fade is lengthened to keep their loudness close.
+// Rare's driver fades linearly too, and its conversion lengthens its fades the same way.
+int StraightFadeTime(double seconds)
 {
     const double frames = seconds * kFrameRate;
     const double stretch = std::clamp(3.0 + 3.0 * (frames - 5) / 11.0, 3.0, 6.0);
@@ -164,9 +166,92 @@ void SetCycle(Sf2Sample& out, const std::vector<int16_t>& cycle)
     out.loop_end = uint32_t(2 * cycle.size());
 }
 
+// A part of a zone: its keys, and its tuning in cents from the sample at its root key. A part that plays one pitch
+// whatever the key has a scale tuning of 0.
+struct Part
+{
+    int low, high;
+    double cents;
+    bool fixed;
+};
+
+// Adds a zone for each part that plays `voice` with SoundFont sample `sample`, with the drum kit's pan `rhythm_pan`.
+void AddParts(const DriverInfo& info, const Voice& voice, int sample, bool loops, const std::vector<Part>& parts,
+              int rhythm_pan, Sf2Instrument& instrument)
+{
+    // The driver's master volume scales its sample channels, and the PSG channels are quieter than a sample channel at
+    // its full level. Camelot's mixer leaves out the master volume, and plays a sample channel at 9/8 of the driver's
+    // full level.
+    const int psg = voice.PsgChannel();
+    const Sf2Envelope env = EnvelopeFor(info, voice);
+    int attenuation = psg ? kPsgAttenuation : Centibels((info.master_volume + 1) / 16.0);
+    if (info.camelot_mixer)
+    {
+        attenuation = psg ? kPsgAttenuation + Centibels(8.0 / 9.0) : 0;
+    }
+
+    for (const Part& part : parts)
+    {
+        Sf2Zone z;
+        z.gens.push_back(Sf2Gen::Range(sf2gen::kKeyRange, part.low, part.high));
+        if (rhythm_pan)
+        {
+            z.gens.push_back(Sf2Gen::Value(sf2gen::kPan, std::clamp(rhythm_pan * 500 / 127, -500, 500)));
+        }
+
+        // Envelope phases at their defaults are left out.
+        const std::pair<uint16_t, int> phases[] = {{sf2gen::kAttackVolEnv, env.attack},
+                                                   {sf2gen::kDecayVolEnv, env.decay},
+                                                   {sf2gen::kReleaseVolEnv, env.release}};
+        for (const auto& [op, value] : phases)
+        {
+            if (value != kInstant)
+            {
+                z.gens.push_back(Sf2Gen::Value(op, value));
+            }
+        }
+        if (env.sustain)
+        {
+            z.gens.push_back(Sf2Gen::Value(sf2gen::kSustainVolEnv, env.sustain));
+        }
+        if (attenuation)
+        {
+            z.gens.push_back(Sf2Gen::Value(sf2gen::kInitialAttenuation, attenuation));
+        }
+
+        // A tuning of a semitone or more goes partly into the coarse tune, since the fine tune only reaches 99 cents.
+        const int cents = int(std::lround(part.cents));
+        if (cents / 100)
+        {
+            z.gens.push_back(Sf2Gen::Value(sf2gen::kCoarseTune, std::clamp(cents / 100, -120, 120)));
+        }
+        if (cents % 100)
+        {
+            z.gens.push_back(Sf2Gen::Value(sf2gen::kFineTune, cents % 100));
+        }
+        if (part.fixed)
+        {
+            z.gens.push_back(Sf2Gen::Value(sf2gen::kScaleTuning, 0));
+        }
+        if (loops)
+        {
+            z.gens.push_back(Sf2Gen::Value(sf2gen::kSampleModes, 1));
+        }
+        z.gens.push_back(Sf2Gen::Value(sf2gen::kSampleId, sample));
+
+        // The pitch wheel doesn't move a fixed-pitch sample. This takes the place of the default modulator from it.
+        if (psg == 0 && (voice.type & kVoiceFixed))
+        {
+            z.mods.push_back({0x020E, sf2gen::kFineTune, 0, 0x0010, 0});
+        }
+
+        instrument.zones.push_back(z);
+    }
+}
+
 } // namespace
 
-Sf2Envelope EnvelopeFor(const Voice& voice)
+Sf2Envelope EnvelopeFor(const DriverInfo& info, const Voice& voice)
 {
     Sf2Envelope env;
 
@@ -186,7 +271,7 @@ Sf2Envelope EnvelopeFor(const Voice& voice)
             // A decay to a sustain level reaches it in the same time, and one to silence is a fade.
             const double seconds = (15.0 - sustain) * decay / kPsgStepsPerSecond;
             env.sustain = sustain ? Centibels(sustain / 15.0) : kSilent;
-            env.decay = sustain ? Timecents(seconds * 1000.0 / env.sustain) : PsgFadeTime(seconds);
+            env.decay = sustain ? Timecents(seconds * 1000.0 / env.sustain) : StraightFadeTime(seconds);
         }
         else if (sustain < 15)
         {
@@ -195,7 +280,7 @@ Sf2Envelope EnvelopeFor(const Voice& voice)
 
         if (release)
         {
-            env.release = PsgFadeTime((sustain ? sustain : 15) * double(release) / kPsgStepsPerSecond);
+            env.release = StraightFadeTime((sustain ? sustain : 15) * double(release) / kPsgStepsPerSecond);
         }
 
         return env;
@@ -216,9 +301,15 @@ Sf2Envelope EnvelopeFor(const Voice& voice)
         env.decay = voice.decay ? SampleFadeTime(255, sustain ? sustain : 2, voice.decay) : kInstant;
     }
 
-    // The release falls from the sustain level, or from the full level for a voice that doesn't sustain.
+    // The release falls from the sustain level, or from the full level for a voice that doesn't sustain. Camelot's
+    // mixer takes 256 less the release off the level each frame, in a straight line.
     const int from = sustain ? sustain : 255;
-    if (voice.release)
+    if (info.camelot_mixer)
+    {
+        const int per_frame = 256 - voice.release;
+        env.release = StraightFadeTime((from + per_frame - 1) / per_frame / kFrameRate);
+    }
+    else if (voice.release)
     {
         env.release = SampleFadeTime(from, std::max(1, from / 8), voice.release);
     }
@@ -226,11 +317,79 @@ Sf2Envelope EnvelopeFor(const Voice& voice)
     return env;
 }
 
+Synth SynthOf(const Rom& rom, const DriverInfo& info, const Voice& voice)
+{
+    Wave wave;
+    if (!info.camelot_mixer || voice.PsgChannel() || (voice.type & kVoiceFixed) || !ReadWave(rom, voice.wave, wave) ||
+        wave.size != 0 || !rom.Contains(wave.Data(), 6))
+    {
+        return Synth::kNone;
+    }
+
+    // The data's second byte is the type: 0 for a pulse wave, 1 for a saw wave, and anything else for a triangle wave.
+    switch (rom.S8(wave.Data() + 1))
+    {
+    case 0:
+        return Synth::kPulse;
+    case 1:
+        return Synth::kSaw;
+    default:
+        return Synth::kTriangle;
+    }
+}
+
+std::vector<int16_t> RenderSynth(const Rom& rom, const DriverInfo& info, Synth synth, uint32_t data, uint32_t frequency,
+                                 uint32_t count)
+{
+    // The wave's phase moves on by 8 times the step that a sample's position would, so a cycle of the wave lasts 64 of
+    // a sample's points.
+    const uint32_t step = (frequency * info.step_scale) << 3;
+    std::vector<int16_t> out;
+    uint32_t phase = 0;
+    uint32_t lfo = 0;
+    uint32_t duty = 0;
+    int32_t filter = 0;
+    for (uint32_t i = 0; i < count; i++)
+    {
+        // A pulse wave is at half the full level for the part of each cycle that the duty gives. At the start of each
+        // frame, the duty's triangle wave moves on by the data's fourth byte, from its sixth, and sets the duty from
+        // the third byte and as far up again as the fifth byte gives.
+        if (synth == Synth::kPulse)
+        {
+            if (i % uint32_t(info.samples_per_frame) == 0)
+            {
+                lfo += uint32_t(rom.U8(data + 3)) << 24;
+                uint32_t shape = lfo + (uint32_t(rom.U8(data + 5)) << 24);
+                if (shape & 0x80000000u)
+                {
+                    shape = ~shape;
+                }
+
+                duty = (shape >> 8) * rom.U8(data + 4) + (uint32_t(rom.U8(data + 2)) << 24);
+            }
+
+            out.push_back(int16_t(phase < duty ? 64 * 256 : -64 * 256));
+            phase += step;
+            continue;
+        }
+
+        // A saw wave rises from -112 to 111 over a cycle, three quarters of a step for each of the phase's 256 steps,
+        // with a jump of 32 halfway, and its filter adds half the last output to each point. The mixer plays the
+        // filter's output at half the level.
+        phase += step;
+        const int32_t point = int32_t(phase >> 24) - 0x70 - int32_t((phase >> 26) & 0x1F);
+        filter = point + (filter >> 1);
+        out.push_back(int16_t(std::clamp(filter * 128, -32768, 32767)));
+    }
+
+    return out;
+}
+
 SoundfontBuilder::SoundfontBuilder(const Rom& rom, const DriverInfo& info) : rom_(rom), info_(info)
 {
 }
 
-int SoundfontBuilder::InstrumentFor(uint32_t address)
+int SoundfontBuilder::InstrumentFor(uint32_t address, int key)
 {
     Voice top;
     if (!ReadVoice(rom_, address, top))
@@ -247,6 +406,7 @@ int SoundfontBuilder::InstrumentFor(uint32_t address)
     const auto cached = instruments_.find(bytes);
     if (cached != instruments_.end())
     {
+        AddSynthKey(cached->second, address, key);
         return cached->second;
     }
 
@@ -263,32 +423,33 @@ int SoundfontBuilder::InstrumentFor(uint32_t address)
                            sf2gen::kInitialAttenuation, 480, 0, 0});
     si.zones.push_back(global);
 
+    bool plays = false;
     if (!top.IsSplit())
     {
-        AddZone(si, top, 0, 127, -1, 0);
+        plays = AddZone(si, top, 0, 127, -1, 0);
     }
     else if (top.type & kVoiceDrumKit)
     {
         // Each key of a drum kit plays its own voice, at that voice's key and pan.
-        for (int key = 0; key < 128; key++)
+        for (int k = 0; k < 128; k++)
         {
             Voice sub;
-            const uint32_t sub_address = SplitVoice(rom_, top, key);
+            const uint32_t sub_address = SplitVoice(rom_, top, k);
             if (sub_address && ReadVoice(rom_, sub_address, sub) && !sub.IsSplit())
             {
                 const int pan = sub.pan_sweep & 0x80 ? int8_t(uint8_t((sub.pan_sweep - 0xC0) * 2)) : 0;
-                AddZone(si, sub, key, key, sub.key, pan);
+                plays = AddZone(si, sub, k, k, sub.key, pan) || plays;
             }
         }
     }
     else
     {
         // A key split gets a zone for each run of keys that play the same voice.
-        int key = 0;
-        while (key < 128)
+        int k = 0;
+        while (k < 128)
         {
-            const uint32_t sub_address = SplitVoice(rom_, top, key);
-            int last = key;
+            const uint32_t sub_address = SplitVoice(rom_, top, k);
+            int last = k;
             while (last + 1 < 128 && SplitVoice(rom_, top, last + 1) == sub_address)
             {
                 last++;
@@ -297,22 +458,65 @@ int SoundfontBuilder::InstrumentFor(uint32_t address)
             Voice sub;
             if (sub_address && ReadVoice(rom_, sub_address, sub) && !sub.IsSplit())
             {
-                AddZone(si, sub, key, last, -1, 0);
+                plays = AddZone(si, sub, k, last, -1, 0) || plays;
             }
 
-            key = last + 1;
+            k = last + 1;
         }
     }
 
-    if (si.zones.size() < 2)
+    if (!plays)
     {
         return -1;
     }
 
     file_.instruments.push_back(si);
     instruments_[bytes] = int(file_.instruments.size()) - 1;
+    AddSynthKey(instruments_[bytes], address, key);
 
     return instruments_[bytes];
+}
+
+void SoundfontBuilder::AddSynthKey(int instrument, uint32_t address, int key)
+{
+    if (instrument < 0 || key < 0 || key > 127 || !synth_keys_.insert({instrument, key}).second)
+    {
+        return;
+    }
+
+    // The key's voice: the voice itself, or a key split's or a drum kit's for the key, which plays at its own key and
+    // pan in a drum kit.
+    Voice voice;
+    if (!ReadVoice(rom_, address, voice))
+    {
+        return;
+    }
+
+    int fixed_key = -1;
+    int pan = 0;
+    if (voice.IsSplit())
+    {
+        const bool drums = voice.type & kVoiceDrumKit;
+        const uint32_t sub_address = SplitVoice(rom_, voice, key);
+        if (!sub_address || !ReadVoice(rom_, sub_address, voice) || voice.IsSplit())
+        {
+            return;
+        }
+        if (drums)
+        {
+            fixed_key = voice.key;
+            pan = voice.pan_sweep & 0x80 ? int8_t(uint8_t((voice.pan_sweep - 0xC0) * 2)) : 0;
+        }
+    }
+
+    // The sample plays the key at its own pitch, so the zone needs no tuning.
+    const Synth synth = SynthOf(rom_, info_, voice);
+    if ((synth == Synth::kPulse || synth == Synth::kSaw) && voice.attack)
+    {
+        const int sample = SynthSample(voice, fixed_key >= 0 ? fixed_key : key);
+        AddParts(info_, voice, sample, file_.samples[size_t(sample)].loop, {{key, key, 0.0, fixed_key >= 0}}, pan,
+                 file_.instruments[size_t(instrument)]);
+    }
 }
 
 bool SoundfontBuilder::AddPreset(int bank, int program, int instrument)
@@ -383,14 +587,26 @@ int SoundfontBuilder::SampleFor(const Voice& voice)
     switch (voice.PsgChannel())
     {
     case 0:
-        return DirectSample(voice.address);
+        switch (SynthOf(rom_, info_, voice))
+        {
+        case Synth::kNone:
+            return DirectSample(voice.address);
+        case Synth::kTriangle:
+            return TriangleSample(voice.wave);
+        default:
+            return -1;
+        }
+
     case 1:
     case 2:
         return SquareSample(int(voice.wave & 3));
+
     case 3:
         return WaveSample(voice.wave);
+
     case 4:
         return NoiseSample(int(voice.wave & 1));
+
     default:
         return -1;
     }
@@ -585,26 +801,116 @@ int SoundfontBuilder::NoiseSample(int narrow)
     return samples_[key];
 }
 
-void SoundfontBuilder::AddZone(Sf2Instrument& instrument, const Voice& voice, int low, int high, int fixed_key,
-                               int rhythm_pan)
+int SoundfontBuilder::TriangleSample(uint32_t wave)
 {
-    // A sample voice with no attack never gets louder than silence.
-    const int psg = voice.PsgChannel();
-    const int sample = psg == 0 && voice.attack == 0 ? -1 : SampleFor(voice);
-    if (sample < 0)
+    const auto key = std::make_pair(int(kTriangleKind), wave);
+    const auto cached = samples_.find(key);
+    if (cached != samples_.end())
     {
-        return;
+        return cached->second;
     }
 
-    // Each part of the zone has a tuning in cents from the sample at its root key. A part that plays one pitch whatever
-    // the key has a scale tuning of 0.
-    const Sf2Sample& s = file_.samples[size_t(sample)];
-    struct Part
+    // The wave rises from -128 to 127 over the first half of the phase's 512 steps a cycle, and falls from 128 to -127
+    // over the second. A cycle lasts 64 of a sample's points, and plays at the rate the header gives a sample.
+    Wave header;
+    ReadWave(rom_, wave, header);
+    Sf2Sample s;
+    s.name = Name("Triangle", wave);
+    std::vector<int16_t> cycle;
+    for (int i = 0; i < 64; i++)
     {
-        int low, high;
-        double cents;
-        bool fixed;
-    };
+        const int step = 8 * i;
+        cycle.push_back(int16_t(std::min((step < 256 ? step - 128 : 384 - step) * 256, 32767)));
+    }
+    SetCycle(s, cycle);
+    s.rate = std::max<uint32_t>((header.frequency + 512) / 1024, 1);
+    s.root_key = 60;
+
+    file_.samples.push_back(s);
+    samples_[key] = int(file_.samples.size()) - 1;
+
+    return samples_[key];
+}
+
+int SoundfontBuilder::SynthSample(const Voice& voice, int key)
+{
+    const auto cache_key = std::make_pair(voice.wave, key);
+    const auto cached = synth_samples_.find(cache_key);
+    if (cached != synth_samples_.end())
+    {
+        return cached->second;
+    }
+
+    // The sample plays the key at its pitch in the game, at the mixer's rate.
+    Wave wave;
+    ReadWave(rom_, voice.wave, wave);
+    const Synth synth = SynthOf(rom_, info_, voice);
+    const uint32_t frequency = SampleFrequency(info_, wave.frequency, key, 0);
+    const double cycle = frequency ? 64.0 * info_.mix_rate / frequency : 0.0;
+
+    // A pulse wave's duty goes through a cycle in the frames it takes the data's fourth byte to add up to a multiple of
+    // 256, and the loop lasts that long, to the nearest whole cycle of the wave. A saw wave's filter takes a few points
+    // to settle, and its loop starts after a cycle that's at least 64 points long and lasts 2048 points or so.
+    uint32_t loop_start = 0;
+    uint32_t loop_end = 0;
+    if (synth == Synth::kPulse)
+    {
+        const int speed = rom_.U8(wave.Data() + 3);
+        const uint32_t frames = speed ? 256 / uint32_t(std::gcd(speed, 256)) : 1;
+        const double target = double(frames) * info_.samples_per_frame;
+        loop_end =
+            cycle > 0 ? uint32_t(std::lround(std::max(1.0, std::round(target / cycle)) * cycle)) : uint32_t(target);
+    }
+    else
+    {
+        const double settle = cycle > 0 ? std::ceil(64.0 / cycle) * cycle : 64.0;
+        const double length = cycle > 0 ? std::max(1.0, std::round(2048.0 / cycle)) * cycle : 2048.0;
+        loop_start = uint32_t(std::lround(settle));
+        loop_end = uint32_t(std::lround(settle + length));
+    }
+
+    Sf2Sample s;
+    s.name = Name(synth == Synth::kPulse ? "Pulse" : "Saw", voice.wave) + " " + std::to_string(key);
+    s.pcm = RenderSynth(rom_, info_, synth, wave.Data(), frequency, loop_end);
+    for (uint32_t i = 0; i < kLoopGuard; i++)
+    {
+        s.pcm.push_back(s.pcm[loop_start + i % (loop_end - loop_start)]);
+    }
+    s.rate = uint32_t(info_.mix_rate);
+    s.root_key = uint8_t(key);
+    s.loop = true;
+    s.loop_start = loop_start;
+    s.loop_end = loop_end;
+
+    file_.samples.push_back(s);
+    synth_samples_[cache_key] = int(file_.samples.size()) - 1;
+
+    return synth_samples_[cache_key];
+}
+
+bool SoundfontBuilder::AddZone(Sf2Instrument& instrument, const Voice& voice, int low, int high, int fixed_key,
+                               int rhythm_pan)
+{
+    // A sample voice with no attack never gets louder than silence. A pulse or saw synth voice gets a zone for each key
+    // it plays, as notes play them.
+    const int psg = voice.PsgChannel();
+    const Synth synth = SynthOf(rom_, info_, voice);
+    if (psg == 0 && voice.attack == 0)
+    {
+        return false;
+    }
+    if (synth == Synth::kPulse || synth == Synth::kSaw)
+    {
+        return true;
+    }
+
+    const int sample = SampleFor(voice);
+    if (sample < 0)
+    {
+        return false;
+    }
+
+    const Sf2Sample& s = file_.samples[size_t(sample)];
     std::vector<Part> parts;
     if (psg == 0 && (voice.type & kVoiceFixed))
     {
@@ -663,67 +969,9 @@ void SoundfontBuilder::AddZone(Sf2Instrument& instrument, const Voice& voice, in
         }
     }
 
-    // The driver's master volume scales its sample channels, and the PSG channels are quieter than a sample channel at
-    // its full level.
-    const Sf2Envelope env = EnvelopeFor(voice);
-    const int attenuation = psg ? kPsgAttenuation : Centibels((info_.master_volume + 1) / 16.0);
-    for (const Part& part : parts)
-    {
-        Sf2Zone z;
-        z.gens.push_back(Sf2Gen::Range(sf2gen::kKeyRange, part.low, part.high));
-        if (rhythm_pan)
-        {
-            z.gens.push_back(Sf2Gen::Value(sf2gen::kPan, std::clamp(rhythm_pan * 500 / 127, -500, 500)));
-        }
+    AddParts(info_, voice, sample, s.loop, parts, rhythm_pan, instrument);
 
-        // Envelope phases at their defaults are left out.
-        const std::pair<uint16_t, int> phases[] = {{sf2gen::kAttackVolEnv, env.attack},
-                                                   {sf2gen::kDecayVolEnv, env.decay},
-                                                   {sf2gen::kReleaseVolEnv, env.release}};
-        for (const auto& [op, value] : phases)
-        {
-            if (value != kInstant)
-            {
-                z.gens.push_back(Sf2Gen::Value(op, value));
-            }
-        }
-        if (env.sustain)
-        {
-            z.gens.push_back(Sf2Gen::Value(sf2gen::kSustainVolEnv, env.sustain));
-        }
-        if (attenuation)
-        {
-            z.gens.push_back(Sf2Gen::Value(sf2gen::kInitialAttenuation, attenuation));
-        }
-
-        // A tuning of a semitone or more goes partly into the coarse tune, since the fine tune only reaches 99 cents.
-        const int cents = int(std::lround(part.cents));
-        if (cents / 100)
-        {
-            z.gens.push_back(Sf2Gen::Value(sf2gen::kCoarseTune, std::clamp(cents / 100, -120, 120)));
-        }
-        if (cents % 100)
-        {
-            z.gens.push_back(Sf2Gen::Value(sf2gen::kFineTune, cents % 100));
-        }
-        if (part.fixed)
-        {
-            z.gens.push_back(Sf2Gen::Value(sf2gen::kScaleTuning, 0));
-        }
-        if (s.loop)
-        {
-            z.gens.push_back(Sf2Gen::Value(sf2gen::kSampleModes, 1));
-        }
-        z.gens.push_back(Sf2Gen::Value(sf2gen::kSampleId, sample));
-
-        // The pitch wheel doesn't move a fixed-pitch sample. This takes the place of the default modulator from it.
-        if (psg == 0 && (voice.type & kVoiceFixed))
-        {
-            z.mods.push_back({0x020E, sf2gen::kFineTune, 0, 0x0010, 0});
-        }
-
-        instrument.zones.push_back(z);
-    }
+    return true;
 }
 
 } // namespace supergbamidi::mp2k
