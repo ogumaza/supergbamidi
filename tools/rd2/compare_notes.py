@@ -211,15 +211,16 @@ def bend_at(bends, ch, t):
 
 
 def driver_info(tool, rom_path):
-    """Returns the pitch and frequency tables' addresses from supergbamidi's --info report, and the frames that each
-    sequence it lists lasts, from its length in minutes and seconds."""
+    """Returns the pitch and frequency tables' addresses and the table of banks from supergbamidi's --info report, and
+    the frames that each sequence it lists lasts, from its length in minutes and seconds."""
     text = subprocess.run([tool, '--driver', 'rd2', '--info', rom_path], capture_output=True, encoding='utf-8',
                           check=True).stdout
     pitch = int(re.search(r'pitch table: 0x([0-9A-F]+)', text).group(1), 16)
     frequency = int(re.search(r'frequency table: 0x([0-9A-F]+)', text).group(1), 16)
+    banks = re.search(r'banks: 0x([0-9A-F]+) \((\d+)\)', text)
     lengths = {int(m.group(1)): math.ceil((int(m.group(2)) * 60 + float(m.group(3))) * FRAME_RATE)
                for m in re.finditer(r'^\s+(\d+)\s+0x[0-9A-F]{8}\s+\d+\s+(\d+):(\d+\.\d+)', text, re.M)}
-    return (pitch, frequency), lengths
+    return (pitch, frequency), (int(banks.group(1), 16), int(banks.group(2))), lengths
 
 
 class Rom:
@@ -275,9 +276,12 @@ def zone_cents(zone, key, rate):
     return 1200 * math.log2(played / rate)
 
 
-def check_song(rom, raw_rom, tables, song, midi_path, sf2_path, frames_limit):
-    """Returns the notes checked and the problems found."""
+def check_song(rom, raw_rom, tables, bank_starts, song, midi_path, sf2_path, frames_limit):
+    """Returns the notes checked and the problems found. A note whose region is in `bank_starts` is one that its
+    instrument has no region for, which the driver plays from its bank's table of offsets and the conversion leaves
+    out."""
     notes, bends, ranges, length = read_midi(midi_path)
+
     sf = SoundFont(sf2_path)
     frames = min(frames_limit, int(length * FRAME_RATE) + 2)
     played = driver_emu.notes(raw_rom, song, frames)
@@ -289,55 +293,72 @@ def check_song(rom, raw_rom, tables, song, midi_path, sf2_path, frames_limit):
     for n in notes:
         by_channel.setdefault((n['channel'], n['key']), []).append(n)
 
+    def note_end(f, i):
+        """Returns the frame where the voice of note `i` of frame `f` stops playing it: a release, a stop, or another
+        note on the voice. A run that stops before the note ends doesn't say where it ends, and gives None."""
+        started, voices, _ = played[f]
+        v = started[i]['voice']
+
+        # A note whose voice another note takes in the same frame ends at once, and isn't heard.
+        if voices[v] is None or any(later['voice'] == v for later in started[i + 1:]):
+            return f
+        for g in range(f + 1, len(played)):
+            later = played[g]
+            if any(n['voice'] == v for n in later[0]) or later[1][v] is None or later[1][v][0] != 1:
+                return g
+        return len(played) if len(played) >= end_frame else None
+
     # Each of the driver's notes, from the frame it starts to the frame its voice releases it, stops or plays another.
     checked = 0
+    merged = {}  # (frame, track, key) -> the MIDI note of the first note that a track starts on the key in the frame
     for f, (started, voices, _) in enumerate(played):
         for i, note in enumerate(started):
-            if note['frame'] >= end_frame - MARGIN or note['velocity'] == 0:
+            if note['frame'] >= end_frame - MARGIN or note['velocity'] == 0 or note['region'] in bank_starts:
                 continue
             v = note['voice']
-            voice = voices[v]
             key, note_pitch = expected(rom, tables, note)
-
-            # A note whose voice another note takes in the same frame ends at once, and isn't heard.
-            taken = any(later['voice'] == v for later in started[i + 1:])
             channel = note['track'] if note['track'] < DRUM_CHANNEL else note['track'] + 1
             velocity = min(127, max(1, round(127 * math.sqrt(note['velocity'] / 127))))
 
-            # The note ends where its voice stops playing it: a release, a stop, or another note on the voice. A run
-            # that stops before the note ends doesn't say where it ends.
-            end = f if taken or voice is None else None
-            for g in range(f + 1, len(played) if end is None else 0):
-                later = played[g]
-                if any(n['voice'] == v for n in later[0]) or later[1][v] is None or later[1][v][0] != 1:
-                    end = g
-                    break
-            if end is None:
-                end = len(played) if len(played) >= end_frame else None
-
-            # The MIDI note: on the track's channel, with the key, starting in the frame or the one before.
+            # The MIDI note: on the track's channel, with the key, starting in the frame or the one before. Notes that a
+            # track starts on the same key and tick are one MIDI note, the first's, which lasts as long as the longest
+            # of them, so where the MIDI file has fewer notes than the driver starts on the key in the frame, the
+            # first takes the ends of the others, and they need only their bends checked against it.
+            group = [j for j, n in enumerate(started) if n['track'] == note['track'] and n['velocity'] and
+                     n['region'] not in bank_starts and expected(rom, tables, n)[0] == key]
             candidates = [n for n in by_channel.get((channel, key), ())
                           if not n['matched'] and f - 1 - MARGIN < n['on'] * FRAME_RATE <= f + MARGIN]
-            if not candidates:
+            end = note_end(f, i)
+            midi_end = end  # where the MIDI note has to end, if this note decides it
+            check_end = True
+            if candidates:
+                m = candidates[0]
+                m['matched'] = True
+                if i == group[0] and len(candidates) < len(group):
+                    ends = [note_end(f, j) for j in group]
+                    midi_end = None if None in ends else max(ends)
+                    merged[(f, note['track'], key)] = m
+                if m['velocity'] != velocity:
+                    problems.append('frame %d: track %d key %d has velocity %d, not %d' %
+                                    (f, note['track'], key, m['velocity'], velocity))
+            elif (f, note['track'], key) in merged:
+                m = merged[(f, note['track'], key)]
+                check_end = False
+            else:
                 problems.append('frame %d: track %d plays key %d, which the MIDI file has no note for' %
                                 (f, note['track'], key))
                 continue
-            m = candidates[0]
-            m['matched'] = True
             checked += 1
-            if m['velocity'] != velocity:
-                problems.append('frame %d: track %d key %d has velocity %d, not %d' %
-                                (f, note['track'], key, m['velocity'], velocity))
 
             # Its end: within a frame of the voice's, or earlier where the MIDI file has to end it.
             off = m['off'] * FRAME_RATE
             cut = off >= end_frame - MARGIN or any(
                 o is not m and o['on'] <= m['off'] + 1e-9 and o['on'] >= m['on'] - 1e-9 and o['off'] > m['off']
                 for o in by_channel.get((channel, key), ()))
-            if end is not None and not (end - 1 - MARGIN <= off <= end + 1 + MARGIN) and not (
-                    cut and off < end + 1 + MARGIN):
+            near = midi_end is not None and midi_end - 1 - MARGIN <= off <= midi_end + 1 + MARGIN
+            if check_end and midi_end is not None and not near and not (cut and off < midi_end + 1 + MARGIN):
                 problems.append('frame %d: track %d key %d ends at frame %.2f, where the driver ends it at %d' %
-                                (f, note['track'], key, off, end))
+                                (f, note['track'], key, off, midi_end))
 
             # Its zone in the SoundFont, and the zone's pitch.
             zones = [z for z in sf.presets.get((m['bank'], m['program']), ()) if z['low'] <= key <= z['high']]
@@ -394,7 +415,8 @@ def main():
 
     raw_rom = load_rom(a.rom)
     rom = Rom(raw_rom)
-    tables, lengths = driver_info(a.supergbamidi, a.rom)
+    tables, (bank_table, bank_count), lengths = driver_info(a.supergbamidi, a.rom)
+    bank_starts = {bank_table + rom.u32(bank_table + 4 * i) for i in range(bank_count)}
     midis = dict(conversion.midi_files(a.folder, 'rd2'))
     if not midis:
         raise SystemExit('found no MIDI files to check in %s' % a.folder)
@@ -409,7 +431,7 @@ def main():
                 continue
             count += 1
             played = sum(1 for started, _, _ in driver_emu.notes(raw_rom, song, min(a.frames, lengths[song] + 2))
-                         for note in started if note['velocity'])
+                         for note in started if note['velocity'] and note['region'] not in bank_starts)
             if played:
                 failed += 1
                 print('sequence %d: no MIDI file, but the driver plays %d notes' % (song, played))
@@ -417,7 +439,8 @@ def main():
                 print('sequence %d: no MIDI file, and the driver plays no notes' % song)
             continue
         count += 1
-        checked, problems = check_song(rom, raw_rom, tables, song, midi, midi.with_suffix('.sf2'), a.frames)
+        checked, problems = check_song(rom, raw_rom, tables, bank_starts, song, midi, midi.with_suffix('.sf2'),
+                                       a.frames)
         total += checked
         if problems:
             failed += 1

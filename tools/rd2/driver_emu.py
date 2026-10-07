@@ -18,7 +18,7 @@ calls the driver makes are emulated), and captures what the driver does:
     driver_emu.py ROM render SEQUENCE FRAMES OUT.wav
 
 The routine and RAM addresses are chosen by the ROM's game code. Those of The Legend of Zelda: A Link to the Past
-(AZLE) are built in. Another game needs its own values; see GAMES and docs/rd2.md.
+(AZLE) and Super Mario Advance 2 (AA2E) are built in. Another game needs its own values; see GAMES and docs/rd2.md.
 """
 import argparse
 import struct
@@ -26,7 +26,8 @@ import sys
 import wave
 from pathlib import Path
 
-from unicorn import UC_ARCH_ARM, UC_HOOK_CODE, UC_HOOK_INTR, UC_HOOK_MEM_UNMAPPED, UC_HOOK_MEM_WRITE, UC_MODE_ARM, Uc
+from unicorn import (UC_ARCH_ARM, UC_HOOK_CODE, UC_HOOK_INTR, UC_HOOK_MEM_UNMAPPED, UC_HOOK_MEM_WRITE,
+                     UC_MEM_READ_UNMAPPED, UC_MODE_ARM, Uc)
 from unicorn.arm_const import (UC_ARM_REG_CPSR, UC_ARM_REG_LR, UC_ARM_REG_PC, UC_ARM_REG_R0, UC_ARM_REG_R1,
                                UC_ARM_REG_R2, UC_ARM_REG_R3, UC_ARM_REG_R4, UC_ARM_REG_R6, UC_ARM_REG_R7,
                                UC_ARM_REG_SP)
@@ -39,12 +40,8 @@ RETURN_TRAP = 0x0F000000
 # The PSG's registers, whose writes the trace lists: NR10 to NR44, the wave RAM, and NR50 to NR52.
 PSG = (0x04000060, 0x040000A0)
 
-# The music player, which the driver's play request starts a sequence on.
-MUSIC_PLAYER = 0x12
-
 VOICE_SIZE = 0x78
 TRACK_SIZE = 0x54
-PLAYER_SIZE = 0x48
 
 
 class Addresses:
@@ -67,9 +64,44 @@ class Addresses:
     note_voice = 0x0812B8A2  # in the note on, once it has a voice: r4 = the voice, r6 = the note's region, r7 = the
                              # note its pitch is for
     note_done = 0x0812B964   # in the note on, once it has set the voice's sample or PSG setting: r4 = the voice
+    active_end = 0           # what the last voice in the mixer's list links to: 0, or a node that ends the list
+    music_player = 0x12      # the player that the game plays its music on
+    player_size = 0x48       # a player's record, and the offset of its byte that is 1 while it plays
+    player_playing = 0x42
+    voice_note = 0x09        # the offsets of a voice's note, before the transpose, and its velocity
+    voice_velocity = 0x0A
 
 
-GAMES = {b'AZLE': Addresses}
+class AddressesAA2E(Addresses):
+    """AA2E (Super Mario Advance 2: Super Mario World, US), with the older revision of the driver. Its players have
+    no second volume, its voices keep the velocity where A Link to the Past's keep the note, and its lists of voices
+    run between nodes at their ends."""
+    sound_init = 0x0809B258
+    request = 0x0809D840
+    commit = 0x0809D82C
+    requests = 0x0809DCA8
+    vblank = 0x0809BA74
+    frame = 0x0809BA80
+    voices = 0x03001878
+    active = 0x03000120      # the first voice of the mixer's list: the next voice of the node at its start
+    active_end = 0x0300012C  # the node at its end
+    tracks = 0x03000D38
+    players = 0x03001DA0
+    fixed_region = 0x030000A8
+    outputs = 0x03000090
+    output_index = 0x030000A2
+    note_on = 0x0809C900
+    note_key = 0x0809C93E
+    note_voice = 0x0809C9F6
+    note_done = 0x0809CAB8
+    music_player = 0x13
+    player_size = 0x44
+    player_playing = 0x41
+    voice_note = None
+    voice_velocity = 0x09
+
+
+GAMES = {b'AZLE': Addresses, b'AA2E': AddressesAA2E}
 
 
 def addresses_for(rom):
@@ -99,6 +131,12 @@ class DriverEmulator:
         self.call(self.addr.sound_init)
 
     def _unmapped(self, uc, access, address, size, value, user):
+        # A region that plays an instrument the bank doesn't have reads its sample from past the sample set's table, and
+        # the address it finds there can be outside the GBA's memory, where the hardware reads open bus. supergbamidi
+        # reads 0 there, and so does the emulator.
+        if access == UC_MEM_READ_UNMAPPED:
+            uc.mem_map(address & ~0xFFF, 0x1000 if (address & 0xFFF) + size <= 0x1000 else 0x2000)
+            return True
         raise SystemExit('the driver accessed unmapped memory at %08x' % address)
 
     def _io_write(self, uc, access, address, size, value, user):
@@ -154,7 +192,7 @@ class DriverEmulator:
         """Asks for a sequence on the music player, as the game's play routine does. The driver starts it in the next
         frame."""
         self.writes = []
-        self.call(self.addr.request, (MUSIC_PLAYER, sequence))
+        self.call(self.addr.request, (self.addr.music_player, sequence))
         self.call(self.addr.commit)
         return self.writes
 
@@ -168,23 +206,25 @@ class DriverEmulator:
 
     def track_number(self, track):
         """Returns the music player's number for the track at `track`, or -1."""
-        a = self.addr
         for n in range(10):
-            if self.u32(a.players + PLAYER_SIZE * MUSIC_PLAYER + 8 + 4 * n) == track:
+            if self.u32(self.player() + 8 + 4 * n) == track:
                 return n
         return -1
 
     def mute_tracks_except(self, numbers):
         """Mutes the music player's tracks other than `numbers`, with each track's mute flag, which stops it starting
         notes."""
-        a = self.addr
         for n in range(10):
-            track = self.u32(a.players + PLAYER_SIZE * MUSIC_PLAYER + 8 + 4 * n)
+            track = self.u32(self.player() + 8 + 4 * n)
             if track:
                 self.uc.mem_write(track + 0x4A, bytes([0 if n in numbers else 1]))
 
+    def player(self):
+        """Returns the address of the music player's record."""
+        return self.addr.players + self.addr.player_size * self.addr.music_player
+
     def playing(self):
-        return self.read(self.addr.players + PLAYER_SIZE * MUSIC_PLAYER + 0x42, 1)[0] != 0
+        return self.read(self.player() + self.addr.player_playing, 1)[0] != 0
 
     def voice_lines(self):
         """Returns each voice's state as the trace prints it, for the voices in use, and the order of the DirectSound
@@ -207,13 +247,14 @@ class DriverEmulator:
             region = 'fixed' if region == a.fixed_region else '%08x' % region
             lines.append('v%d %d %d t%d p%d n%d v%d %x %x vol%d f%d e%d %d:%d lfo%d,%d sl%d,%d,%d,%d,%d '
                          'env%d,%d,%d,%d,%d %s r%d s%08x pos%x x%x' % (
-                             i, u8(0x01), u8(0x00), track, u8(0x08), u8(0x09), u8(0x0A), u32(0x0C), u32(0x10),
+                             i, u8(0x01), u8(0x00), track, u8(0x08), u8(a.voice_note) if a.voice_note else 0,
+                             u8(a.voice_velocity), u32(0x0C), u32(0x10),
                              u32(0x14), u16(0x18), u8(0x1A), u8(0x1B), u8(0x1C), u32(0x20), u32(0x24), u32(0x2C),
                              u32(0x30), s32(0x34), s32(0x38), s32(0x3C), s32(0x40), s32(0x44), u16(0x48), s16(0x4A),
                              u8(0x50), region, u8(0x58), u32(0x5C), u32(0x60), u32(0x64)))
         order = []
         v = self.u32(a.active)
-        while v and len(order) < 7:
+        while v and v != a.active_end and len(order) < 7:
             order.append((v - a.voices) // VOICE_SIZE)
             v = self.u32(v + 0x6C)
         lines.append('active' + ''.join(' v%d' % i for i in order))
@@ -300,7 +341,7 @@ def notes(rom, sequence, frames):
             voices.append((raw[1], struct.unpack_from('<I', raw, 0x10)[0]))
         newest = []
         for n in range(10):
-            track = emu.u32(a.players + PLAYER_SIZE * MUSIC_PLAYER + 8 + 4 * n)
+            track = emu.u32(emu.player() + 8 + 4 * n)
             head = emu.u32(track + 0x0C) if track else 0
             newest.append((head - a.voices) // VOICE_SIZE if head else -1)
         result.append((log.notes, voices, newest))
@@ -334,8 +375,8 @@ def dump(rom, sequence, frames):
         emu.frame()
     a = emu.addr
     for p in range(20):
-        raw = emu.read(a.players + PLAYER_SIZE * p, PLAYER_SIZE)
-        if raw[0x42]:
+        raw = emu.read(a.players + a.player_size * p, a.player_size)
+        if raw[a.player_playing]:
             print('player %2d: %s' % (p, raw.hex()))
     for t in range(24):
         raw = emu.read(a.tracks + TRACK_SIZE * t, TRACK_SIZE)

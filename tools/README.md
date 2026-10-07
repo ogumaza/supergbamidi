@@ -31,8 +31,8 @@ scripts, and the `compare_notes.py` scripts apart from Rare's and MP2K's, run
 driver's files.
 
 Driver-specific scripts are in `tools/konami/`, `tools/rare/`, `tools/quintet/`,
-`tools/rd2/`, `tools/mp2k/` and `tools/brownie/`. Run the commands below from
-the repository root.
+`tools/rd2/`, `tools/mp2k/`, `tools/brownie/` and `tools/krawall/`. Run the
+commands below from the repository root.
 
 ## Konami's driver
 
@@ -175,10 +175,13 @@ envelope phase and level, instrument, and its position in the sample to a
 `compare_notes.py` checks every note in a folder of MIDI files against what the
 driver plays on the same frame: the note's start and release, its velocity, the
 channel's volume, the sample that the SoundFont plays for it, and its pitch on
-every frame, from the SoundFont zone's tuning and the channel's pitch bend. The
-MIDI file keeps each event on its own tick, where the driver plays it on a
-frame, so it allows a frame and a half of difference either way. It lists the
-differences and the largest pitch deviation.
+every frame, from the SoundFont zone's tuning and the channel's pitch bend. It
+also checks the zone's envelope against the one that supergbamidi works out
+from the instrument and the settings from controllers 20-23 (in the revision
+that has them) that the driver's RAM held as each phase started. The MIDI file
+keeps each event on its own tick, where the driver plays it on a frame, so it
+allows a frame and a half of difference either way. It lists the differences
+and the largest pitch deviation.
 
 `driver_emu.py render` writes the driver's mono output at its own rate, and
 `--channels` renders only the notes of the MIDI channels it names. The other
@@ -210,9 +213,9 @@ code to IWRAM with a sequence that's the same in every revision (see
 `driver_emu.py` picks the routine and RAM addresses by the ROM's game code.
 Those of *Donkey Kong Country* (`A5NE`), *Sabre Wulf* (`AWUE`), *It's Mr.
 Pants* (`BPIE`), *Banjo-Kazooie: Grunty's Revenge* (`BKZX`), *Donkey Kong
-Country 2* (`B2DE`) and *Banjo-Pilot* (`BAJE`) are built in. For another game,
-find the same routines, starting from the patterns in `docs/rare.md`, and add
-them to `GAMES`:
+Country 2* (`B2DE`), *Banjo-Pilot* (`BAJE`) and *Donkey Kong Country 3*
+(`BDQE`) are built in. For another game, find the same routines, starting from
+the patterns in `docs/rare.md`, and add them to `GAMES`:
 
 * `init`, `request` and `frame` are the init, the routine that requests a tune
   and the per-frame routine. In each of the games above, the request routine
@@ -224,7 +227,8 @@ them to `GAMES`:
   buffer flag, the two words that hold the addresses of the output buffer's
   halves, and the samples a frame.
 * `channel_volume`, the channels' controller 7 values, comes from the
-  controller handler.
+  controller handler, and so does `envelope_settings` in a revision with
+  controllers 20-23: the 4 bytes for each channel that they set.
 * `slots_per_channel` and `fx_count` give the note slots each channel has and
   the number of sound effect records, if they aren't 6 and 5. The table at the
   start of `docs/rare.md` gives them for each checked game.
@@ -352,11 +356,14 @@ each voice from frame to frame. Each note the driver plays has to be in the
 MIDI file, and the other way round: on its track's channel, with the key and
 velocity the conversion gives it, starting in the frame the driver starts it in
 or the frame before, and ending within a frame of the driver's release or stop
-of its voice. Its SoundFont zone has to play the driver's sample at the pitch
-the driver plays it at, to within a cent, and while it's the newest note of its
-track, the MIDI file's pitch bend has to follow its voice's pitch, frame by
-frame. A sequence named in `--songs` that has no MIDI file mustn't play any
-notes.
+of its voice. Notes that a track starts on the same key at the same time are
+one MIDI note, the first's, which ends with the last of them, and a note that
+its instrument has no region for, which the driver plays from its bank's table
+of offsets, mustn't be in the MIDI file. Each note's SoundFont zone has to play
+the driver's sample at the pitch the driver plays it at, to within a cent, and
+while it's the newest note of its track, the MIDI file's pitch bend has to
+follow its voice's pitch, frame by frame. A sequence named in `--songs` that has
+no MIDI file mustn't play any notes.
 
 `driver_emu.py render` writes the mixer's stereo output at 10512 Hz: the 8-bit
 samples the driver sends to the FIFOs, without the PSG. `--tracks` mutes the
@@ -384,8 +391,9 @@ copies to IWRAM. From there:
    the driver's renders for timing and level.
 
 `driver_emu.py` picks the addresses by the ROM's game code. Those of *The
-Legend of Zelda: A Link to the Past & Four Swords* (`AZLE`) are built in. For
-another game, add an entry to `GAMES` with:
+Legend of Zelda: A Link to the Past & Four Swords* (`AZLE`) and *Super Mario
+Advance 2: Super Mario World* (`AA2E`), which has an older revision of the
+driver, are built in. For another game, add an entry to `GAMES` with:
 
 * `sound_init`: the game's routine that calls the driver's init with its
   settings.
@@ -402,6 +410,20 @@ another game, add an entry to `GAMES` with:
 * `note_on`, `note_key`, `note_voice` and `note_done`: the note on routine, and
   the points in it where it has added the transpose, found a voice, and set the
   voice's sample.
+* `active_end`, `music_player`, `player_size`, `player_playing`, `voice_note`
+  and `voice_velocity`, where the game's revision of the driver differs from A
+  Link to the Past's: what the last voice of the mixer's list links to, the
+  player the game plays its music on, the size of a player's record and the
+  offset of its byte that is 1 while it plays, and the offsets of a voice's note
+  and velocity. In the Super Mario Advance 2 revision, the mixer's list ends
+  with a node, the music player is 0x13, a player's record is 0x44 bytes, and a
+  voice keeps the velocity at 0x09 and no note.
+
+The emulator reads 0 from memory outside the GBA's, as `supergbamidi` does,
+where a region read from a bank's table of offsets can find the address of its
+sample. `test_song.py` pads a ROM that ends before its free
+space with 0xFF, and writes the test sequence in the form of the game's
+revision.
 
 ## MP2K
 
@@ -622,3 +644,100 @@ note starts each timer from the routine's `r7`.
 
 The emulator starts each call with `r0`-`r12` at 0, so that what `ED` writes
 from `r5` is the same as in the model.
+
+## Krawall
+
+| Script | Description |
+|---|---|
+| `driver_emu.py` | runs the game's build of Krawall under the Unicorn ARM emulator: the mixer's variables, the player's record, each of the module's channels and each mixer channel, and a render of its output |
+| `compare_trace.py` | diffs `supergbamidi --trace` against the emulated player, frame by frame, for every module |
+| `compare_notes.py` | checks a conversion's MIDI files and SoundFonts against what the emulated player plays, tick by tick |
+| `test_song.py` | writes a copy of a game with hand-made modules for the parts of the player that the game's modules may not use |
+
+### Checking supergbamidi against Krawall
+
+```sh
+python tools/krawall/compare_trace.py rom.gba build/supergbamidi -j 4  # the model: every module, 12000 frames
+build/supergbamidi -q -o rom rom.gba                                   # convert every module into rom/
+python tools/krawall/compare_notes.py rom.gba build/supergbamidi rom   # the conversion, tick by tick
+python tools/krawall/test_song.py rom.gba test.gba                     # modules with every effect
+python tools/krawall/compare_trace.py test.gba build/supergbamidi --songs N-M  # the last 3 that --info lists
+python tools/krawall/driver_emu.py rom.gba render ADDRESS 3000 ref.wav  # a module's address, from --info
+```
+
+`compare_trace.py` runs `supergbamidi --trace` and the game's code side by side,
+and compares, frame by frame, the mixer's variables (the master volumes, the
+mixer's quality settings, the sound timer's step and count, the music's volume
+and the count of plays), the player's record, each of the module's channels and
+each mixer channel, in hex as Krawall keeps them in RAM, whenever they change.
+It reports the first difference in each module that has one. `-j` compares
+several modules at once.
+
+`compare_notes.py` runs the game's code and reads the module channels after
+each player tick, from a hook where the mixer's worker resumes. For each
+active mixer channel still owned by the module channel's last note, it
+records the sample, position, step and levels, plus position changes made by
+`kramSetPos()`. It derives notes from that state in the same way as the
+converter, then checks the MIDI and SoundFont tick by tick. Note starts and
+ends must be within a millisecond on the correct MIDI channel. The preset
+must match the sample data, loop and start offset. Pitch must be within 5
+cents, and CC10 and CC11 within one step of the values needed for the
+recorded levels.
+
+`test_song.py` adds three modules after the game's data, which the module scan
+lists after the game's modules: one with Amiga periods and every effect of the
+effect column, the same patterns with S3M's fast volume slides, and one with
+linear frequencies, XM instruments with envelopes, fades and vibratos, and the
+volume column's effects. They play three samples of their own, which loop
+forwards, back and forth or not at all, and the copy points the player's
+literals at new tables of samples and instruments, so that the game's modules
+play as before.
+
+`driver_emu.py render` writes the mixer's 8-bit stereo output at the mixer's
+rate. It names a module by the address of its header, which `--info` lists.
+
+### Working out Krawall
+
+The player is Thumb code in ROM, and the mixer is ARM code in IWRAM:
+
+1. **Find the entry points.** The library's version string is in the ROM, and
+   the game's sound init calls `kragInit()`, `kramSetMasterVol()` and
+   `kramQualityMode()`, which lead to the timers' setup and the sound timer.
+   The game's routine that starts a module calls `krapPlay()` with a module
+   from its table, and its VBlank handler calls the worker, `kramWorker()`,
+   in IWRAM. The game's start-up code copies the library's IWRAM code and data,
+   and its EWRAM data, from the ROM.
+2. **Disassemble.** `gbadis.py` was run from `krapPlay()` and the player's
+   tick, and with `--copy` from the worker and the mixer's routines at their
+   addresses in IWRAM. The tables of effects gave each effect's routines.
+3. **Model and compare.** The player, the effects and the mixer's progress
+   through each sample were reimplemented from that reading, and compared with
+   the game's code running in `driver_emu.py`, until every byte of the records
+   matched, then checked with `test_song.py`'s modules for the parts that the
+   game's modules may not use.
+4. **Check the conversion.** The converted MIDI files and SoundFonts were
+   checked tick by tick with `compare_notes.py`, and rendered and compared with
+   the game's output.
+
+`driver_emu.py` picks the addresses by the ROM's game code. Those of *Digimon
+Racing* (`BDGE`) are built in. For another game with the same build, add an
+entry to `GAMES` with:
+
+* `iwram` and `ewram`: the ROM's copies of the library's IWRAM code and data
+  and of its EWRAM data, which the game's start-up code makes, as (source,
+  size).
+* `sound_init`, `play`, `worker` and `dma_address`: the game's sound init, which
+  calls `kragInit()`, `kramSetMasterVol()` and `kramQualityMode()`,
+  `krapPlay()`, `kramWorker()` and `getDmaAddress()`, which the harness replaces
+  with a routine that hands the worker the same two buffers and a frame's
+  samples each time.
+* `after_tick` and `set_pos`: where the worker goes on after a tick, and
+  `kramSetPos()`, for `compare_notes.py`.
+* `frame_samples`, `player`, `mixer`, `master`, `timer`, `music_volume` and
+  `plays`: the samples of a frame, and the addresses of the player's record,
+  the mixer's channels, the master volumes, the sound timer's step and count,
+  the music's volume and the count of plays.
+
+`test_song.py` also needs, in its `GAMES`, the game's table of samples and its
+count, and the player's literals that give the tables of samples and
+instruments.

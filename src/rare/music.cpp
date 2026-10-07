@@ -75,12 +75,12 @@ public:
     }
 
     // The tunes that use the first tune's program map and instruments have their presets in bank 0, and each other pair
-    // gets a bank of its own: 1, 2 and so on, past the drum channel's bank 128.
+    // gets a bank of its own: 1, 2 and so on, past the drum channel's bank 128. The presets for notes with envelope
+    // settings go in the banks after those.
     void ShareSoundfont() override
     {
-        shared_ = std::make_unique<SoundfontBuilder>(rom_, info_);
-
         std::map<std::pair<uint32_t, uint32_t>, int> banks;
+        int next = 0;
         for (int s = 0; s < info_.tune_count; s++)
         {
             TuneHeader h;
@@ -88,12 +88,14 @@ public:
             const auto key = std::make_pair(h.program_map, h.instruments);
             if (!banks.count(key))
             {
-                const int next = int(banks.size());
-                banks[key] = next < 128 ? next : next + 1;
+                next += next == kDrumBank ? 1 : 0;
+                banks[key] = next++;
             }
 
             banks_.push_back(banks[key]);
         }
+
+        shared_ = std::make_unique<SoundfontBuilder>(rom_, info_, next);
     }
 
     bool WriteSharedSoundfont(const std::string& path, std::string& error) override

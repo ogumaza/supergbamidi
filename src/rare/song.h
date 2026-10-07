@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <compare>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -41,9 +42,14 @@ enum Command : uint8_t
     kCommandCount
 };
 
-// The controllers the driver reacts to.
+// The controllers the driver reacts to. Controllers 20-23 set a channel's envelope only in the revision of Donkey Kong
+// Country 3.
 constexpr int kCtrlModulation = 1;
 constexpr int kCtrlVolume = 7;
+constexpr int kCtrlAttack = 20;
+constexpr int kCtrlDecay = 21;
+constexpr int kCtrlSustain = 22;
+constexpr int kCtrlRelease = 23;
 constexpr int kCtrlLoopStart = 102;
 constexpr int kCtrlLoopEnd = 103;
 constexpr int kCtrlMonoOn = 126;
@@ -146,6 +152,25 @@ struct Instrument
 
 // Reads the instrument at `address`. Returns false if it isn't in the ROM.
 bool ReadInstrument(const Rom& rom, uint32_t address, Instrument& instrument);
+
+// The settings that controllers 20-23 give a channel's notes in place of their instruments', in the revision that reads
+// them: the attack's steps, the fade table entries of the decay and the release, and the sustain level in 1/128ths of
+// the full level. A setting from 0x80 up leaves the instrument's.
+struct EnvelopeSettings
+{
+    auto operator<=>(const EnvelopeSettings&) const = default;
+
+    // Returns true if every setting leaves the instrument's.
+    bool None() const
+    {
+        return attack >= 0x80 && decay >= 0x80 && sustain >= 0x80 && release >= 0x80;
+    }
+
+    uint8_t attack = 0xFF;
+    uint8_t decay = 0xFF;
+    uint8_t sustain = 0xFF;
+    uint8_t release = 0xFF;
+};
 
 // Returns true if a sample instrument's sample is in the ROM and its loop fits in it, with the byte after the end that
 // the driver's interpolation reads.

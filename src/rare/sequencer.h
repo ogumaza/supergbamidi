@@ -58,6 +58,7 @@ struct ChannelState
     uint32_t modulation = 0; // controller 1
     uint32_t vibrato_phase = 0;
     bool mono = false;
+    EnvelopeSettings envelope; // a program change sets them back
 };
 
 // A track action used by the MIDI conversion.
@@ -72,19 +73,21 @@ struct Action
         kVolume,
         kBend,
         kTempo,
+        kEnvelope, // a phase of a slot's envelope started with settings from controllers 20-23
     };
 
     Kind kind = kNoteOn;
     uint8_t track = 0;
     uint8_t channel = 0;
-    uint8_t a = 0, b = 0;    // key and velocity, program, controller value
-    uint32_t value = 0;      // tempo
-    uint64_t tick = 0;       // the track's tick count when it happened, counting every pass through a loop
-    uint32_t frame = 0;      // the frame it happened on
-    int slot = -1;           // kNoteOn: the slot the note plays in; kNoteOff: the slot it released, or -1
-    bool playable = true;    // kNoteOn: false if its instrument has no sample for the key, so it makes no sound
-    int program = -1;        // kNoteOn: the channel's program
-    uint32_t instrument = 0; // kNoteOn, kProgram: the channel's instrument
+    uint8_t a = 0, b = 0;      // key and velocity, program, controller value
+    uint32_t value = 0;        // tempo
+    uint64_t tick = 0;         // the track's tick count when it happened, counting every pass through a loop
+    uint32_t frame = 0;        // the frame it happened on
+    int slot = -1;             // kNoteOn, kEnvelope: the slot the note plays in; kNoteOff: the slot it released, or -1
+    bool playable = true;      // kNoteOn: false if its instrument has no sample for the key, so it makes no sound
+    int program = -1;          // kNoteOn: the channel's program
+    uint32_t instrument = 0;   // kNoteOn, kProgram: the channel's instrument
+    EnvelopeSettings envelope; // kEnvelope: the settings the phase took, and 0xFF for the others
 };
 
 // Plays a tune one frame at a time, as the driver's per-frame routine does.
@@ -174,7 +177,7 @@ private:
     void Program(int t, const Event& e);
 
     void UpdateVibrato();
-    void UpdateEnvelope(Slot& slot);
+    void UpdateEnvelope(int index);
     void Mix();
     void MixVoice(Slot& slot);
     void Advance(Slot& slot);

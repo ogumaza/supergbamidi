@@ -3,6 +3,7 @@
 #include "test_util.h"
 
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -15,6 +16,23 @@ namespace supergbamidi::test
 std::filesystem::path TempPath(const std::string& name)
 {
     return g_temp / PathFromUtf8(name);
+}
+
+std::FILE* OpenTempFile(const std::string& name)
+{
+    // MSVC warns that std::fopen is unsafe, so it gets fopen_s, which does the same here.
+    const std::string path = TempPath(name).string();
+    std::FILE* f = nullptr;
+#ifdef _MSC_VER
+    if (fopen_s(&f, path.c_str(), "wb") != 0)
+    {
+        return nullptr;
+    }
+#else
+    f = std::fopen(path.c_str(), "wb");
+#endif
+
+    return f;
 }
 
 std::vector<uint8_t> ReadAll(const std::string& path)

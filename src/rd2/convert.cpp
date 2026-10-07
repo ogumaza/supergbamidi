@@ -517,7 +517,25 @@ private:
     // wave's pitch, or a noise voice's note. Returns -1 for a note that can't be converted.
     int ProgramOf(const Event& e, int& key)
     {
+        // The driver plays a note that its instrument has no region for from the bank's table of offsets, which in
+        // Super Mario Advance 2 holds the level at 0 and reads the sample from past the end of its sample set's table.
         const Lookup& lk = e.lookup;
+        if (lk.missing)
+        {
+            const uint32_t base = info_.banks + rom_.U32(info_.banks + 4 * uint32_t(e.bank));
+            const bool none = rom_.U16(base + 2 * uint32_t(e.instrument)) == 0;
+            char text[112];
+            std::snprintf(text, sizeof text,
+                          none ? "instrument %u isn't in bank %u, so its notes are left out"
+                               : "instrument %u of bank %u has no region for some of its notes, which are left out",
+                          unsigned(e.instrument), unsigned(e.bank));
+            if (std::find(warnings_.begin(), warnings_.end(), text) == warnings_.end())
+            {
+                warnings_.push_back(text);
+            }
+            return -1;
+        }
+
         const uint32_t region = lk.region;
         const uint8_t tuning = region ? rom_.U8(region + 7) : uint8_t(kUnityIndex);
         const uint8_t note = lk.drum || lk.key_sample ? uint8_t(kUnityIndex) : e.key;
@@ -622,7 +640,7 @@ private:
         for (int key = 0; key < 128; key++)
         {
             const Lookup lk = LookUpInstrument(rom_, info_, program.bank, program.instrument, uint8_t(key));
-            if (!lk.found || !lk.region || lk.drum || lk.key_sample || rom_.U8(lk.region) != kSampleType)
+            if (!lk.found || !lk.region || lk.missing || lk.drum || lk.key_sample || rom_.U8(lk.region) != kSampleType)
             {
                 continue;
             }
@@ -648,8 +666,8 @@ private:
 
 // Adds the SoundFont presets of a sequence's programs, in bank `bank` and those after it if there are more than 128.
 // Returns the warnings for sounds that can't be read.
-std::vector<std::string> AddPresets(const Rom& rom, SoundfontBuilder& sf, const std::vector<Program>& programs,
-                                    int bank)
+std::vector<std::string> AddPresets(const Rom& rom, const DriverInfo& info, SoundfontBuilder& sf,
+                                    const std::vector<Program>& programs, int bank)
 {
     std::vector<std::string> warnings;
     for (size_t p = 0; p < programs.size(); p++)
@@ -679,17 +697,17 @@ std::vector<std::string> AddPresets(const Rom& rom, SoundfontBuilder& sf, const 
             case kSquare1Type:
             case kSquare2Type:
                 sample = sf.SquareSample(int(z.sound));
-                share = kPsgShare;
+                share = PsgShare(info.revision);
                 break;
 
             case kWaveType:
                 sample = sf.WaveSample(z.sound);
-                share = kPsgShare;
+                share = PsgShare(info.revision);
                 break;
 
             default:
                 sample = sf.NoiseSample(uint8_t(z.sound));
-                share = kPsgShare;
+                share = PsgShare(info.revision);
                 break;
             }
             if (sample < 0)
@@ -737,11 +755,19 @@ int BendValue(double bend, int range)
 }
 
 // Returns a track's levels on each side (full scale 128) for a voice at full velocity and envelope, from its pan and
-// volume and the player's volume, as the driver works out a sample voice's.
-std::pair<double, double> TrackLevels(int pan, int volume, int player_volume)
+// volume and the player's volume, as the driver works out a sample voice's. A Link to the Past's revision gives the
+// voice a level of 190 at most, splits it between the sides in 256ths and divides the mix by 128. The Super Mario
+// Advance 2 revision gives it 127 at most, splits it in 128ths and divides each voice's points by 256.
+std::pair<double, double> TrackLevels(Revision revision, int pan, int volume, int player_volume)
 {
-    const double level = 3.0 * 127 * (player_volume / 128.0) * (volume / 256.0) * (32767.0 / 32768.0);
     pan = std::clamp(pan, 0, 127);
+    if (revision == Revision::kSuperMarioAdvance2)
+    {
+        const double level = 127 * (player_volume / 128.0) * (volume / 128.0) * (32767.0 / 32768.0);
+        return {(127 - pan) * level / 128 * 127 / 256, pan * level / 128 * 127 / 256};
+    }
+
+    const double level = 3.0 * 127 * (player_volume / 128.0) * (volume / 256.0) * (32767.0 / 32768.0);
 
     return {(127 - pan) * level / 256 * 127 / 128, pan * level / 256 * 127 / 128};
 }
@@ -819,7 +845,8 @@ std::array<std::vector<LevelChange>, kPlayerTracks> TrackChanges(const Simulatio
 // to `loop`, the loop's start, retains the levels from the loop's end, as the game does until the loop sets them. So
 // CC11 is written again at the first level-change record at or after `loop`, and CC10, which follows the pan alone, at
 // the first record that sets the pan, even if their values haven't changed.
-void WriteLevels(MidiTrack& mt, int c, const std::vector<LevelChange>& changes, std::optional<uint64_t> loop)
+void WriteLevels(MidiTrack& mt, int c, Revision revision, const std::vector<LevelChange>& changes,
+                 std::optional<uint64_t> loop)
 {
     int cc10 = -1, cc11 = -1;
     bool again10 = loop.has_value(), again11 = loop.has_value();
@@ -832,7 +859,7 @@ void WriteLevels(MidiTrack& mt, int c, const std::vector<LevelChange>& changes, 
         again11 = again11 && !write11;
 
         const Levels& l = change.levels;
-        const auto [left, right] = TrackLevels(l.pan, l.volume, l.player_volume);
+        const auto [left, right] = TrackLevels(revision, l.pan, l.volume, l.player_volume);
         int n10 = cc10 < 0 ? 64 : cc10, n11 = cc11 < 0 ? 0 : cc11;
         LevelsToControllers(left, right, n10, n11);
         if (n10 != cc10 || write10)
@@ -952,9 +979,10 @@ void WriteNotes(MidiTrack& mt, int c, const std::vector<const Note*>& notes, int
     }
 }
 
-// Writes the MIDI file: a conductor track, then a track for each of the player's tracks that plays notes.
-bool WriteMidi(const std::string& path, const std::string& title, const std::string& about, const Simulation& sim,
-               const std::vector<Note>& notes, int bank, std::string& error)
+// Writes the MIDI file: a conductor track, then a track for each of the player's tracks that plays notes, with the
+// levels of the driver's revision.
+bool WriteMidi(const std::string& path, const std::string& title, const std::string& about, Revision revision,
+               const Simulation& sim, const std::vector<Note>& notes, int bank, std::string& error)
 {
     constexpr uint16_t kDivision = kTicksPerQuarter;
     const Plan& plan = sim.plan;
@@ -1031,7 +1059,7 @@ bool WriteMidi(const std::string& path, const std::string& title, const std::str
             WriteBends(mt, c, sim, n, list, range, loop);
         }
 
-        WriteLevels(mt, c, changes[size_t(n)], loop);
+        WriteLevels(mt, c, revision, changes[size_t(n)], loop);
         WriteNotes(mt, c, list, bank, program, loop);
     }
 
@@ -1084,7 +1112,7 @@ SongSummary Run(const Rom& rom, const DriverInfo& info, int song, const ConvertO
     // The SoundFont's presets, in the sequence's file or the shared one.
     SoundfontBuilder own(rom);
     SoundfontBuilder& sf = shared ? *shared : own;
-    for (const std::string& w : AddPresets(rom, sf, maker.Programs(), opt.bank))
+    for (const std::string& w : AddPresets(rom, info, sf, maker.Programs(), opt.bank))
     {
         sum.warnings.push_back(w);
     }
@@ -1097,7 +1125,7 @@ SongSummary Run(const Rom& rom, const DriverInfo& info, int song, const ConvertO
         Utf8(PathFromUtf8(opt.out_dir) / PathFromUtf8(SafeFileName(opt.base_name) + "_" + TwoDigits(song)));
     std::string error;
     sum.midi_path = stem + ".mid";
-    if (!WriteMidi(sum.midi_path, title, about, sim, notes, opt.bank, error))
+    if (!WriteMidi(sum.midi_path, title, about, info.revision, sim, notes, opt.bank, error))
     {
         sum.warnings.push_back(error);
         return sum;

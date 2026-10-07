@@ -113,17 +113,17 @@ private:
     std::vector<uint8_t> bytes_;
 };
 
-// A cartridge image being put together: a synthetic copy of the code patterns that detection reads, the driver's
-// tables, and the game's settings, samples, bank and sequences.
+// A cartridge image being put together: a synthetic copy of the code patterns that detection reads, in a revision's
+// form, the driver's tables, and the game's settings, samples, bank and sequences.
 class Cart
 {
 public:
-    explicit Cart(bool code = true) : d_(0x10000, 0)
+    explicit Cart(bool code = true, Revision revision = Revision::kLinkToThePast) : d_(0x10000, 0)
     {
         WriteTables();
         if (code)
         {
-            WriteCode();
+            WriteCode(revision);
         }
         WriteSettings();
         WriteSamples();
@@ -243,8 +243,9 @@ private:
         Put32(kKeyEnvelope + 4, 0x0000FFFF);
     }
 
-    // Writes the driver's code that detection reads, and the game's call to the driver's init.
-    void WriteCode()
+    // Writes the driver's code that detection reads, as the revision's compiler built it, and the game's call to the
+    // driver's init.
+    void WriteCode(Revision revision)
     {
         Code(kInit, "B530 4900 6008 4900 2000 7008 2080 7008 3904 4A00 1C10 8008 3102 200D 7008 BD30");
         Put16(kGameInit, 0x4801);
@@ -252,14 +253,29 @@ private:
         Put16(kGameInit + 6, 0x4770);
         Put32(kGameInit + 8, kSettings);
 
-        uint32_t at = Code(kCode,
-                           "B500 0609 0E09 0612 0E12 3130 1A89 0409 0C0A 1409 2900 DA01 2200 E002 2977 DD00 2278 "
-                           "7800 2800 D107 4800 1104 8913 0918 0868 E00D 46C0 46C0 2804 D007 4800 4770",
-                           {{20, kPitchTable}, {30, kFrequencyTable}});
-        at = Code(at, "B500 0400 0C01 2977 D900 2177 4800 1808 7800 4770", {{6, kNoiseTable}});
-        at = Code(at, "68A0 6883 2B00 D000 6860 2800 D100 4800 6A29 0849 1809 7809 4770", {{7, kLfoTable}});
+        uint32_t at = kCode;
+        if (revision == Revision::kSuperMarioAdvance2)
+        {
+            at = Code(at,
+                      "0609 0E09 0612 0E12 3130 1A89 0409 0C0A 1409 2900 DA01 2200 E002 2977 DD00 2278 7800 2800 "
+                      "D108 4800 1104 8913 0918 0868 E00E 46C0 46C0 46C0 2804 D007 4800 4770",
+                      {{19, kPitchTable}, {30, kFrequencyTable}});
+            at = Code(at, "0400 0C01 2977 D900 2177 4800 1808 7800 4770", {{5, kNoiseTable}});
+            at = Code(at, "68A0 6882 2A00 D000 6860 2800 D100 4800 6A29 0849 1809 7809 4770", {{7, kLfoTable}});
+            at = Code(at, "4900 7830 1840 7800 1C29 3152 780A 1C29 4770", {{0, kVoiceClasses}});
+            at = Code(at, "B530 1C05 7868 2801 D11A 7A6C 0224 4770");
+        }
+        else
+        {
+            at = Code(at,
+                      "B500 0609 0E09 0612 0E12 3130 1A89 0409 0C0A 1409 2900 DA01 2200 E002 2977 DD00 2278 7800 "
+                      "2800 D107 4800 1104 8913 0918 0868 E00D 46C0 46C0 2804 D007 4800 4770",
+                      {{20, kPitchTable}, {30, kFrequencyTable}});
+            at = Code(at, "B500 0400 0C01 2977 D900 2177 4800 1808 7800 4770", {{6, kNoiseTable}});
+            at = Code(at, "68A0 6883 2B00 D000 6860 2800 D100 4800 6A29 0849 1809 7809 4770", {{7, kLfoTable}});
+            at = Code(at, "4900 7830 1840 7800 1C29 3152 7809 4770", {{0, kVoiceClasses}});
+        }
         at = Code(at, "2904 D900 2104 0609 0E09 4A00 4800 1809 7808 7010 4770", {{6, kWaveVolumes}});
-        at = Code(at, "4900 7830 1840 7800 1C29 3152 7809 4770", {{0, kVoiceClasses}});
         Code(at, "8869 1859 4A00 0070 1840 8800 8050 6022 4800 6060 4770", {{8, kKeyEnvelope}});
     }
 
@@ -417,6 +433,64 @@ void TestDetection()
     SUPERGBAMIDI_CHECK(error.empty());
     SUPERGBAMIDI_CHECK(!DetectDriver(none, given, tables, error));
     SUPERGBAMIDI_CHECK(!error.empty());
+}
+
+void TestSuperMarioAdvance2()
+{
+    // The Super Mario Advance 2 revision's code gives its tables too. Its E4 takes a byte, so a tempo of 150 plays a
+    // tick a frame, and EA does nothing and takes no operand.
+    Cart cart(true, Revision::kSuperMarioAdvance2);
+    cart.Sequences({{Track()
+                         .Bytes({0xE4, 150, 0xEA, 0xC2, kLooped, 0xE2, 2, 0xE1, 64})
+                         .Note(60, 4, 127)
+                         .Wait(4)
+                         .Bytes({0xE1, uint8_t(-64)})
+                         .Note(60, 4, 127)
+                         .Wait(4)
+                         .Bytes({0xE1, 0, 0xC2, kPlain, 0xE0, 0x55})
+                         .Note(48, 4, 100)
+                         .Wait(4)
+                         .End()}});
+    const Rom rom = cart.ToRom();
+    const DriverInfo info = Detect(rom);
+    Sequencer seq(rom, info, 0);
+
+    std::vector<std::pair<int, int>> notes;
+    std::vector<uint32_t> pitches, volumes;
+    for (int f = 0; f < 9; f++)
+    {
+        seq.Step();
+        for (const Event& e : seq.Events())
+        {
+            if (e.kind == Event::kNote)
+            {
+                notes.emplace_back(f, e.voice);
+            }
+        }
+        pitches.push_back(notes.empty() ? 0 : seq.Voices()[size_t(notes.back().second)].pitch);
+        volumes.push_back(notes.empty() ? 0 : seq.Voices()[size_t(notes.back().second)].volume);
+    }
+
+    SUPERGBAMIDI_CHECK(info.revision == Revision::kSuperMarioAdvance2);
+    SUPERGBAMIDI_CHECK_EQ(info.pitch_table, kPitchTable);
+    SUPERGBAMIDI_CHECK_EQ(info.frequency_table, kFrequencyTable);
+    SUPERGBAMIDI_CHECK_EQ(info.noise_table, kNoiseTable);
+    SUPERGBAMIDI_CHECK_EQ(info.lfo_table, kLfoTable);
+    SUPERGBAMIDI_CHECK_EQ(info.voice_classes, kVoiceClasses);
+    SUPERGBAMIDI_CHECK_EQ(notes.size(), 3);
+    SUPERGBAMIDI_CHECK_EQ(notes[1].first, 4);
+    SUPERGBAMIDI_CHECK_EQ(notes[2].first, 8);
+
+    // A bend of 64 with a range of 2 scales the pitch by (4013 * 64 + 0x400000) >> 14 = 271 256ths, and a bend of -64
+    // by 240 256ths, from 0x8000 for the looped sample's note 60.
+    const uint32_t range = rom.U32(kPitchTable + 4 * 0x32);
+    SUPERGBAMIDI_CHECK_EQ(range, 36781);
+    SUPERGBAMIDI_CHECK_EQ(pitches[0], (0x8000u * 271) >> 8);
+    SUPERGBAMIDI_CHECK_EQ(pitches[4], (0x8000u * 240) >> 8);
+
+    // A velocity of 100 at a track volume of 0x55 and the envelope's full level gives a level of 16999, without the
+    // player's second volume. A Link to the Past's revision gives 16991.
+    SUPERGBAMIDI_CHECK_EQ(volumes[8], 16999);
 }
 
 void TestTiming()
@@ -803,6 +877,7 @@ void TestMusic()
 void RunTests()
 {
     TestDetection();
+    TestSuperMarioAdvance2();
     TestTiming();
     TestVoices();
     TestEnvelope();

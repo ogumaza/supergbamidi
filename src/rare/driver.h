@@ -41,6 +41,8 @@ struct DriverInfo
     uint32_t rate_scale = 0x01397FC3;         // the pitch scale for the mix rate: 2^38 / mix_rate
     int voice_limit = 8;                      // maximum voices mixed per frame
     int slots_per_channel = 6;                // the notes a channel can play at once
+    bool envelope_controllers = false;        // controllers 20-23 set a channel's envelope, as in BDQE's revision
+    bool frees_loop_once = false;             // moving a note past its end frees it in loop mode 1, as in BDQE's
     uint32_t pitch_table = 0;                 // 2^(n/12) for n = -64..63 in 9.23 fixed point, at n = 0
     uint32_t sine_table = 0;                  // 257 words: the vibrato's sine
     std::array<uint8_t, 100> fade_table = {}; // the length of each decay and release, from the driver's table
@@ -57,5 +59,9 @@ uint32_t TuneAddress(const Rom& rom, const DriverInfo& info, int tune);
 
 // Returns the number of frames that a decay or release with index `index` (0-99) takes, or 0 for an instant one.
 int FadeFrames(const DriverInfo& info, uint32_t index);
+
+// Returns the number of frames that a decay or release takes whose fade table entry is `entry`, or 0 for an instant
+// one.
+int FadeEntryFrames(uint32_t entry);
 
 } // namespace supergbamidi::rare

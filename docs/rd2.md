@@ -7,7 +7,10 @@ Past & Four Swords*, plays the rest of its music with Nintendo's MP2K. The
 document is based on the driver's code in the US release (game code `AZLE`),
 and the addresses given as examples come from there. Other games put the
 driver and its data elsewhere, and `supergbamidi` finds them from the code
-(see [Locating the driver](#locating-the-driver)).
+(see [Locating the driver](#locating-the-driver)). *Super Mario Advance 2:
+Super Mario World* has an older revision of the driver, whose differences
+[The Super Mario Advance 2 revision](#the-super-mario-advance-2-revision)
+lists.
 
 The driver mixes samples in software, at 10512 Hz in stereo, into a buffer for
 each of the two DirectSound FIFOs: FIFO A plays the left side and FIFO B the
@@ -471,6 +474,120 @@ multiplied by `(release + 230) / 512` each frame, and it stops at 0. The
 released wave voice reads its track's settings at the start of each segment,
 and has no track by then, so it reads them from address 0.
 
+## The Super Mario Advance 2 revision
+
+*Super Mario Advance 2: Super Mario World* (US game code `AA2E`) predates *A
+Link to the Past* and uses an older revision of the driver. Apart from the
+differences below, its code is *A Link to the Past*'s, though its compiler
+chose different prologues, registers and literal pools. The cartridge also
+has a second copy of the driver in the multiboot image sent to other GBAs for
+*Mario Bros.* That copy stores its settings in EWRAM; `supergbamidi` reads the
+first copy.
+
+In `AA2E` the routines are:
+
+| Address | Routine |
+|---|---|
+| `0x0809B258` | the game's sound init, which calls the driver's init with the game's settings at `0x08177044` |
+| `0x0809B9A8` | init, which copies the ARM routines from `0x0809DCDC` to `0x03001518` |
+| `0x0809B348` | the game's play-music routine: the low byte of each halfword of the table at `0x08177064` turns the game's music number into a sequence |
+| `0x0809D840` | request a sequence: `r0` = player, `r1` = sequence |
+| `0x0809D82C` | hand over the requests made since its last call |
+| `0x0809BA74` | the VBlank routine |
+| `0x0809BA80` | the per-frame routine |
+| `0x0809DCA8` | carry out the requests, through the table of handlers at `0x08177578` |
+| `0x0809D50C` | the sequencer |
+| `0x0809CF9C` | run a track for a frame; its command table, for `C2` to `FF`, is at `0x0809D0E8` |
+| `0x0809C900` | note on |
+| `0x0809BDEC` | look up an instrument |
+| `0x0809CDB4` | allocate a voice |
+| `0x0809CAD4` | release a voice's note |
+| `0x0809CBB8` | stop a voice |
+| `0x0809C66C` | the PSG voices' frame |
+| `0x0809C4A8` | the mixer's frame |
+| `0x0809BC30` | mix a sample voice's frame |
+
+The music plays on player 0x13. The driver's variables are:
+
+| Address | Variable |
+|---|---|
+| `0x03000090` | the two output buffers |
+| `0x030000A2` | the output buffer the mixer writes this frame |
+| `0x030000A8` | the region that instruments with a sample for each key play |
+| `0x030000B0` | the wave that the wave channel's RAM holds |
+| `0x030000B4`, `0x0300012C` | the nodes at the ends of the mixer's list of sample voices that play, whose first voice is the first node's next voice, at `0x03000120` |
+| `0x030001A4`, `0x0300021C` | the nodes at the ends of the list of free sample voices |
+| `0x03000294` | the echo buffer the mixer reads this frame |
+| `0x03000295` | the echo's delay in frames (18) |
+| `0x03000296` | the echo's level, 31 at the start |
+| `0x03000297` | the echo level that the game asks for, 31 at the start |
+| `0x03000298` | a routine of the game's that plays a player's notes instead of the driver, when the player has flag 1 |
+| `0x0300029C` | a routine of the game's that `CA` calls |
+| `0x030002A0` | the requests, 12 bytes each |
+| `0x030004E4` | the game's settings |
+| `0x030007B4` | the mix |
+| `0x03000A74` | the mix of the voices with an echo send |
+| `0x03000D38` | the 24 tracks |
+| `0x03001878` | the 7 sample voices, then the 4 PSG voices |
+| `0x03001DA0` | the 20 players, 0x44 bytes each |
+| `0x02036000` | the echo's history |
+
+The revision differs in these ways:
+
+* **Players.** A player's record is 0x44 bytes, without the second volume:
+  the volume is at `0x40`, the byte that is 1 while it plays at `0x41`, the one
+  for a sound effect at `0x42`, and the flags at `0x43`.
+* **Commands.** `E4` takes a byte, the tempo, rather than a length. `EA` is one
+  of the commands that do nothing and take no operand, so the player's volume
+  stays at `0x80` unless a request sets it.
+* **Voices.** A voice keeps its note's velocity at `0x09`, and doesn't keep the
+  note.
+* **Note on.** The note's length in 150ths of a tick is kept in 16 bits, and so
+  are its frames, so a note of 437 ticks or more is shorter than its length.
+* **Bends.** The bend scales a sample's pitch, or a square's or the wave's
+  period, by a factor in 256ths that goes in a straight line from 1 at no bend
+  to the range's step at a bend of 128, up and down alike:
+  `f = ((r - 0x8000) * b + 0x400000) >> 14`, with `b` the bend and `r` the
+  entry of the pitch table for index `0x30` plus the bend's range. A sample's
+  pitch becomes `pitch * f >> 8`, and a square's or the wave's setting
+  `2048 - ((2048 - setting) << 8) / f`, without a limit.
+* **Volume.** A sample voice's level leaves out the player's second volume:
+
+      level = velocity << 8
+      level = level * fade >> 7
+      level = level * player volume >> 7
+      level = level * track volume >> 15
+      level = level * track volume 2 >> 7
+      level = level * envelope >> 15
+      volume = level >> 8
+
+  So `volume` reaches 126 rather than 190. A PSG voice's level leaves out the
+  second volume too, and shifts the product with the player's volume right by
+  8.
+* **The mixer.** The lists of sample voices run between nodes at their ends,
+  in the same order as A Link to the Past's. The mixer multiplies the frame's
+  step by 176 and divides it by 176 again, which changes it only where the
+  product wraps. It splits a voice's volume between the sides as
+  `(127 - pan) * volume >> 7` and `pan * volume >> 7`, each kept to 9 bits, and
+  adds each point times the side's volume, shifted right by 8, into the mix,
+  which isn't divided by 128 before it's kept to 8 bits. A full-scale sample at
+  the default volumes plays at about 31/128 on each side, where A Link to the
+  Past's plays at about 47/128.
+* **The echo.** The voices with an echo send always mix into the echo's
+  buffer. The echo's level starts at 31, which leaves nothing of the mix in the
+  history, and its shift rounds. Only the game's code turns the echo on.
+
+The game's play-music routine mutes a track of sequence 30 through a request:
+track 8 when it plays the sequence as music 17, and track 9 as music 18.
+
+A bank's table of offsets can leave an instrument out, and a drum kit or a key
+split a region, with an offset of 0. A note on it reads the bank's table of
+offsets as its region. In *Super Mario Advance 2*, that region's envelope has
+a first point of no frames, which holds the level at 0 for 65535 frames, so the
+note never sounds, and its sample is past the end of its sample set's table,
+which can give an address outside the GBA's memory. `supergbamidi` leaves out
+every note that its instrument has no region for, with a warning.
+
 ## Locating the driver
 
 `supergbamidi` finds the driver's init routine by the start of its code:
@@ -478,7 +595,13 @@ and has no track by then, so it reads them from address 0.
     B530 49xx 6008 49xx 2000 7008 2080 7008 3904 4Axx 1C10 8008 3102 200D 7008
 
 The game's settings are the word that the `ldr r0` just before a call to init
-loads. The driver's tables come from the code that reads them:
+loads. The revision is Super Mario Advance 2's if the routine that works out a
+sample voice's level starts with
+
+    B530 1C05 7868 2801 D1xx 7A6C 0224
+
+and A Link to the Past's otherwise. The driver's tables come from the code that
+reads them:
 
 | Table | Code | ldr |
 |---|---|---|
@@ -488,6 +611,15 @@ loads. The driver's tables come from the code that reads them:
 | wave volumes | `2904 D900 2104 0609 0E09 4Axx 48xx 1809 7808 7010` | 6 |
 | voice classes | `49xx 7830 1840 7800 1C29 3152 7809` | 0 |
 | the envelope for a sample for each key | `8869 1859 4Axx 0070 1840 8800 8050 6022 48xx 6060` | 8 |
+
+In the Super Mario Advance 2 revision, the code of four of them differs:
+
+| Table | Code | ldr |
+|---|---|---|
+| pitch table, frequency table | `0609 0E09 0612 0E12 3130 1A89 0409 0C0A 1409 2900 DA01 2200 E002 2977 DD00 2278 7800 2800 D108 48xx` | halfwords 19 and 30 |
+| noise table | `0400 0C01 2977 D900 2177 48xx 1808 7800` | 5 |
+| LFO table | `68A0 6882 2A00 D0xx 6860 2800 D1xx 48xx 6A29 0849 1809 7809` | 7 |
+| voice classes | `49xx 7830 1840 7800 1C29 3152 780A 1C29` | 0 |
 
 The sequence count is the smaller of the entry counts in the sequence table
 and the table of bank lists. `--song-table` overrides the detected settings

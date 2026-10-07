@@ -11,7 +11,10 @@ driver_emu.py for as long as the MIDI file lasts, and each note it plays is matc
 and key that starts within a frame and a half of it. For each pair, the script checks:
 
   - the velocity, and the channel's volume when the note starts;
-  - the sample: the SoundFont zone that the note's program and key choose has to play the driver's sample;
+  - the sample: the SoundFont zone that the note's bank, program and key choose has to play the driver's sample;
+  - the envelope: the zone's attack, decay, sustain and release, for each phase that the driver's note reached, have to
+    be those that supergbamidi works out from the instrument and the settings from controllers 20-23 that the phase
+    took;
   - the pitch on every frame of the note, from the zone's root key, tuning and sample rate and the channel's pitch bend,
     against the step the driver moves the sample on by;
   - the release, which has to come within a frame and a half of the MIDI note's end, unless the MIDI file ends the note
@@ -38,9 +41,9 @@ FRAME_RATE = 16777216 / 280896
 
 
 def read_midi(path):
-    """Returns the file's notes as (channel, key, velocity, on seconds, off seconds, program), its program changes,
-    volume changes and pitch bends as (seconds, channel, value), each channel's bend range in semitones, and its length
-    in seconds."""
+    """Returns the file's notes as (channel, key, velocity, on seconds, off seconds, program, bank), its program
+    changes, volume changes and pitch bends as (seconds, channel, value), each channel's bend range in semitones, and
+    its length in seconds."""
     data = Path(path).read_bytes()
     division = struct.unpack('>H', data[12:14])[0]
     events = []
@@ -118,11 +121,14 @@ def read_midi(path):
     rpn = {}
     ranges = {}
     program = {}
+    bank = {}
     for tick, _, _, kind, ch, a, b in events:
         t = seconds(tick)
         if kind == 'on':
-            open_notes[(ch, a)] = [ch, a, b, t, None, program.get(ch, 0)]
+            open_notes[(ch, a)] = [ch, a, b, t, None, program.get(ch, 0), bank.get(ch, 0)]
             notes.append(open_notes[(ch, a)])
+        elif kind == 'cc' and a == 0:
+            bank[ch] = b
         elif kind == 'off' and (ch, a) in open_notes:
             open_notes.pop((ch, a))[4] = t
         elif kind == 'program':
@@ -208,9 +214,10 @@ def value_at(changes, ch, t, default):
 
 
 def driver_notes(rom, song, frames):
-    """Runs the driver and returns its notes, each channel's volume on each frame and the mixer's rate in Hz. The notes
-    are dicts of channel, key, velocity, start and release frames (the end, for a note the driver didn't release),
-    whether the driver released the note, its sample's address, and the step on each frame."""
+    """Runs the driver and returns its notes, each channel's volume on each frame, the mixer's rate in Hz and the fade
+    table. The notes are dicts of channel, key, velocity, start and release frames (the end, for a note the driver
+    didn't release), whether the driver released the note, its instrument's and sample's addresses, the step on each
+    frame, and the settings from controllers 20-23 that each phase of its envelope took, for the phases it reached."""
     emu = driver_emu.DriverEmulator(rom)
     emu.play(song)
     count = 16 * emu.addr.slots_per_channel
@@ -220,6 +227,8 @@ def driver_notes(rom, song, frames):
     for f in range(frames):
         emu.frame()
         volume.append([emu.channel_volume(c) for c in range(16)])
+        # Each phase of an envelope starts after the frame's tracks, so it takes the settings they leave.
+        settings = [emu.envelope_settings(c) for c in range(16)]
         voices = emu.voices()[:count]
         for v in voices:
             prev = last[v.index]
@@ -232,6 +241,9 @@ def driver_notes(rom, song, frames):
                                  (prev.state == 0x12 and v.state == 0x11) or prev.instrument != v.instrument or
                                  prev.key != v.key or restarted)
             note = current[v.index]
+            # The decay starts in the frame after the one that leaves the note in phase 2.
+            if note and not begins and prev is not None and prev.phase == 2 and 'decay' not in note['envelope']:
+                note['envelope'].update(decay=settings[prev.channel][1], sustain=settings[prev.channel][2])
             if note and (not active or begins):
                 if note['release'] is None:
                     note['release'] = f
@@ -240,7 +252,8 @@ def driver_notes(rom, song, frames):
                 sample = struct.unpack('<I', rom[v.instrument - 0x08000000 + 16:v.instrument - 0x08000000 + 20])[0] \
                     if 0x08000000 <= v.instrument < 0x08000000 + len(rom) else 0
                 note = dict(channel=v.channel, key=v.key, velocity=v.velocity - 1, start=f, release=None,
-                            released=False, sample=sample, steps={})
+                            released=False, instrument=v.instrument, sample=sample, steps={},
+                            envelope=dict(attack=settings[v.channel][0]))
                 notes.append(note)
                 current[v.index] = note
             else:
@@ -249,6 +262,7 @@ def driver_notes(rom, song, frames):
                 if v.state == 0x12 and note['release'] is None:
                     note['release'] = f
                     note['released'] = True
+                    note['envelope']['release'] = settings[v.channel][3]
                 # The mixer leaves no step for a voice it doesn't mix, when more voices play than it can mix.
                 if emu.steps[v.index]:
                     note['steps'][f] = emu.steps[v.index]
@@ -258,7 +272,54 @@ def driver_notes(rom, song, frames):
     for note in notes:
         if note['release'] is None:
             note['release'] = f + 1
-    return notes, volume, emu.rate()
+    return notes, volume, emu.rate(), emu.fade_table()
+
+
+def lround(x):
+    """Rounds half away from zero, as std::lround does."""
+    return int(math.floor(x + 0.5)) if x >= 0 else -int(math.floor(-x + 0.5))
+
+
+def timecents(seconds):
+    return -12000 if seconds <= 0.001 else max(-12000, min(8000, lround(1200 * math.log2(seconds))))
+
+
+def fade_seconds(frames):
+    """The length that supergbamidi gives a SoundFont fade for a decay or release of `frames` frames to silence."""
+    return min(6.0, max(3.0, 3.0 + 3.0 * (frames - 5) / 11.0)) * frames / FRAME_RATE
+
+
+def expected_envelope(rom, instrument, envelope, fade):
+    """Returns the generators that supergbamidi gives the volume envelope of the instrument at `instrument` (attack,
+    decay, sustain and release, each None where the zone leaves the default), for the settings that `envelope` gives
+    each phase. A setting of 0x80 or more, or one missing, leaves the instrument's."""
+    at = instrument - 0x08000000
+    attack, decay, sustain, release = struct.unpack('<4I', rom[at + 36:at + 52])
+
+    def frames(setting, index):
+        entry = setting if setting < 0x80 else (fade[index] if index < 100 else 0)
+        return entry + 1 if entry else 0
+
+    steps = envelope.get('attack', 0xFF)
+    steps = steps if steps < 0x80 else ((99 - min(attack, 99)) << 5) // 99
+    level = envelope.get('sustain', 0xFF)
+    if level < 0x80:
+        level <<= 8
+    else:
+        value = min(sustain, 99)
+        level = ((value << 7) // 99) << 8 | ((((value << 7) % 99) << 8) // 99)
+    decay_frames = frames(envelope.get('decay', 0xFF), decay)
+    release_frames = frames(envelope.get('release', 0xFF), release)
+
+    out = [timecents((steps + 1) / FRAME_RATE) if steps else None, None, None,
+           timecents(fade_seconds(release_frames)) if release_frames else None]
+    if level < 0x8000 and level << 4 < 0x1000:
+        out[1:3] = [timecents(fade_seconds(decay_frames)) if decay_frames else None, 1440]
+    elif level < 0x8000:
+        attenuation = min(1440, lround(-200 * math.log10(level / 32768)))
+        out[1:3] = [timecents(1000 / attenuation * decay_frames / FRAME_RATE) if decay_frames and attenuation else None,
+                    attenuation or None]
+    return [None if v == -12000 else v for v in out]
 
 
 def check_song(rom, song, midi_path, sf2_path, frames_limit, report):
@@ -266,10 +327,11 @@ def check_song(rom, song, midi_path, sf2_path, frames_limit, report):
     volumes, bends = by_channel(volumes), by_channel(bends)
     presets = read_sf2(sf2_path)
     frames = min(frames_limit, int(length * FRAME_RATE))
-    played, volume, mix_rate = driver_notes(rom, song, frames)
+    played, volume, mix_rate, fade = driver_notes(rom, song, frames)
 
     midi = [dict(channel=n[0], key=n[1], velocity=n[2], on=n[3] * FRAME_RATE,
-                 off=(n[4] if n[4] is not None else length) * FRAME_RATE, program=n[5], matched=False) for n in notes]
+                 off=(n[4] if n[4] is not None else length) * FRAME_RATE, program=n[5], bank=n[6], matched=False)
+            for n in notes]
     by_key = {}
     for m in midi:
         by_key.setdefault((m['channel'], m['key']), []).append(m)
@@ -317,16 +379,28 @@ def check_song(rom, song, midi_path, sf2_path, frames_limit, report):
         if driver_volume not in volumes_seen:
             problems.append('%s: volume %d, the driver\'s %d' % (where, volumes_seen[1], driver_volume))
 
-        # The zone that the note's program and key choose.
-        zones = [z for z in presets.get((0, m['program']), []) if z['low'] <= key <= z['high']]
+        # The zone that the note's bank, program and key choose.
+        zones = [z for z in presets.get((m['bank'], m['program']), []) if z['low'] <= key <= z['high']]
         if not zones:
-            problems.append('%s: program %d has no zone for the key' % (where, m['program']))
+            problems.append('%s: bank %d program %d has no zone for the key' % (where, m['bank'], m['program']))
             continue
         zone = zones[0]
         name = zone['sample']['name']
         if not all(name.endswith('%08X' % d['sample']) for d in voices):
             problems.append('%s: plays %s; the driver plays the sample at 0x%08X' % (where, name, voices[0]['sample']))
             continue
+
+        # The envelope, in each phase that the driver's note reached: the instrument's, with the settings from
+        # controllers 20-23 that the phase took. Timecents can come out a step apart from floating point.
+        want = expected_envelope(rom, voices[0]['instrument'], voices[0]['envelope'], fade)
+        have = [zone['g'].get(op) for op in (34, 36, 37, 38)]
+        reached = [True, 'decay' in voices[0]['envelope'], 'decay' in voices[0]['envelope'],
+                   'release' in voices[0]['envelope']]
+        for phase, w, h, r in zip(('attack', 'decay', 'sustain', 'release'), want, have, reached):
+            if not r:
+                continue
+            if (w is None) != (h is None) or (w is not None and abs(w - h) > 1):
+                problems.append('%s: the %s is %s, where the driver\'s envelope gives %s' % (where, phase, h, w))
 
         # Check the pitch on each frame in which the driver advances the note.
         g = zone['g']
@@ -373,7 +447,7 @@ def check_song(rom, song, midi_path, sf2_path, frames_limit, report):
             continue
         if abs(first_program.get(m['channel'], -1) - m['on'] / FRAME_RATE) < 1e-9:
             continue
-        zones = [z for z in presets.get((0, m['program']), []) if z['low'] <= m['key'] <= z['high']]
+        zones = [z for z in presets.get((m['bank'], m['program']), []) if z['low'] <= m['key'] <= z['high']]
         if zones and zones[0]['g'].get(54, 0) == 0:
             zone = zones[0]
             ratio = 2 ** (zone['g'].get(56, 100) * (m['key'] - zone['g'].get(58, zone['sample']['root'])) / 1200)

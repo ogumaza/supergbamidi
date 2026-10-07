@@ -13,8 +13,8 @@ per-frame routines directly (no BIOS, no video), and captures what the driver pr
     driver_emu.py ROM render TUNE FRAMES OUT.wav [--channels 0,9]
 
 The routine and RAM addresses are chosen by the ROM's game code. Those of Donkey Kong Country (A5NE), Sabre Wulf
-(AWUE), It's Mr. Pants (BPIE), Banjo-Kazooie: Grunty's Revenge (BKZX), Donkey Kong Country 2 (B2DE) and Banjo-Pilot
-(BAJE) are built in. Another game needs its own values; see GAMES and docs/rare.md.
+(AWUE), It's Mr. Pants (BPIE), Banjo-Kazooie: Grunty's Revenge (BKZX), Donkey Kong Country 2 (B2DE), Banjo-Pilot (BAJE)
+and Donkey Kong Country 3 (BDQE) are built in. Another game needs its own values; see GAMES and docs/rare.md.
 """
 import argparse
 import struct
@@ -49,6 +49,7 @@ class Addresses:
     buffers = (0x0809b040, 0x0809b038)  # mixer buffer addresses for a zero and nonzero flag
     samples_per_frame = 0x03001414
     channel_volume = 0x03001560  # 16 controller 7 values
+    envelope_settings = None     # in BDQE's revision, 4 bytes for each channel from controllers 20-23
 
 
 class AddressesAWUE(Addresses):
@@ -125,8 +126,23 @@ class AddressesBAJE(Addresses):
     channel_volume = 0x0203cd2c
 
 
+class AddressesBDQE(Addresses):
+    """BDQE (Donkey Kong Country 3)."""
+    init = 0x080aed90
+    request = 0x080aed34
+    frame = 0x080aee82
+    tune = 0x030012a0
+    note_slots = 0x030014c0
+    fx_slots = 0x03003c60
+    buffer_flag = 0x03003d30
+    buffers = (0x080e38b0, 0x080e38a8)
+    samples_per_frame = 0x03001294
+    channel_volume = 0x03001380
+    envelope_settings = 0x030023f0
+
+
 GAMES = {b'A5NE': Addresses, b'AWUE': AddressesAWUE, b'BPIE': AddressesBPIE, b'BKZX': AddressesBKZX,
-         b'B2DE': AddressesB2DE, b'BAJE': AddressesBAJE}
+         b'B2DE': AddressesB2DE, b'BAJE': AddressesBAJE, b'BDQE': AddressesBDQE}
 
 
 def addresses_for(rom):
@@ -174,10 +190,12 @@ class DriverEmulator:
         self.muted = None
         self.call(addr.init)
 
-        # The mixer starts sub sp, sp, #0x24; str lr, [sp, #8] in the code the init copies to IWRAM. A hook there can
-        # mute voices just before they're mixed.
+        # The mixer starts sub sp, sp, #0x24 (#0x28 in BDQE); str lr, [sp, #8] in the code the init copies to IWRAM. A
+        # hook there can mute voices just before they're mixed.
         iwram = bytes(uc.mem_read(0x03000000, 0x8000))
         at = iwram.find(bytes.fromhex('24d04de208e08de5'))
+        if at < 0:
+            at = iwram.find(bytes.fromhex('28d04de208e08de5'))
         if at < 0:
             raise SystemExit("the driver's mixer wasn't found in IWRAM")
         uc.hook_add(UC_HOOK_CODE, self._before_mix, begin=0x03000000 + at, end=0x03000000 + at)
@@ -185,6 +203,7 @@ class DriverEmulator:
         # After mixing, the routine that moves the notes' samples on reads and clears the step the mixer left in each
         # note record: push {lr}; ldr fp, =size; ldr fp, [fp]; ldr sl, =note records; add sl, sl, fp.
         self.steps = [0] * (16 * addr.slots_per_channel)
+        self.unmixed_steps = list(self.steps)
         for at in range(0, 0x8000 - 20, 4):
             words = struct.unpack('<5I', iwram[at:at + 20])
             if words[0] == 0xE92D4000 and words[1] & 0xFFFFF000 == 0xE59FB000 and words[2] == 0xE59BB000 and \
@@ -196,7 +215,16 @@ class DriverEmulator:
         else:
             raise SystemExit("the driver's routine that moves the notes on wasn't found in IWRAM")
 
+    def _slot_steps(self):
+        a = self.addr
+        raw = bytes(self.uc.mem_read(a.note_slots, len(self.steps) * SLOT_SIZE))
+        return [struct.unpack('<I', raw[i * SLOT_SIZE + 8:i * SLOT_SIZE + 12])[0] for i in range(len(self.steps))]
+
     def _before_mix(self, uc, address, size, user):
+        # A slot keeps the step that the mixer last left in it when the mixer frees it, and a note that starts there
+        # later keeps it until the mixer takes the voice. So only a step that the mixer changes is its own.
+        self.unmixed_steps = self._slot_steps()
+
         # A voice whose velocity byte is 0 is mixed at a level of 0.
         if self.muted is None:
             return
@@ -206,9 +234,7 @@ class DriverEmulator:
                 uc.mem_write(a.note_slots + i * SLOT_SIZE + 3, b'\0')
 
     def _before_advance(self, uc, address, size, user):
-        a = self.addr
-        raw = bytes(uc.mem_read(a.note_slots, len(self.steps) * SLOT_SIZE))
-        self.steps = [struct.unpack('<I', raw[i * SLOT_SIZE + 8:i * SLOT_SIZE + 12])[0] for i in range(len(self.steps))]
+        self.steps = [step if step != before else 0 for step, before in zip(self._slot_steps(), self.unmixed_steps)]
 
     def _svc(self, uc, intno, user):
         raise SystemExit('the driver made a BIOS call')
@@ -293,6 +319,24 @@ class DriverEmulator:
 
     def channel_volume(self, channel):
         return self.uc.mem_read(self.addr.channel_volume + channel, 1)[0]
+
+    def envelope_settings(self, channel):
+        """Returns a channel's attack, decay, sustain and release settings from controllers 20-23, each 0xFF where the
+        channel's notes take their instrument's, as in a revision without them."""
+        if self.addr.envelope_settings is None:
+            return (0xFF,) * 4
+        return tuple(self.uc.mem_read(self.addr.envelope_settings + 4 * channel, 4))
+
+    def fade_table(self):
+        """Returns the 100 entries of the table of decay and release lengths, which the envelope code in IWRAM loads
+        with ldr r2, =table; ldrb r1, [r2, r1]."""
+        iwram = bytes(self.uc.mem_read(0x03000000, 0x8000))
+        for at in range(0, 0x8000 - 8, 4):
+            load, use = struct.unpack('<II', iwram[at:at + 8])
+            if load & 0xFFFFF000 == 0xE59F2000 and use == 0xE7D21001:
+                table = self.u32(0x03000000 + at + 8 + (load & 0xFFF))
+                return bytes(self.uc.mem_read(table, 100))
+        raise SystemExit("the driver's fade table wasn't found in IWRAM")
 
     def rate(self):
         """Returns the mixer's output rate in Hz, from the timer the init started."""

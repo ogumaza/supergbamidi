@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
-// Converts the music of GBA games with Konami's, Rare's, Quintet's, Nintendo R&D2's or Brownie Brown's sound driver, or
-// Nintendo's MP2K, to MIDI files and SoundFonts.
+// Converts the music of GBA games with Konami's, Rare's, Quintet's, Nintendo R&D2's or Brownie Brown's sound driver,
+// Nintendo's MP2K or Krawall, to MIDI files and SoundFonts.
 
 #include <algorithm>
 #include <cmath>
@@ -54,10 +54,10 @@ void Usage(FILE* f)
                  "\n"
                  "Converts every song in each GBA ROM (.gba) or GSF rip (.gsflib, .minigsf) to\n"
                  "a MIDI file and a matching SoundFont, for games whose music uses Konami's,\n"
-                 "Rare's, Quintet's, Nintendo R&D2's or Brownie Brown's sound driver, or\n"
-                 "Nintendo's MP2K. A game with more than one of them has each one's songs\n"
-                 "converted. The results go in a folder beside the input file, with the same\n"
-                 "name. You can also drop files on the program.\n"
+                 "Rare's, Quintet's, Nintendo R&D2's or Brownie Brown's sound driver,\n"
+                 "Nintendo's MP2K or Krawall. A game with more than one of them has each one's\n"
+                 "songs converted. The results go in a folder beside the input file, with the\n"
+                 "same name. You can also drop files on the program.\n"
                  "\n"
                  "options:\n"
                  "  -o, --output DIR      output directory (default: <file's folder>/<base name>)\n"
@@ -69,7 +69,8 @@ void Usage(FILE* f)
                  "                        the sample voices, in Quintet's, 0-3 are the PSG\n"
                  "                        channels and 4 and 5 the PCM channels, and in Brownie\n"
                  "                        Brown's, 0-3 are the music's PSG channels, 4-7 the sound\n"
-                 "                        effects' and 8 and up the sample channels)\n"
+                 "                        effects' and 8 and up the sample channels, and in\n"
+                 "                        Krawall, the module's channels)\n"
                  "      --single-sf2      write one SoundFont for all songs\n"
                  "      --voice-channels  give each of the driver's sound channels a MIDI channel\n"
                  "                        (MP2K), so that notes stop where the game cuts them\n"
@@ -79,10 +80,11 @@ void Usage(FILE* f)
                  "      --dump            also write a text listing of each song's sequence data\n"
                  "      --info            print each driver's detected tables and songs, then\n"
                  "                        exit\n"
-                 "      --driver NAME     use only konami, rare, quintet, rd2, brownie or mp2k,\n"
-                 "                        instead of every driver detection finds\n"
+                 "      --driver NAME     use only konami, rare, quintet, rd2, brownie, krawall or\n"
+                 "                        mp2k, instead of every driver detection finds\n"
                  "      --song-table ADDR    use this song table address (hex; in Nintendo R&D2's\n"
-                 "                           driver, the address of the game's settings for it)\n"
+                 "                           driver, the address of the game's settings for it,\n"
+                 "                           and in Krawall, the game's table of modules)\n"
                  "      --song-count N       use this many songs\n"
                  "      --sample-table ADDR  use this sample table address (hex; Konami's driver)\n"
                  "      --mix-rate HZ        use this DirectSound mixer rate (Konami's driver)\n"
@@ -107,7 +109,11 @@ void Usage(FILE* f)
                  "                        (frame w address size value), each sound channel's\n"
                  "                        record and each mixer voice's or FIFO's that isn't\n"
                  "                        clear (frame c0 or v0, then the record in hex), and the\n"
-                 "                        driver's other variables when they change (frame g)\n"
+                 "                        driver's other variables when they change (frame g);\n"
+                 "                        in Krawall, the mixer's variables (frame g), the\n"
+                 "                        player's record (frame p), each of the module's\n"
+                 "                        channels (frame c0) and each mixer channel (frame m0),\n"
+                 "                        in hex, when they change\n"
                  "      --trace-frames N  frames to trace (default: 3000)\n"
                  "  -q, --quiet           only print warnings and errors\n"
                  "  -h, --help            show this help\n"
@@ -325,9 +331,13 @@ int ParseArgs(const std::vector<std::string>& args, Options& o)
             {
                 o.overrides.driver = Driver::kBrownie;
             }
+            else if (v == "krawall")
+            {
+                o.overrides.driver = Driver::kKrawall;
+            }
             else
             {
-                OptionError("--driver needs konami, rare, quintet, rd2, brownie or mp2k");
+                OptionError("--driver needs konami, rare, quintet, rd2, brownie, krawall or mp2k");
                 return 2;
             }
         }
@@ -458,6 +468,8 @@ const char* DriverName(Driver driver)
         return "mp2k";
     case Driver::kBrownie:
         return "brownie";
+    case Driver::kKrawall:
+        return "krawall";
     default:
         return "";
     }

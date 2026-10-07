@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 
 cmake_minimum_required(VERSION 3.20)
-project(supergbamidi VERSION 1.3.0 LANGUAGES CXX)
+project(supergbamidi VERSION 1.4.0 LANGUAGES CXX)
 
 # The name of the macOS droplet app.
 set(SUPERGBAMIDI_APP_NAME Supergbamidi)
@@ -39,6 +39,11 @@ add_library(supergbamidi_core STATIC
     src/konami/seqformat.cpp
     src/konami/sequencer.cpp
     src/konami/soundfont.cpp
+    src/krawall/convert.cpp
+    src/krawall/driver.cpp
+    src/krawall/music.cpp
+    src/krawall/player.cpp
+    src/krawall/song.cpp
     src/mp2k/convert.cpp
     src/mp2k/driver.cpp
     src/mp2k/music.cpp
@@ -120,7 +125,7 @@ if(SUPERGBAMIDI_BUILD_TESTS)
     enable_testing()
     add_executable(supergbamidi_tests tests/test_main.cpp tests/test_util.cpp tests/konami_test.cpp tests/rare_test.cpp
                                       tests/quintet_test.cpp tests/mp2k_test.cpp tests/rd2_test.cpp
-                                      tests/brownie_test.cpp)
+                                      tests/brownie_test.cpp tests/krawall_test.cpp)
     target_link_libraries(supergbamidi_tests PRIVATE supergbamidi_core)
     add_test(NAME supergbamidi_tests COMMAND supergbamidi_tests)
 

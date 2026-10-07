@@ -123,6 +123,7 @@ Lookup LookUpInstrument(const Rom& rom, const DriverInfo& info, uint16_t bank, u
         lk.envelope = base + rom.U16(lk.region + 4);
         lk.found = true;
     }
+    lk.missing = lk.region == base;
     if (!lk.found || !lk.region)
     {
         return lk;
@@ -548,7 +549,9 @@ int Sequencer::RunTrack(int slot)
             break;
 
         case 0xE4:
-            player_.tempo = uint16_t(ReadVarLength(t));
+            // The Super Mario Advance 2 revision's tempo is a byte.
+            player_.tempo =
+                info_.revision == Revision::kSuperMarioAdvance2 ? rom_.U8(t.position++) : uint16_t(ReadVarLength(t));
             break;
 
         case 0xE5:
@@ -572,8 +575,12 @@ int Sequencer::RunTrack(int slot)
             break;
 
         case 0xEA:
-            player_.volume = rom_.U8(t.position++);
-            events_.push_back(MakeEvent(Event::kVolume, t.number, -1, 0, t.units, player_.volume));
+            // The Super Mario Advance 2 revision has no player volume, and EA is one of the commands that do nothing.
+            if (info_.revision != Revision::kSuperMarioAdvance2)
+            {
+                player_.volume = rom_.U8(t.position++);
+                events_.push_back(MakeEvent(Event::kVolume, t.number, -1, 0, t.units, player_.volume));
+            }
             break;
 
         case 0xF0:
@@ -701,10 +708,12 @@ void Sequencer::NoteOn(int slot, uint8_t note, uint8_t velocity, uint32_t length
     }
 
     // A note lasts its length at the tempo it starts at: with the game's change to the tempo unless the region opts out
-    // of it.
+    // of it. The Super Mario Advance 2 revision keeps the length in units, and the frames, in 16 bits.
     const uint32_t region = lk.region;
     const int tempo = (RegionFlags(region) & 0x10) ? player_.tempo : player_.tempo + player_.tempo_adjust;
-    const uint32_t frames = UnsignedDiv(length, uint32_t(tempo));
+    const bool mario = info_.revision == Revision::kSuperMarioAdvance2;
+    const uint32_t frames =
+        mario ? uint16_t(UnsignedDiv(uint16_t(length), uint32_t(tempo))) : UnsignedDiv(length, uint32_t(tempo));
 
     // In legato, the track's voice plays the note; otherwise it gets a voice of its own, which starts its envelope.
     int v = t.voices;
@@ -719,7 +728,7 @@ void Sequencer::NoteOn(int slot, uint8_t note, uint8_t velocity, uint32_t length
 
         LinkToTrack(slot, v);
         Voice& x = voices_[size_t(v)];
-        x.note = given;
+        x.note = mario ? 0 : given;
         x.position = 0;
         x.lfo_phase = 0;
         x.lfo_delay = t.lfo_delay;
@@ -1160,7 +1169,15 @@ uint32_t Sequencer::FramePitch(Voice& v)
     pitch += uint32_t(v.slide);
 
     const int bend = t.bend;
-    if (bend != 0)
+    if (bend != 0 && info_.revision == Revision::kSuperMarioAdvance2)
+    {
+        // The Super Mario Advance 2 revision scales the pitch by a factor in 256ths, which goes in a straight line from
+        // 1 at no bend to the range's step at a bend of 128, both ways.
+        const uint32_t range = rom_.U32(info_.pitch_table + 4 * (uint32_t(t.bend_range) + 0x30));
+        const uint32_t factor = uint32_t(int32_t((range - 0x8000) * uint32_t(bend) + 0x400000) >> 14);
+        pitch = v.type == kSampleType ? (pitch * factor) >> 8 : 0x800 - UnsignedDiv((0x800 - pitch) << 8, factor);
+    }
+    else if (bend != 0)
     {
         const uint32_t range = rom_.U32(info_.pitch_table + 4 * (uint32_t(t.bend_range) + 0x30));
         const uint32_t scale = uint32_t(bend > 0 ? bend : -bend) * range + 0x400000;
@@ -1231,8 +1248,22 @@ uint32_t Sequencer::FramePitch(Voice& v)
 // the track's volumes and the envelope while it plays, and a fade at the release's rate after it.
 uint32_t Sequencer::SampleLevel(Voice& v)
 {
+    const bool mario = info_.revision == Revision::kSuperMarioAdvance2;
     uint32_t level;
-    if (v.state == 1)
+    if (v.state == 1 && mario)
+    {
+        // The Super Mario Advance 2 revision has no second volume for the player, and scales the level to 127 at most
+        // rather than 190.
+        const Track& t = tracks_[size_t(std::max(v.track, 0))];
+        level = uint32_t(v.velocity) << 8;
+        level = (level * player_.fade) >> 7;
+        level = (level * player_.volume) >> 7;
+        level = (level * t.volume) >> 15;
+        level = (level * t.volume2) >> 7;
+        level = (level * uint32_t(EnvelopeStep(v))) >> 15;
+        v.volume = level;
+    }
+    else if (v.state == 1)
     {
         const Track& t = tracks_[size_t(std::max(v.track, 0))];
         level = uint32_t(v.velocity) << 7;
@@ -1250,7 +1281,7 @@ uint32_t Sequencer::SampleLevel(Voice& v)
         v.volume = level;
     }
 
-    return (level * 3) >> 9;
+    return mario ? level >> 8 : (level * 3) >> 9;
 }
 
 // Returns a PSG voice's NRx2 for the frame, or for the wave voice its volume (0-4), or 8 to leave the channel as it is.
@@ -1281,8 +1312,16 @@ uint8_t Sequencer::PsgEnvelope(Voice& v, bool panned)
     level <<= 15;
     level = (level * t.volume) >> 14;
     level = (level * t.volume2) >> 7;
-    level = (level * (player ? player_.volume : 0)) >> 7;
-    level = (level * (player ? player_.volume2 : 0)) >> 8;
+    if (info_.revision == Revision::kSuperMarioAdvance2)
+    {
+        // The Super Mario Advance 2 revision has no second volume for the player.
+        level = (level * (player ? player_.volume : 0)) >> 8;
+    }
+    else
+    {
+        level = (level * (player ? player_.volume : 0)) >> 7;
+        level = (level * (player ? player_.volume2 : 0)) >> 8;
+    }
     level = level * (player ? player_.fade : 0);
     if (v.type == kWaveType)
     {
@@ -1570,7 +1609,14 @@ void Sequencer::UpdateSampleVoices()
             pitch = v.pitch;
         }
 
-        const uint32_t step = UnsignedDiv((pitch >> 2) * rom_.U32(v.sample + 4), kMixRate) >> 5;
+        // The Super Mario Advance 2 revision multiplies the step by the frame's points and divides it by them again,
+        // which changes it only where the product wraps.
+        uint32_t step = UnsignedDiv((pitch >> 2) * rom_.U32(v.sample + 4), kMixRate);
+        if (info_.revision == Revision::kSuperMarioAdvance2)
+        {
+            step = UnsignedDiv(step * kFrameSamples, kFrameSamples);
+        }
+        step >>= 5;
         if (MixVoice(v, step))
         {
             StopVoice(index);

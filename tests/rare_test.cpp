@@ -182,6 +182,19 @@ public:
         return header_at;
     }
 
+    // Adds the code from which detection tells the revision of Donkey Kong Country 3: the controller handler's
+    // comparisons with 20 to 23, and the routine that moves the notes on storing the free state of loop modes 3 and 1
+    // through r0.
+    void AddEnvelopeControllers()
+    {
+        const uint32_t kRevision[] = {0xE3520014, 0x0A000000, 0xE3520015, 0x0A000000, 0xE3520016, 0x0A000000,
+                                      0xE3520017, 0xE3A03010, 0xE5C03000, 0xEA000002, 0xE3A03010, 0xE5C03000};
+        for (uint32_t i = 0; i < std::size(kRevision); i++)
+        {
+            Put32(kCode + 0x100 + 4 * i, kRevision[i]);
+        }
+    }
+
     Rom ToRom() const
     {
         Rom r;
@@ -496,7 +509,18 @@ void TestDetection()
     SUPERGBAMIDI_CHECK_EQ(info.sine_table, kSineTable);
     SUPERGBAMIDI_CHECK_EQ(FadeFrames(info, 95), 5);
     SUPERGBAMIDI_CHECK_EQ(FadeFrames(info, 99), 0);
+    SUPERGBAMIDI_CHECK(!info.envelope_controllers && !info.frees_loop_once);
     SUPERGBAMIDI_CHECK(info.warnings.empty());
+
+    // The code of Donkey Kong Country 3's revision.
+    cart.AddEnvelopeControllers();
+
+    const DriverInfo newer = Detect(cart.ToRom());
+
+    SUPERGBAMIDI_CHECK(newer.envelope_controllers && newer.frees_loop_once);
+    SUPERGBAMIDI_CHECK(std::find(newer.log.begin(), newer.log.end(),
+                                 "controllers 20-23 set a channel's attack, decay, sustain and release") !=
+                       newer.log.end());
 
     // Overrides take the place of what detection finds.
     DriverOverrides overrides;
@@ -675,6 +699,134 @@ void TestEnvelope()
     SUPERGBAMIDI_CHECK_EQ(sustained.sustain, int(std::lround(-200 * std::log10(kLevel))));
     SUPERGBAMIDI_CHECK_EQ(sustained.decay,
                           int(std::lround(1200 * std::log2(1000.0 / sustained.sustain * 70 / kFrameRate))));
+}
+
+// The levels of channel 1's first slot on each of the first 40 frames of tune 0, and the settings that each phase of
+// its envelopes took.
+struct EnvelopeRun
+{
+    std::vector<int32_t> levels; // 0 where the slot is free
+    std::vector<EnvelopeSettings> took;
+};
+
+EnvelopeRun RunEnvelope(const Rom& rom, const DriverInfo& info)
+{
+    EnvelopeRun run;
+    Sequencer seq(rom, info, 0);
+    for (int frame = 0; frame < 40; frame++)
+    {
+        for (const Action& a : seq.Step())
+        {
+            if (a.kind == Action::kEnvelope && a.slot == 6)
+            {
+                run.took.push_back(a.envelope);
+            }
+        }
+
+        const Slot& s = seq.GetSlot(6);
+        run.levels.push_back(s.state == kSlotFree ? 0 : s.level);
+    }
+
+    return run;
+}
+
+// In the revision of Donkey Kong Country 3, controllers 20 to 23 give a channel's notes an attack of 3 steps, a decay
+// and a release whose fade table entries are 4 and 2, and a sustain level of 64/128, in place of their instrument's
+// instant attack, decay and release at the full level. A program change takes the settings away again. Older revisions
+// ignore the controllers.
+void TestEnvelopeSettings()
+{
+    const Format kFormat = Format::kChannelNibble;
+    Cart cart(kFormat);
+    const auto bank = cart.Bank({{0, cart.Sample(Saw(), 32)}});
+    cart.Tune({Track(kFormat).Tempo(500000).Wait(960).End(), Track(kFormat)
+                                                                 .Program(1, 0)
+                                                                 .Control(1, kCtrlAttack, 3)
+                                                                 .Control(1, kCtrlDecay, 4)
+                                                                 .Control(1, kCtrlSustain, 64)
+                                                                 .Control(1, kCtrlRelease, 2)
+                                                                 .On(1, 60, 100)
+                                                                 .Wait(160)
+                                                                 .Off(1, 60)
+                                                                 .Wait(160)
+                                                                 .Program(1, 0)
+                                                                 .On(1, 62, 100)
+                                                                 .Wait(160)
+                                                                 .Off(1, 62)
+                                                                 .Wait(160)
+                                                                 .End()},
+              bank);
+    const Rom older_rom = cart.ToRom();
+    cart.AddEnvelopeControllers();
+    const Rom rom = cart.ToRom();
+
+    const EnvelopeRun older = RunEnvelope(older_rom, Detect(older_rom));
+    const EnvelopeRun newer = RunEnvelope(rom, Detect(rom));
+
+    // The older revision plays both notes at the full level from their first frame, and stops each at its note off on
+    // frames 10 and 30.
+    SUPERGBAMIDI_CHECK_EQ(older.levels[0], kFullLevel);
+    SUPERGBAMIDI_CHECK_EQ(older.levels[9], kFullLevel);
+    SUPERGBAMIDI_CHECK_EQ(older.levels[10], 0);
+    SUPERGBAMIDI_CHECK_EQ(older.levels[20], kFullLevel);
+    SUPERGBAMIDI_CHECK(older.took.empty());
+
+    // The first note rises over 4 frames, falls to the sustain level over 5, and releases over 3 from frame 10.
+    const std::vector<int32_t> kAttack = {0x20000, 0x40000, 0x60000, kFullLevel, 471808, 419392};
+    SUPERGBAMIDI_CHECK(std::vector<int32_t>(newer.levels.begin(), newer.levels.begin() + 6) == kAttack);
+    SUPERGBAMIDI_CHECK_EQ(newer.levels[8], 0x40000);
+    SUPERGBAMIDI_CHECK_EQ(newer.levels[10], 174752);
+    SUPERGBAMIDI_CHECK_EQ(newer.levels[11], 87376);
+    SUPERGBAMIDI_CHECK_EQ(newer.levels[12], 0);
+
+    // The second note plays as in the older revision.
+    SUPERGBAMIDI_CHECK_EQ(newer.levels[20], kFullLevel);
+    SUPERGBAMIDI_CHECK_EQ(newer.levels[30], 0);
+
+    // The phases of the first note took the settings, and those of the second none.
+    SUPERGBAMIDI_CHECK_EQ(newer.took.size(), 3);
+    if (newer.took.size() == 3)
+    {
+        SUPERGBAMIDI_CHECK(newer.took[0] == EnvelopeSettings{.attack = 3});
+        SUPERGBAMIDI_CHECK(newer.took[1] == (EnvelopeSettings{.decay = 4, .sustain = 64}));
+        SUPERGBAMIDI_CHECK(newer.took[2] == EnvelopeSettings{.release = 2});
+    }
+}
+
+// Eight looping notes on channels 0 and 1 fill the mixer, so it doesn't mix the short sample without a loop that
+// channel 2 plays, and that sample ends where the notes are moved on. The revision of Donkey Kong Country 3 frees its
+// slot there, and the older revisions leave it in use until the mixer takes the voice.
+void TestUnmixedEnd()
+{
+    const Format kFormat = Format::kChannelByte;
+    Cart cart(kFormat);
+    const auto bank = cart.Bank({{0, cart.Sample(Saw(), 32)}, {1, cart.Sample(Saw(), 0)}});
+    Track loops(kFormat);
+    loops.Tempo(500000).Program(0, 0).Program(1, 0);
+    for (int k = 60; k < 66; k++)
+    {
+        loops.On(0, k, 100);
+    }
+    loops.On(1, 60, 100).On(1, 61, 100).Wait(480);
+    cart.Tune({loops.End(), Track(kFormat).Program(2, 1).On(2, 60, 100).Wait(480).End()}, bank);
+    const Rom older_rom = cart.ToRom();
+    cart.AddEnvelopeControllers();
+    const Rom rom = cart.ToRom();
+
+    auto state_after = [](const Rom& r)
+    {
+        const DriverInfo info = Detect(r);
+        Sequencer seq(r, info, 0);
+        for (int frame = 0; frame < 3; frame++)
+        {
+            seq.Step();
+        }
+
+        return seq.GetSlot(12).state;
+    };
+
+    SUPERGBAMIDI_CHECK_EQ(state_after(older_rom), kSlotOn);
+    SUPERGBAMIDI_CHECK_EQ(state_after(rom), kSlotFree);
 }
 
 void TestPitch()
@@ -1206,6 +1358,151 @@ void TestConversion()
     SUPERGBAMIDI_CHECK_EQ(leads, 1);
 }
 
+// In the revision of Donkey Kong Country 3, channel 1's first note plays with settings from controllers 20 to 23, and
+// its second, after a program change, without them. The first note's preset is in a bank of its own, which a bank
+// select gives before its program change, with an instrument whose envelope has the settings, and the second note's
+// bank select goes back to bank 0.
+void TestEnvelopeConversion()
+{
+    const Format kFormat = Format::kChannelNibble;
+    Cart cart(kFormat);
+    cart.AddEnvelopeControllers();
+    const uint32_t sample = cart.Sample(Saw(), 32);
+    const auto bank = cart.Bank({{5, sample}});
+    cart.Tune({Track(kFormat).Tempo(500000).Wait(960).End(), Track(kFormat)
+                                                                 .Program(1, 5)
+                                                                 .Control(1, kCtrlAttack, 3)
+                                                                 .Control(1, kCtrlDecay, 4)
+                                                                 .Control(1, kCtrlSustain, 64)
+                                                                 .Control(1, kCtrlRelease, 2)
+                                                                 .On(1, 60, 100)
+                                                                 .Wait(160)
+                                                                 .Off(1, 60)
+                                                                 .Wait(160)
+                                                                 .Program(1, 5)
+                                                                 .On(1, 62, 100)
+                                                                 .Wait(160)
+                                                                 .Off(1, 62)
+                                                                 .End()},
+              bank);
+    const Rom rom = cart.ToRom();
+    const DriverInfo info = Detect(rom);
+    ConvertOptions opt;
+    opt.out_dir = Utf8(g_temp);
+    opt.base_name = "envelope";
+
+    const SongSummary r = ConvertSong(rom, info, 0, opt, nullptr);
+
+    // Bank 1 from the first note's tick, and bank 0 from the second's.
+    SUPERGBAMIDI_CHECK(r.ok && !r.silent);
+    const MidiEvents m = ReadMidi(r.midi_path);
+    std::vector<std::pair<uint32_t, int>> banks;
+    for (const auto& e : m.Find(0xB1))
+    {
+        if (e.second[1] == 0)
+        {
+            banks.push_back({e.first, e.second[2]});
+        }
+    }
+    const std::vector<std::pair<uint32_t, int>> kBanks = {{0, 1}, {320, 0}};
+    SUPERGBAMIDI_CHECK(banks == kBanks);
+
+    // The SoundFont has program 5 in banks 0 and 1. Bank 1's instrument is named after the settings, and its envelope
+    // has them.
+    const Sf2Records sf = ReadSf2(r.sf2_path);
+    std::map<std::pair<int, int>, int> presets;
+    for (size_t p = 0; p + 1 < sf.Count("phdr", 38); p++)
+    {
+        const uint8_t* h = sf.Record("phdr", 38, p);
+        presets[{Le16(h + 22), Le16(h + 20)}] =
+            Le16(sf.Record("pgen", 4, Le16(sf.Record("pbag", 4, Le16(h + 24)))) + 2);
+    }
+    SUPERGBAMIDI_CHECK(presets.size() == 2 && presets.count({0, 5}) && presets.count({1, 5}));
+
+    const uint8_t* variant = sf.Record("inst", 22, size_t(presets[{1, 5}]));
+    char name[32];
+    std::snprintf(name, sizeof name, "%08X a3d4s64r2", unsigned(sample));
+    SUPERGBAMIDI_CHECK(std::string(reinterpret_cast<const char*>(variant)) == name);
+
+    Instrument inst;
+    ReadInstrument(rom, sample, inst);
+    const Sf2Envelope want = EnvelopeFor(info, inst, {.attack = 3, .decay = 4, .sustain = 64, .release = 2});
+    const auto zone = sf.ZoneGens(Le16(variant + 20) + 1);
+    SUPERGBAMIDI_CHECK_EQ(int16_t(zone.at(sf2gen::kAttackVolEnv)), want.attack);
+    SUPERGBAMIDI_CHECK_EQ(int16_t(zone.at(sf2gen::kDecayVolEnv)), want.decay);
+    SUPERGBAMIDI_CHECK_EQ(int16_t(zone.at(sf2gen::kSustainVolEnv)), want.sustain);
+    SUPERGBAMIDI_CHECK_EQ(int16_t(zone.at(sf2gen::kReleaseVolEnv)), want.release);
+
+    // That envelope: an attack of 4 frames, a sustain at half the level, which the decay reaches in its 5 frames, and a
+    // release of 3 frames stretched to 3 times as long.
+    SUPERGBAMIDI_CHECK_EQ(want.attack, int(std::lround(1200 * std::log2(4 / kFrameRate))));
+    SUPERGBAMIDI_CHECK_EQ(want.sustain, 60);
+    SUPERGBAMIDI_CHECK_EQ(want.decay, int(std::lround(1200 * std::log2(1000.0 / 60 * 5 / kFrameRate))));
+    SUPERGBAMIDI_CHECK_EQ(want.release, int(std::lround(1200 * std::log2(9 / kFrameRate))));
+
+    // Bank 0's instrument has the instrument's instant envelope.
+    const auto plain = sf.ZoneGens(Le16(sf.Record("inst", 22, size_t(presets[{0, 5}])) + 20) + 1);
+    SUPERGBAMIDI_CHECK(!plain.count(sf2gen::kAttackVolEnv) && !plain.count(sf2gen::kReleaseVolEnv));
+}
+
+// A note that plays without settings ends before the tune's end, where its slot's next note starts with an attack from
+// controller 20. That note isn't converted, and with frame timing the settings it takes don't go to the note before it
+// either, so both conversions have only bank 0.
+void TestEnvelopePastEnd()
+{
+    const Format kFormat = Format::kChannelNibble;
+    Cart cart(kFormat);
+    cart.AddEnvelopeControllers();
+    const auto bank = cart.Bank({{5, cart.Sample(Saw(), 32)}});
+    cart.Tune({Track(kFormat).Tempo(500000).Wait(96).End(), Track(kFormat)
+                                                                .Program(0, 5)
+                                                                .On(0, 60, 100)
+                                                                .Wait(64)
+                                                                .Off(0, 60)
+                                                                .Wait(32)
+                                                                .Control(0, kCtrlAttack, 3)
+                                                                .On(0, 62, 100)
+                                                                .End()},
+              bank);
+    const Rom rom = cart.ToRom();
+    const DriverInfo info = Detect(rom);
+
+    for (bool frame_timing : {false, true})
+    {
+        ConvertOptions opt;
+        opt.out_dir = Utf8(g_temp);
+        opt.base_name = frame_timing ? "past_end_frames" : "past_end";
+        opt.frame_timing = frame_timing;
+
+        const SongSummary r = ConvertSong(rom, info, 0, opt, nullptr);
+
+        SUPERGBAMIDI_CHECK(r.ok && !r.silent);
+        const Sf2Records sf = ReadSf2(r.sf2_path);
+        SUPERGBAMIDI_CHECK_EQ(sf.Count("phdr", 38), 2);
+        SUPERGBAMIDI_CHECK_EQ(Le16(sf.Record("phdr", 38, 0) + 22), 0);
+        SUPERGBAMIDI_CHECK_EQ(ReadMidi(r.midi_path).Find(0x90).size(), 1);
+    }
+}
+
+// The banks for envelope settings come after those of the tunes' presets, one for each bank and set of settings, and
+// leave out the drum bank.
+void TestEnvelopeBanks()
+{
+    Cart cart(Format::kChannelNibble);
+    const Rom rom = cart.ToRom();
+    const DriverInfo info;
+    SoundfontBuilder sf(rom, info, 3);
+    SoundfontBuilder high(rom, info, kDrumBank);
+
+    SUPERGBAMIDI_CHECK_EQ(sf.BankFor(1, EnvelopeSettings()), 1);
+    SUPERGBAMIDI_CHECK_EQ(sf.BankFor(0, {.attack = 1}), 3);
+    SUPERGBAMIDI_CHECK_EQ(sf.BankFor(1, {.attack = 1}), 4);
+    SUPERGBAMIDI_CHECK_EQ(sf.BankFor(0, {.decay = 2}), 5);
+    SUPERGBAMIDI_CHECK_EQ(sf.BankFor(0, {.attack = 1}), 3);
+    SUPERGBAMIDI_CHECK_EQ(sf.BankFor(0, {.attack = 0x80}), 0);
+    SUPERGBAMIDI_CHECK_EQ(high.BankFor(0, {.release = 0}), kDrumBank + 1);
+}
+
 // An instrument of a type the driver doesn't name plays as a drum kit, so its SoundFont instrument has a zone for its
 // drum.
 void TestOtherDrumKitType()
@@ -1418,6 +1715,8 @@ void RunTests()
     TestTiming();
     TestSlots();
     TestEnvelope();
+    TestEnvelopeSettings();
+    TestUnmixedEnd();
     TestPitch();
     TestLoops();
     TestLoopBend();
@@ -1427,6 +1726,9 @@ void RunTests()
     TestHourLimit();
     TestFrameTiming();
     TestConversion();
+    TestEnvelopeConversion();
+    TestEnvelopePastEnd();
+    TestEnvelopeBanks();
     TestOtherDrumKitType();
     TestPrograms();
     TestSharedKey();

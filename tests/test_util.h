@@ -27,6 +27,9 @@ inline std::filesystem::path g_temp;
 // Returns the path of `name` in this run's temp folder.
 std::filesystem::path TempPath(const std::string& name);
 
+// Opens `name` in this run's temp folder for writing, in binary mode, or returns null if it can't be opened.
+std::FILE* OpenTempFile(const std::string& name);
+
 // Returns a file's bytes, or none if it can't be read.
 std::vector<uint8_t> ReadAll(const std::string& path);
 
@@ -101,8 +104,8 @@ Sf2Records ReadSf2(const std::string& path);
 
 } // namespace supergbamidi::test
 
-// Each driver's tests, in konami_test.cpp, rare_test.cpp, quintet_test.cpp, mp2k_test.cpp, rd2_test.cpp and
-// brownie_test.cpp.
+// Each driver's tests, in konami_test.cpp, rare_test.cpp, quintet_test.cpp, mp2k_test.cpp, rd2_test.cpp,
+// brownie_test.cpp and krawall_test.cpp.
 namespace supergbamidi::konami
 {
 
@@ -144,6 +147,13 @@ namespace supergbamidi::brownie
 void RunTests();
 
 } // namespace supergbamidi::brownie
+
+namespace supergbamidi::krawall
+{
+
+void RunTests();
+
+} // namespace supergbamidi::krawall
 
 #define SUPERGBAMIDI_CHECK(cond)                                                          \
     do                                                                                    \

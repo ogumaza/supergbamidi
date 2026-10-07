@@ -8,7 +8,9 @@
 The test song takes the place of song 0, in free space at the end of the ROM, and plays the game's instruments.
 It uses mono mode (controllers 126 and 127), which makes a channel play every note in its first slot, the note on with
 command number 4, channel pressure (command 9), the command that does nothing (12), and delays of one, two and three
-bytes. Check it against the driver with
+bytes. It also uses controllers 20-23, which set the attack, decay, sustain and release of a channel's notes in the
+revision of Donkey Kong Country 3 and do nothing in the others: an attack of several frames, settings that change
+while a note plays, a sustain of 0, and a program change, which takes them away. Check it against the driver with
 
     python tools/rare/compare_trace.py OUT.gba SUPERGBAMIDI --songs 0
 """
@@ -121,7 +123,19 @@ def test_tracks(nibble, sustained, other):
     t2 = Track(nibble).program(1, other).wait(10).control(1, 126, 0)
     t2.on(1, 48, 127).wait(12).on(1, 50, 127).wait(12).on(1, 52, 127).wait(40).off(1, 52).control(1, 127, 0)
     t2.on(1, 48, 127).on(1, 50, 127).wait(40).off(1, 50).off(1, 48)
-    return [t0, t1.end(), t2.end()]
+
+    # The envelope controllers on a third channel, at 16 ticks a frame: an attack of 7 frames, a decay of 10 to a
+    # sustain level of 40/128 and a release of 6. Then an instant attack, with a decay and a sustain of 0 set in the
+    # frame before the decay starts, which stops the note, and a release that changes while a note plays. A program
+    # change takes them all away. A sustain level comes with a decay each time, since the driver reads a decay without
+    # its setting from a register that holds whatever its code left there.
+    t3 = Track(nibble).program(2, sustained).control(2, 7, 100)
+    t3.control(2, 20, 6).control(2, 21, 9).control(2, 22, 40).control(2, 23, 5)
+    t3.on(2, 60, 100).wait(320).off(2, 60).wait(160)
+    t3.control(2, 20, 0).on(2, 62, 100).wait(16).control(2, 21, 3).control(2, 22, 0).wait(160).off(2, 62).wait(16)
+    t3.control(2, 22, 60).on(2, 64, 100).wait(48).control(2, 23, 1).wait(16).off(2, 64).wait(48)
+    t3.program(2, sustained).on(2, 65, 100).wait(64).off(2, 65)
+    return [t0, t1.end(), t2.end(), t3.end()]
 
 
 def main():

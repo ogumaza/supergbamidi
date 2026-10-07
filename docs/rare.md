@@ -27,8 +27,42 @@ channel in its high nibble. The revisions differ in a few other details:
 | *Banjo-Kazooie: Grunty's Revenge* (`BKZX`) | channel nibble | 6 | 4 | stored |
 | *Donkey Kong Country 2* (`B2DE`) | channel nibble | 6 | 5 | stored |
 | *Banjo-Pilot* (`BAJE`) | channel nibble | 5 | 4 | stored |
+| *Donkey Kong Country 3* (`BDQE`) | channel nibble | 6 | 5 | stored |
 
-The rest of this document applies to all these revisions.
+The rest of this document applies to all these revisions, apart from what it
+says of *Donkey Kong Country 3*'s.
+
+### Donkey Kong Country 3's revision
+
+*Donkey Kong Country 3* uses a later revision with these changes:
+
+* Controllers 20 to 23 set the attack, decay, sustain and release of a
+  channel's notes, in place of their instrument's (see
+  [Controllers](#controllers) and [Envelopes](#envelopes)).
+* The game can start a tune partway through, at a marker that its tracks hold
+  (see [Starting a tune](#starting-a-tune)).
+* Each channel has a level that the game can turn down, and a note at a level
+  of 0 doesn't count towards the voice limit (see [Mixing](#mixing)).
+* The routine that moves the notes on frees a slot in loop mode 1 at the
+  sample's end, which the older revisions miss (see [Sample
+  positions](#sample-positions)).
+
+Its routines are at `0x080AED34` (request a tune), `0x080AED90` (init) and
+`0x080AEE82` (per-frame routine), and the routine that looks for a marker is
+at `0x080AF61C`. Its RAM holds:
+
+| Address | Contents |
+|---|---|
+| `0x03001464` | the requested tune, or -1 |
+| `0x030012A0` | the tune playing, or -1 |
+| `0x030023C0` | the marker to start the next tune at, or -1 |
+| `0x030023F0` | each channel's settings from controllers 20 to 23: 16 words of 4 bytes |
+| `0x03001400` | each channel's level: 16 bytes |
+| `0x03001380` | each channel's volume (controller 7): 16 bytes |
+| `0x030014C0` | the note slots: 6 for each of the 16 channels |
+| `0x03003C60` | the sound effect records: 5 |
+| `0x03001294` | samples a frame |
+| `0x03003D30` | the output buffer flag |
 
 ## Architecture
 
@@ -143,6 +177,15 @@ tracks' loop positions. If a tune plays a note before setting the channel's
 program, that note uses the instrument left over from the previous tune. The
 init sets every channel's volume to 0x7F and turns mono mode off.
 
+*Donkey Kong Country 3*'s revision also sets each channel's level to 128 and
+takes away its envelope settings when it starts a tune. If the game has given
+it a marker, every track but track 0 then skips ahead to its first controller
+104 whose value is the marker, keeping the last loop start (controller 102) it
+passes, and the marker goes back to -1. A track that reaches its end first
+ends the search, and it and the tracks after it start from their beginnings.
+The tracks' counters aren't changed, so the tracks start from the markers
+together. `supergbamidi` plays every tune from its start.
+
 ## Tracks
 
 ### Commands
@@ -209,9 +252,14 @@ that were still playing, until the game starts another tune.
 |---|---|
 | 1 | modulation: the depth of the channel's vibrato. 0 turns the vibrato off. |
 | 7 | the channel's volume |
+| 20 | in *Donkey Kong Country 3*'s revision, the attack of the channel's notes: its number of steps |
+| 21 | in *Donkey Kong Country 3*'s revision, the decay of the channel's notes: its fade table entry |
+| 22 | in *Donkey Kong Country 3*'s revision, the sustain level of the channel's notes, in 1/128ths of the full level |
+| 23 | in *Donkey Kong Country 3*'s revision, the release of the channel's notes: its fade table entry |
 | 100 | stores the value in a byte for each channel, which the driver itself doesn't use. *Sabre Wulf* and *It's Mr. Pants* ignore it. |
 | 102 | loop start: saves the position after the command as the track's loop position |
 | 103 | loop end: goes back to the track's loop position |
+| 104 | in *Donkey Kong Country 3*'s revision, a marker that the game can start the tune at (see [Starting a tune](#starting-a-tune)). It does nothing as the track plays. |
 | 126 | mono: the channel plays every note in its first slot |
 | 127 | poly: the channel goes back to picking a slot for each note |
 
@@ -219,6 +267,10 @@ The driver ignores the others. The loop position belongs to the track, and a
 tune loops forever by ending each looping track with controller 103. A loop end
 without a loop start goes back to whatever loop position the track had from an
 earlier tune. `supergbamidi` ignores such a loop end, with a warning.
+
+Controllers 20 to 23 keep their values until a program change on the channel,
+which sets all four back to 0xFF. A value of 0x80 or more leaves the
+instrument's setting, and [Envelopes](#envelopes) says how the others count.
 
 ## Instruments
 
@@ -339,6 +391,18 @@ When a note has been released, the next update of phase 1, 3 or 4 moves it to
 phase 5 instead. During the decay, a level below 0x1000 ends the note, so a
 note with a sustain level of 0 ends when its decay is over.
 
+In *Donkey Kong Country 3*'s revision, the settings that controllers 20 to 23
+give a note's channel take the place of the instrument's, each where it's
+below 0x80. Phase 0 takes controller 20 as the attack's number of steps,
+phase 2 takes controller 22 × 256 as the sustain level and controller 21 as
+the decay's fade table entry, and phase 5 takes controller 23 as the release's
+entry. Each phase reads the channel's settings as it starts, so a note that
+was playing when they changed takes the new ones in its later phases. Where a
+channel has a sustain level from controller 22 but no decay from controller
+21, the driver reads the decay through a register that holds whatever the code
+before left in it, so `supergbamidi` takes the instrument's decay there. Sound
+effects keep their instruments' envelopes.
+
 The fade table is 100 bytes, at `0x08032C94` in `A5NE`. Entry *i* gives a
 decay or release with index *i* a length of entry + 1 frames, and an entry of
 0 means no fade at all. The entries mostly fall, from 0xFE (255 frames, about
@@ -381,7 +445,10 @@ is the instrument's vibrato depth.
 
 The mixer gives each voice a level from 0 to 128:
 
-* For a note, the music volume × (the channel's volume + 1) / 128.
+* For a note, the music volume × (the channel's volume + 1) / 128, and in
+  *Donkey Kong Country 3*'s revision × the channel's level / 128. A tune
+  starts with each channel at a level of 128, and only the game's code turns
+  one down.
 * For a sound effect, the sound effect volume.
 * Then × (velocity + 1) / 128 and × the envelope's level / 2^19.
 
@@ -396,7 +463,10 @@ released, each in the order of their records, and stops at the voice limit.
 The init sets the limit to 8. The voices past the limit are silent for the
 frame. Note slots are in channel order, so when more than 8 voices play, the
 mixer leaves out released notes before notes that are on, and notes on higher
-channels before those on lower ones.
+channels before those on lower ones. In *Donkey Kong Country 3*'s revision, a
+note whose level is 0 before its velocity and envelope count isn't mixed and
+doesn't count towards the limit, which takes the game turning the music or the
+channel all the way down.
 
 For each output sample, the mixer interpolates the voice's sample linearly
 between the byte at its position and the next, by the position's fraction,
@@ -412,13 +482,16 @@ rest of the frame is silent.
 ### Sample positions
 
 After mixing, the driver advances every active or released voice's sample
-position by one frame, including voices the mixer skipped. Mixed voices use
-the step calculated by the mixer; the driver recalculates the step for the
-others. Past the sample's end, a loop goes back by its length until it's
-inside the sample. In loop mode 3 the slot is freed. In loop
-mode 1 the driver stores the free state through a register that doesn't hold
-the slot's address, so the slot stays in use until the mixer next takes the
-voice and frees it.
+position by one frame, including voices the mixer skipped. It moves a voice on
+by the step that the mixer left in its slot, and clears the step. Where the
+step is 0, as for a voice that the mixer skipped, it works the step out again.
+A slot that the mixer frees keeps its step, though, so a note that starts
+there and isn't mixed in its first frame moves on by the step of the note
+before it. Past the sample's end, a loop goes back by its length until it's
+inside the sample. In loop mode 3 the slot is freed. In loop mode 1 the older
+revisions store the free state through a register that doesn't hold the
+slot's address, so the slot stays in use until the mixer next takes the voice
+and frees it. *Donkey Kong Country 3*'s revision frees it, as in mode 3.
 
 ## Locating the driver
 
@@ -470,6 +543,33 @@ lsr  r1, r0, #4            ; E1A01220
 bic  r0, r0, #0xF0         ; E3C000F0
 ldr  r0, [ip, r0, lsl #2]  ; E79C0100
 ```
+
+Two more patterns tell *Donkey Kong Country 3*'s revision. Its controller
+handler compares the controller with 20 to 23 in turn:
+
+```
+cmp r2, #20                ; E3520014
+beq ...                    ; 0Axxxxxx
+cmp r2, #21                ; E3520015
+beq ...
+cmp r2, #22                ; E3520016
+beq ...
+cmp r2, #23                ; E3520017
+```
+
+and where the routine that moves the notes on takes a sample past its end, it
+stores the free state for loop modes 3 and 1 through `r0`, which holds the
+slot's address:
+
+```
+mov  r3, #0x10             ; E3A03010
+strb r3, [r0]              ; E5C03000
+b    ...                   ; EAxxxxxx
+mov  r3, #0x10             ; E3A03010
+strb r3, [r0]              ; E5C03000
+```
+
+The older revisions store mode 1's through `r8` (`strb r3, [r8]`, `E5C83000`).
 
 It finds the driver's tables from the instruction that loads each one's
 address (`ldr rX, [pc, #imm]`) and the instruction after it:

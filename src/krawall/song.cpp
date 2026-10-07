@@ -1,0 +1,188 @@
+// SPDX-License-Identifier: MIT
+
+#include "krawall/song.h"
+
+#include <cstdio>
+#include <iterator>
+#include <string>
+#include <vector>
+
+#include "files.h"
+
+namespace supergbamidi::krawall
+{
+namespace
+{
+
+// The effects' names, as the player's table of effects lists them.
+constexpr const char* kEffectNames[] = {
+    "no effect",
+    "speed",
+    "bpm",
+    "speed/bpm",
+    "jump",
+    "break",
+    "volume slide (S3M)",
+    "volume slide (XM)",
+    "fine volume down",
+    "fine volume up",
+    "porta down (XM)",
+    "porta down (S3M)",
+    "fine porta down",
+    "extra fine porta down",
+    "porta up (XM)",
+    "porta up (S3M)",
+    "fine porta up",
+    "extra fine porta up",
+    "volume",
+    "porta to note",
+    "vibrato",
+    "tremor",
+    "arpeggio",
+    "volume slide + vibrato",
+    "volume slide + porta",
+    "channel volume",
+    "channel volume slide",
+    "offset",
+    "pan slide",
+    "retrig",
+    "tremolo",
+    "fine vibrato",
+    "global volume",
+    "global volume slide",
+    "pan",
+    "panbrello",
+    "mark",
+    "glissando",
+    "vibrato wave",
+    "tremolo wave",
+    "panbrello wave",
+    "fine pattern delay (none)",
+    "old pan (none)",
+    "pattern loop",
+    "note cut",
+    "note delay",
+    "pattern delay (none)",
+    "envelope position (none)",
+    "high offset (none)",
+    "volume slide + vibrato (XM)",
+    "volume slide + porta (XM)",
+};
+
+// The volume column's effects, by the column's high digit from 6.
+constexpr const char* kColumnNames[] = {
+    "volume slide down", "volume slide up", "fine volume down", "fine volume up", "vibrato speed", "vibrato", "pan",
+    "pan slide left",    "pan slide right", "porta to note",
+};
+
+constexpr const char* kNoteNames[] = {"C-", "C#", "D-", "D#", "E-", "F-", "F#", "G-", "G#", "A-", "A#", "B-"};
+
+// Returns a note of a pattern as its name: the note from C-0 in the pattern, before the sample's relative note.
+std::string NoteName(int note)
+{
+    if (note == 0x7F)
+    {
+        return "off";
+    }
+
+    return kNoteNames[(note - 1) % 12] + std::to_string((note - 1) / 12);
+}
+
+} // namespace
+
+bool DumpSong(const Rom& rom, const DriverInfo& info, int song, const std::string& path, std::string& error)
+{
+    ModuleInfo module;
+    if (song < 0 || size_t(song) >= info.modules.size() || !ReadModule(rom, info.modules[size_t(song)], module))
+    {
+        error = "module " + std::to_string(song) + " can't be read";
+        return false;
+    }
+
+    std::string out;
+    char line[256];
+    std::snprintf(line, sizeof line,
+                  "Module %d at 0x%08X: %d channels, %d orders, restart at order %d, speed %d, tempo %d, global volume "
+                  "%d, %s, %s periods%s\n",
+                  song, unsigned(module.address), module.channels, module.order_count, module.restart, module.speed,
+                  module.tempo, module.global_volume, module.instruments ? "instruments" : "samples",
+                  module.linear ? "linear" : "Amiga", module.fast_slides ? ", fast volume slides" : "");
+    out += line;
+
+    // The orders, with +++ for a marker between songs, and the channels' pans.
+    out += "Orders:";
+    for (int i = 0; i < module.order_count; i++)
+    {
+        const uint8_t o = module.orders[size_t(i)];
+        out += o == kOrderSkip ? " +++" : o == kOrderEnd ? " ---" : " " + std::to_string(o);
+    }
+    out += "\nPans:";
+    for (int c = 0; c < module.channels; c++)
+    {
+        out += " " + std::to_string(module.channel_pan[size_t(c)]);
+    }
+    out += "\n";
+
+    // Each pattern's rows: a channel's note and instrument, its volume column and its effect, whichever the row gives.
+    for (size_t p = 0; p < module.patterns.size(); p++)
+    {
+        const uint32_t pattern = module.patterns[p];
+        const int rows = rom.U8(pattern + kPatternRows);
+        std::snprintf(line, sizeof line, "\nPattern %d at 0x%08X, %d rows\n", int(p), unsigned(pattern), rows);
+        out += line;
+
+        uint32_t at = pattern + kPatternData;
+        for (int row = 0; row < rows && rom.Contains(at); row++)
+        {
+            std::snprintf(line, sizeof line, "%3d", row);
+            std::string text = line;
+            for (uint8_t follow = rom.U8(at++); follow && rom.Contains(at); follow = rom.U8(at++))
+            {
+                std::snprintf(line, sizeof line, " | c%d", follow & 0x1F);
+                text += line;
+                if (follow & 0x20)
+                {
+                    const uint8_t b0 = rom.U8(at);
+                    const int instrument = rom.U8(at + 1) | ((b0 & 1) << 8);
+                    at += 2;
+                    if (b0 >> 1)
+                    {
+                        text += " " + NoteName(b0 >> 1);
+                    }
+                    if (instrument)
+                    {
+                        text += " i" + std::to_string(instrument);
+                    }
+                }
+                if (follow & 0x40)
+                {
+                    const uint8_t volume = rom.U8(at++);
+                    if (volume <= 0x60)
+                    {
+                        text += " v" + std::to_string(volume - 0x10);
+                    }
+                    else
+                    {
+                        std::snprintf(line, sizeof line, " %s %d", kColumnNames[(volume - 0x60) >> 4],
+                                      (volume - 0x60) & 0xF);
+                        text += line;
+                    }
+                }
+                if (follow & 0x80)
+                {
+                    const uint8_t effect = rom.U8(at);
+                    const uint8_t op = rom.U8(at + 1);
+                    at += 2;
+                    std::snprintf(line, sizeof line, " %s %02X",
+                                  effect < std::size(kEffectNames) ? kEffectNames[effect] : "unknown effect", op);
+                    text += line;
+                }
+            }
+            out += text + "\n";
+        }
+    }
+
+    return WriteFile(path, std::vector<uint8_t>(out.begin(), out.end()), error);
+}
+
+} // namespace supergbamidi::krawall

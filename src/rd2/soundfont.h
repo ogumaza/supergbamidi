@@ -10,16 +10,20 @@
 #include <string>
 #include <vector>
 
+#include "rd2/driver.h"
 #include "rom.h"
 #include "sf2.h"
 
 namespace supergbamidi::rd2
 {
 
-// The level of a PSG voice at its full volume, as a share of a full-scale sample at the driver's default volumes: the
-// driver mixes the PSG at 50%, so volume 15 is 15/128 of the GBA's full scale, and a sample voice plays a full-scale
-// sample at about 47/128 on each side.
-constexpr double kPsgShare = 15.0 / 47.0;
+// Returns the level of a PSG voice at its full volume, as a share of a full-scale sample at the driver's default
+// volumes: the driver mixes the PSG at 50%, so volume 15 is 15/128 of the GBA's full scale, and a sample voice plays a
+// full-scale sample at about 47/128 on each side, or 31/128 in the Super Mario Advance 2 revision.
+constexpr double PsgShare(Revision revision)
+{
+    return revision == Revision::kSuperMarioAdvance2 ? 15.0 / 31.0 : 15.0 / 47.0;
+}
 
 // A voice's envelope in a SoundFont's terms: times in timecents and levels in centibels below the full level.
 struct Sf2Envelope

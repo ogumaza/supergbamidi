@@ -28,22 +28,43 @@ struct TablePattern
     int index;
 };
 
-// The routine that works out a voice's pitch from its note: the sample pitch table, then the frequency table.
-constexpr TablePattern kPitchTable = {
-    "B500 0609 0E09 0612 0E12 3130 1A89 0409 0C0A 1409 2900 DA01 2200 E002 2977 DD00 2278 7800 2800 D107 48xx", 20};
-constexpr int kFrequencyIndex = 30;
+// A revision's code that loads the tables whose code differs between the revisions, which the games' compilers built
+// with different prologues, registers and literal pools: the routine that works out a voice's pitch from its note,
+// which loads the sample pitch table and then, at `frequency_index`, the frequency table; the routine that looks up a
+// noise voice's NR43; the LFO's step in the routine that works out a voice's pitch for a frame; and the note on, which
+// picks the voices that can play a region by its type.
+struct RevisionPatterns
+{
+    TablePattern pitch_table;
+    int frequency_index;
+    TablePattern noise_table;
+    TablePattern lfo_table;
+    TablePattern voice_classes;
+};
 
-// The routine that looks up a noise voice's NR43.
-constexpr TablePattern kNoiseTable = {"B500 0400 0C01 2977 D900 2177 48xx 1808 7800", 6};
+constexpr RevisionPatterns kLinkToThePastPatterns = {
+    {"B500 0609 0E09 0612 0E12 3130 1A89 0409 0C0A 1409 2900 DA01 2200 E002 2977 DD00 2278 7800 2800 D107 48xx", 20},
+    30,
+    {"B500 0400 0C01 2977 D900 2177 48xx 1808 7800", 6},
+    {"68A0 6883 2B00 D0xx 6860 2800 D1xx 48xx 6A29 0849 1809 7809", 7},
+    {"49xx 7830 1840 7800 1C29 3152 7809", 0},
+};
 
-// The LFO's step in the routine that works out a voice's pitch for a frame.
-constexpr TablePattern kLfoTable = {"68A0 6883 2B00 D0xx 6860 2800 D1xx 48xx 6A29 0849 1809 7809", 7};
+constexpr RevisionPatterns kSuperMarioAdvance2Patterns = {
+    {"0609 0E09 0612 0E12 3130 1A89 0409 0C0A 1409 2900 DA01 2200 E002 2977 DD00 2278 7800 2800 D108 48xx", 19},
+    30,
+    {"0400 0C01 2977 D900 2177 48xx 1808 7800", 5},
+    {"68A0 6882 2A00 D0xx 6860 2800 D1xx 48xx 6A29 0849 1809 7809", 7},
+    {"49xx 7830 1840 7800 1C29 3152 780A 1C29", 0},
+};
+
+// The start of the routine that works out a sample voice's level in the Super Mario Advance 2 revision, which reads
+// the velocity from the voice's byte 9 and shifts it left by 8: ldrb r4, [r5, #9]; lsls r4, r4, #8. A Link to the
+// Past's reads byte 10 and shifts it by 7.
+constexpr const char* kSuperMarioAdvance2Level = "B530 1C05 7868 2801 D1xx 7A6C 0224";
 
 // The wave voice's fade after its release.
 constexpr TablePattern kWaveVolumes = {"2904 D900 2104 0609 0E09 4Axx 48xx 1809 7808 7010", 6};
-
-// The note on, which picks the voices that can play a region by its type.
-constexpr TablePattern kVoiceClasses = {"49xx 7830 1840 7800 1C29 3152 7809", 0};
 
 // The instrument lookup, for instruments with a sample for each key.
 constexpr TablePattern kKeyEnvelope = {"8869 1859 4Axx 0070 1840 8800 8050 6022 48xx 6060", 8};
@@ -116,6 +137,11 @@ bool PlausibleSequence(const Rom& rom, uint32_t at)
 
 } // namespace
 
+const char* RevisionName(Revision r)
+{
+    return r == Revision::kSuperMarioAdvance2 ? "Super Mario Advance 2" : "A Link to the Past";
+}
+
 std::string Hex(uint32_t v)
 {
     char b[16];
@@ -158,13 +184,16 @@ bool DetectDriver(const Rom& rom, const DriverOverrides& overrides, DriverInfo& 
         }
     }
 
-    // The driver's tables come from the code that reads them.
-    info.pitch_table = FindTable(rom, kPitchTable);
-    info.frequency_table = FindTable(rom, kPitchTable, kFrequencyIndex);
-    info.noise_table = FindTable(rom, kNoiseTable);
-    info.lfo_table = FindTable(rom, kLfoTable);
+    // The driver's tables come from the code that reads them, which the revisions' compilers built differently.
+    const bool mario = !FindThumb(rom, ParseThumbPattern(kSuperMarioAdvance2Level)).empty();
+    info.revision = mario ? Revision::kSuperMarioAdvance2 : Revision::kLinkToThePast;
+    const RevisionPatterns& patterns = mario ? kSuperMarioAdvance2Patterns : kLinkToThePastPatterns;
+    info.pitch_table = FindTable(rom, patterns.pitch_table);
+    info.frequency_table = FindTable(rom, patterns.pitch_table, patterns.frequency_index);
+    info.noise_table = FindTable(rom, patterns.noise_table);
+    info.lfo_table = FindTable(rom, patterns.lfo_table);
     info.wave_volumes = FindTable(rom, kWaveVolumes);
-    info.voice_classes = FindTable(rom, kVoiceClasses);
+    info.voice_classes = FindTable(rom, patterns.voice_classes);
     info.key_envelope = FindTable(rom, kKeyEnvelope);
     const struct
     {
@@ -227,7 +256,8 @@ bool DetectDriver(const Rom& rom, const DriverOverrides& overrides, DriverInfo& 
                                 " sequences have no tracks the driver can read");
     }
 
-    info.log.push_back("init routine: " + Hex(info.init));
+    info.log.push_back(std::string(RevisionName(info.revision)) +
+                       " revision of the driver, init routine: " + Hex(info.init));
     info.log.push_back("the game's settings: " + Hex(info.settings));
     info.log.push_back("sequence table: " + Hex(info.sequences) + " (" +
                        std::to_string(info.sequence_addresses.size()) + " sequences)");

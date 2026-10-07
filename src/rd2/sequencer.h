@@ -161,6 +161,8 @@ struct Lookup
     bool drum = false;       // from a drum kit, which plays it at its own pitch and pan
     bool key_sample = false; // from an instrument with a sample for each key, which plays it at its own pitch
     uint16_t key_sample_index = 0;
+    bool missing = false; // the bank has no region for the note: the offset of the instrument, or of a drum kit's or
+                          // key split's region, is 0, so the bank's table of offsets is the region
 };
 
 // Returns what instrument `instrument` of bank `bank` (an index into the driver's banks) gives a note.

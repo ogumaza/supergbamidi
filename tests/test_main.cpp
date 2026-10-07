@@ -339,14 +339,15 @@ void TestNoDriver()
 {
     Rom rom;
     rom.Assign(std::vector<uint8_t>(0x1000, 0));
-    Overrides konami_only, rare_only, quintet_only, rd2_only, mp2k_only, brownie_only;
+    Overrides konami_only, rare_only, quintet_only, rd2_only, mp2k_only, brownie_only, krawall_only;
     konami_only.driver = Driver::kKonami;
     rare_only.driver = Driver::kRare;
     quintet_only.driver = Driver::kQuintet;
     rd2_only.driver = Driver::kRd2;
     mp2k_only.driver = Driver::kMp2k;
     brownie_only.driver = Driver::kBrownie;
-    std::string any, konami, rare, quintet, rd2, mp2k, brownie, all, all_mp2k;
+    krawall_only.driver = Driver::kKrawall;
+    std::string any, konami, rare, quintet, rd2, mp2k, brownie, krawall, all, all_mp2k;
 
     const bool found_any = OpenMusic(rom, Overrides(), any) != nullptr;
     const bool found_konami = OpenMusic(rom, konami_only, konami) != nullptr;
@@ -355,17 +356,18 @@ void TestNoDriver()
     const bool found_rd2 = OpenMusic(rom, rd2_only, rd2) != nullptr;
     const bool found_mp2k = OpenMusic(rom, mp2k_only, mp2k) != nullptr;
     const bool found_brownie = OpenMusic(rom, brownie_only, brownie) != nullptr;
+    const bool found_krawall = OpenMusic(rom, krawall_only, krawall) != nullptr;
     const bool found_all = !OpenAllMusic(rom, Overrides(), all).empty();
     const bool found_all_mp2k = !OpenAllMusic(rom, mp2k_only, all_mp2k).empty();
 
     SUPERGBAMIDI_CHECK(!found_any && !found_konami && !found_rare && !found_quintet && !found_rd2 && !found_mp2k &&
-                       !found_brownie);
+                       !found_brownie && !found_krawall);
     SUPERGBAMIDI_CHECK(!found_all && !found_all_mp2k);
     SUPERGBAMIDI_CHECK(all == any && all_mp2k == mp2k);
     SUPERGBAMIDI_CHECK(
         any ==
-        "no Konami, Rare, Quintet, Nintendo R&D2, Brownie Brown or MP2K sound driver found: this game's music uses "
-        "another engine, or a driver version supergbamidi doesn't know");
+        "no Konami, Rare, Quintet, Nintendo R&D2, Brownie Brown, Krawall or MP2K sound driver found: this game's "
+        "music uses another engine, or a driver version supergbamidi doesn't know");
     SUPERGBAMIDI_CHECK(konami ==
                        "no Konami sound driver found: this game's music uses another engine, or a driver version "
                        "supergbamidi doesn't know");
@@ -380,6 +382,9 @@ void TestNoDriver()
     SUPERGBAMIDI_CHECK(brownie ==
                        "no Brownie Brown sound driver found: this game's music uses another engine, or a driver "
                        "version supergbamidi doesn't know");
+    SUPERGBAMIDI_CHECK(krawall ==
+                       "no Krawall sound driver found: this game's music uses another engine, or a driver version "
+                       "supergbamidi doesn't know");
 }
 
 // A song's loop lasts until every track's loop is back where it started: loops of 3 and 4 bars make one of 12, and a
@@ -705,6 +710,7 @@ int Run()
     mp2k::RunTests();
     rd2::RunTests();
     brownie::RunTests();
+    krawall::RunTests();
 
     std::error_code ec;
     fs::remove_all(g_temp, ec);

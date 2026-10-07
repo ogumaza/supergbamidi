@@ -27,9 +27,10 @@ struct Command
     std::string text;
 };
 
-// Decodes the command at `address` of a track. `length`, `velocity` and `wait` are the track's settings for notes and
-// waits that don't give their own.
-Command DecodeCommand(const Rom& rom, uint32_t address, uint16_t length, uint8_t velocity, uint16_t wait);
+// Decodes the command at `address` of a track in the driver's revision. `length`, `velocity` and `wait` are the track's
+// settings for notes and waits that don't give their own.
+Command DecodeCommand(const Rom& rom, const DriverInfo& info, uint32_t address, uint16_t length, uint8_t velocity,
+                      uint16_t wait);
 
 // Writes a text listing of every command of each track of a sequence, as the driver plays them. Returns false and sets
 // `error` on failure.

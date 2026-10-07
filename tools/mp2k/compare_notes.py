@@ -27,6 +27,7 @@ a frame and a half either way is allowed. A song named in --songs that has no MI
 """
 import argparse
 import bisect
+import gc
 import io
 import math
 import multiprocessing
@@ -535,6 +536,9 @@ def main():
 def check_job(job):
     """Checks one song for main(), and returns its report and whether it matches, or None for a song that has neither a
     MIDI file nor tracks. The driver mustn't play any notes in a song that has tracks but no MIDI file."""
+    # The last song's emulator and its hooks form a reference cycle. Collect it now to avoid keeping emulators in memory
+    # for several songs.
+    gc.collect()
     rom_path, song, midi, frames, verbose = job
     rom = load_rom(rom_path)
     if midi is None:

@@ -25,6 +25,7 @@ enum class Driver
     kRd2,
     kMp2k,
     kBrownie,
+    kKrawall,
 };
 
 // Settings that override detection, from the command line. 0 means detect.
@@ -175,4 +176,11 @@ namespace brownie
 std::unique_ptr<Music> OpenMusic(const Rom& rom, const Overrides& overrides, std::string& error);
 
 } // namespace brownie
+
+namespace krawall
+{
+
+std::unique_ptr<Music> OpenMusic(const Rom& rom, const Overrides& overrides, std::string& error);
+
+} // namespace krawall
 } // namespace supergbamidi

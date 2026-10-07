@@ -17,6 +17,8 @@ namespace sf2gen
 
 enum : uint16_t
 {
+    kStartAddrsOffset = 0,
+    kStartAddrsCoarseOffset = 4,
     kPan = 17,
     kDelayVolEnv = 33,
     kAttackVolEnv = 34,

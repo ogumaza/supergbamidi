@@ -6,15 +6,16 @@
     test_song.py ROM OUT.gba
 
 The test sequence takes the place of sequence 0's data, and a bank of test instruments goes in free space at the end
-of the ROM, as bank 1, which plays the game's first sample set. The sequence's list of banks starts with the test bank,
-and its second entry is the game's music bank.
+of the ROM, as bank 1, which plays the game's first sample set. A ROM that ends before the free space is padded with
+0xFF up to it. The sequence's list of banks starts with the test bank, and its second entry is the game's music bank.
 
-Between its 10 tracks, the sequence uses every command apart from CA: bends and their range, the echo send, slides of
-each kind, legato, notes that wait for their length, the transpose, calls inside calls, a track that another starts with
-F8, a switch of bank, priorities that make notes take each other's voices, and notes of no length. Its instruments cover
-every kind of region: samples, both squares with and without a table of duties and with the frequency sweep, the wave
-voice, noise with and without a table of widths, a drum kit with pans of its own, an instrument with a sample for each
-key, and a key split. Check it against the driver with
+Between its 10 tracks, the sequence uses every command apart from CA, and in the Super Mario Advance 2 revision of the
+driver, which has no player volume, EA: bends and their range, the echo send, slides of each kind, legato in which a
+note changes the instrument, notes that wait for their length, the transpose, calls inside calls, a track that another
+starts with F8, a switch of bank, priorities that make notes take each other's voices, and notes of no length. Its
+instruments cover every kind of region: samples, both squares with and without a table of duties and with the frequency
+sweep, the wave voice, noise with and without a table of widths, a drum kit with pans of its own, an instrument with a
+sample for each key, and a key split. Check it against the driver with
 
     python tools/rd2/compare_trace.py OUT.gba SUPERGBAMIDI --songs 0
 """
@@ -32,19 +33,29 @@ FREE_SIZE = 0x8000
 # The start of the driver's init routine, as Thumb halfwords (None for any).
 INIT_PATTERN = [0xB530, None, 0x6008, None, 0x2000, 0x7008, 0x2080, 0x7008, 0x3904]
 
+# The start of the routine that works out a sample voice's level in the Super Mario Advance 2 revision, whose tempo
+# command takes a byte and which has no player volume (EA).
+MARIO_PATTERN = [0xB530, 0x1C05, 0x7868, 0x2801, None, 0x7A6C, 0x0224]
+
 
 def u32(rom, address):
     return struct.unpack_from('<I', rom, address - ROM_BASE)[0]
 
 
+def find(rom, pattern):
+    """Returns the offset of the first match of a pattern of Thumb halfwords, or None."""
+    for o in range(0, len(rom) - 2 * len(pattern), 2):
+        if all(p is None or struct.unpack_from('<H', rom, o + 2 * i)[0] == p for i, p in enumerate(pattern)):
+            return o
+    return None
+
+
 def find_settings(rom):
     """Returns the game's settings for the driver: the literal of the ldr r0 before the call to the driver's init."""
-    for o in range(0, len(rom) - 2 * len(INIT_PATTERN), 2):
-        if all(p is None or struct.unpack_from('<H', rom, o + 2 * i)[0] == p for i, p in enumerate(INIT_PATTERN)):
-            target = ROM_BASE + o
-            break
-    else:
+    init = find(rom, INIT_PATTERN)
+    if init is None:
         raise SystemExit('no Nintendo R&D2 sound driver found')
+    target = ROM_BASE + init
     for o in range(0, len(rom) - 6, 2):
         hi, lo = struct.unpack_from('<HH', rom, o + 2)
         if hi >> 11 != 0x1E or lo >> 11 != 0x1F:
@@ -61,10 +72,11 @@ def find_settings(rom):
 class Track:
     """A track's commands, with labels for the addresses that F0, F4 and F8 go to."""
 
-    def __init__(self):
+    def __init__(self, mario):
         self.data = bytearray()
         self.labels = {}
         self.fixups = []  # (position, label): a halfword to fill in with a label's offset in the sequence
+        self.mario = mario  # the Super Mario Advance 2 revision, whose tempo is a byte and which has no player volume
 
     def raw(self, *values):
         self.data += bytes(values)
@@ -91,8 +103,12 @@ class Track:
         return self
 
     def tempo(self, tempo):
-        self.data += bytes([0xE4]) + self.length(tempo)
+        self.data += bytes([0xE4]) + (bytes([tempo]) if self.mario else self.length(tempo))
         return self
+
+    def volume(self, volume):
+        """The player's volume, which the Super Mario Advance 2 revision doesn't have."""
+        return self if self.mario else self.raw(0xEA, volume)
 
     def go(self, op, label, *before):
         self.raw(op, *before)
@@ -165,13 +181,13 @@ def build_bank():
     return bank.data
 
 
-def build_tracks():
-    tracks = [Track() for _ in range(10)]
+def build_tracks(mario):
+    tracks = [Track(mario) for _ in range(10)]
 
     # 0: tempo and the player's volume, and F8, which starts track 9 with this track's settings.
     t = tracks[0]
-    t.tempo(120).raw(0xEA, 100).wait(48).tempo(200).wait(48).raw(0xEA, 60).tempo(160).raw(0xC3, 0x30, 0xE0, 0x70)
-    t.go(0xF8, 'nine', 9).wait(96).raw(0xEA, 0x80).tempo(140).wait(200).raw(0xFF)
+    t.tempo(120).volume(100).wait(48).tempo(200).wait(48).volume(60).tempo(160).raw(0xC3, 0x30, 0xE0, 0x70)
+    t.go(0xF8, 'nine', 9).wait(96).volume(0x80).tempo(140).wait(200).raw(0xFF)
 
     # 1: a sample with bends, the echo send, the LFO, slides of each kind, legato, notes that wait, the transpose and
     # calls inside calls, then a loop.
@@ -182,8 +198,8 @@ def build_tracks():
     t.raw(0xD2, 52, 0x80).note(45, 20, 100).wait(20)
     t.raw(0xD0, 38, 0xC0).note(45, 20, 100).wait(20)
     t.raw(0xD5, 40, 0x40, 3).note(43, 8, 100).wait(8).note(47, 8, 100).wait(8).raw(0xE8).note(49, 8, 100).wait(8)
-    t.raw(0xC5).note(40, 6, 100).wait(6).note(42, 6, 100).wait(6).raw(0xC2, 1).note(44, 12, 100).wait(12)
-    t.raw(0xC6, 0xC2, 0).wait(4)
+    t.raw(0xC2, 1, 0xC5).note(40, 6, 100).wait(6).note(42, 6, 100).wait(6).raw(0xC2, 0).note(44, 12, 100).wait(12)
+    t.raw(0xC6).wait(4)
     t.raw(0xC8).note(40, 6, 100).note(43, 6, 100).note(47, 12, 100).raw(0xC9)
     t.raw(0xE9, 12).note(40, 8, 100).wait(8).raw(0xE9, 0xF4).note(52, 8, 100).wait(8).raw(0xE9, 0)
     t.label('loop').go(0xF4, 'outer').note(45, 0, 80).wait(4).go(0xF0, 'loop')
@@ -240,9 +256,9 @@ def build_tracks():
     return tracks
 
 
-def build_sequence():
+def build_sequence(mario):
     """Returns the sequence's bytes: the header, then each track."""
-    tracks = build_tracks()
+    tracks = build_tracks(mario)
     data = bytearray(struct.pack('<bB', len(tracks), 0) + b'\0\0' * len(tracks))
     starts = []
     for t in tracks:
@@ -261,6 +277,7 @@ def main():
     if len(sys.argv) != 3:
         raise SystemExit(__doc__)
     rom = bytearray(load_rom(sys.argv[1]))
+    rom += b'\xFF' * max(0, FREE + FREE_SIZE - ROM_BASE - len(rom))
     if any(b != 0xFF for b in rom[FREE - ROM_BASE:FREE - ROM_BASE + FREE_SIZE]):
         raise SystemExit('the ROM has no free space at 0x%08X' % FREE)
 
@@ -280,7 +297,7 @@ def main():
     struct.pack_into('<H', rom, list_at - ROM_BASE, 1)
     sequence_at = sequences + u32(rom, sequences)
     room = sequences + u32(rom, sequences + 4) - sequence_at
-    sequence = build_sequence()
+    sequence = build_sequence(find(rom, MARIO_PATTERN) is not None)
     if len(sequence) > room:
         raise SystemExit('the test sequence needs %d bytes, and sequence 0 has %d' % (len(sequence), room))
     rom[sequence_at - ROM_BASE:sequence_at - ROM_BASE + len(sequence)] = sequence

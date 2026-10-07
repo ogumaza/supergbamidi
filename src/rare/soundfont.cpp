@@ -64,23 +64,49 @@ std::string Name(const char* kind, uint32_t address)
     return b;
 }
 
+// Returns the name of the SoundFont instrument for the driver's instrument at `address` played with the envelope
+// settings `settings`: "Instrument 08700154" without any, and otherwise the address and each setting given, such as
+// "08700154 d0s80r0" for a decay of 0, a sustain level of 80 and a release of 0.
+std::string InstrumentName(uint32_t address, const EnvelopeSettings& settings)
+{
+    if (settings.None())
+    {
+        return Name("Instrument", address);
+    }
+
+    char b[16];
+    std::snprintf(b, sizeof b, "%08X ", unsigned(address));
+    std::string name = b;
+    const std::pair<char, uint8_t> parts[] = {
+        {'a', settings.attack}, {'d', settings.decay}, {'s', settings.sustain}, {'r', settings.release}};
+    for (const auto& [letter, value] : parts)
+    {
+        if (value < 0x80)
+        {
+            name += letter + std::to_string(value);
+        }
+    }
+
+    return name;
+}
+
 } // namespace
 
-Sf2Envelope EnvelopeFor(const DriverInfo& info, const Instrument& inst)
+Sf2Envelope EnvelopeFor(const DriverInfo& info, const Instrument& inst, const EnvelopeSettings& settings)
 {
     Sf2Envelope env;
 
     // The attack rises in a straight line, as a SoundFont's does, and reaches the full level after `steps` + 1 frames.
     const uint32_t attack = std::min<uint32_t>(inst.attack, 99);
-    const uint32_t steps = ((99 - attack) << 5) / 99;
+    const uint32_t steps = settings.attack < 0x80 ? settings.attack : ((99 - attack) << 5) / 99;
     if (steps > 0)
     {
         env.attack = Timecents((steps + 1) / kFrameRate);
     }
 
     // The decay falls to the sustain level. At a sustain of 0, the driver stops the note when the decay ends.
-    const uint32_t sustain = SustainLevel(inst.sustain);
-    const int decay = FadeFrames(info, inst.decay);
+    const uint32_t sustain = settings.sustain < 0x80 ? uint32_t(settings.sustain) << 8 : SustainLevel(inst.sustain);
+    const int decay = settings.decay < 0x80 ? FadeEntryFrames(settings.decay) : FadeFrames(info, inst.decay);
     if (sustain < 0x8000)
     {
         const double level = sustain / 32768.0;
@@ -97,7 +123,7 @@ Sf2Envelope EnvelopeFor(const DriverInfo& info, const Instrument& inst)
         }
     }
 
-    const int release = FadeFrames(info, inst.release);
+    const int release = settings.release < 0x80 ? FadeEntryFrames(settings.release) : FadeFrames(info, inst.release);
     if (release)
     {
         env.release = Timecents(FadeSeconds(release));
@@ -106,19 +132,21 @@ Sf2Envelope EnvelopeFor(const DriverInfo& info, const Instrument& inst)
     return env;
 }
 
-SoundfontBuilder::SoundfontBuilder(const Rom& rom, const DriverInfo& info) : rom_(rom), info_(info)
+SoundfontBuilder::SoundfontBuilder(const Rom& rom, const DriverInfo& info, int first_free_bank)
+    : rom_(rom), info_(info), next_bank_(first_free_bank)
 {
 }
 
-int SoundfontBuilder::InstrumentFor(uint32_t address)
+int SoundfontBuilder::InstrumentFor(uint32_t address, const EnvelopeSettings& settings)
 {
-    const auto cached = instruments_.find(address);
+    const auto id = std::make_pair(address, settings);
+    const auto cached = instruments_.find(id);
     if (cached != instruments_.end())
     {
         return cached->second;
     }
 
-    instruments_[address] = -1;
+    instruments_[id] = -1;
     Instrument top;
     if (!ReadInstrument(rom_, address, top))
     {
@@ -128,7 +156,7 @@ int SoundfontBuilder::InstrumentFor(uint32_t address)
     // The global zone makes velocity and controller 7 scale the level in a straight line, as the driver does. The
     // default curves square them, and these take the place of the defaults.
     Sf2Instrument si;
-    si.name = Name("Instrument", address);
+    si.name = InstrumentName(address, settings);
     Sf2Zone global;
     global.mods.push_back(
         {sf2src::kNoteOnVelocity | sf2src::kNegative | sf2src::kConcave, sf2gen::kInitialAttenuation, 480, 0, 0});
@@ -141,7 +169,7 @@ int SoundfontBuilder::InstrumentFor(uint32_t address)
         const int sample = SampleFor(top);
         if (sample >= 0)
         {
-            si.zones.push_back(ZoneFor(top, sample, 0, 127, false));
+            si.zones.push_back(ZoneFor(top, settings, sample, 0, 127, false));
         }
     }
     else
@@ -165,7 +193,7 @@ int SoundfontBuilder::InstrumentFor(uint32_t address)
                 const int sample = SampleFor(sub);
                 if (sample >= 0)
                 {
-                    si.zones.push_back(ZoneFor(sub, sample, key, last, drums));
+                    si.zones.push_back(ZoneFor(sub, settings, sample, key, last, drums));
                 }
             }
 
@@ -179,9 +207,33 @@ int SoundfontBuilder::InstrumentFor(uint32_t address)
     }
 
     file_.instruments.push_back(si);
-    instruments_[address] = int(file_.instruments.size()) - 1;
+    instruments_[id] = int(file_.instruments.size()) - 1;
 
-    return instruments_[address];
+    return instruments_[id];
+}
+
+int SoundfontBuilder::BankFor(int bank, const EnvelopeSettings& settings)
+{
+    if (settings.None())
+    {
+        return bank;
+    }
+
+    const auto key = std::make_pair(bank, settings);
+    const auto found = banks_.find(key);
+    if (found != banks_.end())
+    {
+        return found->second;
+    }
+
+    // The drum bank is left for the drum channel's presets.
+    if (next_bank_ == kDrumBank)
+    {
+        next_bank_++;
+    }
+    banks_[key] = next_bank_;
+
+    return next_bank_++;
 }
 
 void SoundfontBuilder::AddPreset(int bank, int program, int instrument)
@@ -257,13 +309,14 @@ int SoundfontBuilder::SampleFor(const Instrument& inst)
     return samples_[key];
 }
 
-Sf2Zone SoundfontBuilder::ZoneFor(const Instrument& voice, int sample, int low, int high, bool fixed_pitch) const
+Sf2Zone SoundfontBuilder::ZoneFor(const Instrument& voice, const EnvelopeSettings& settings, int sample, int low,
+                                  int high, bool fixed_pitch) const
 {
     Sf2Zone z;
     z.gens.push_back(Sf2Gen::Range(sf2gen::kKeyRange, low, high));
 
     // Envelope phases at their defaults are left out.
-    const Sf2Envelope env = EnvelopeFor(info_, voice);
+    const Sf2Envelope env = EnvelopeFor(info_, voice, settings);
     const std::pair<uint16_t, int> phases[] = {
         {sf2gen::kAttackVolEnv, env.attack}, {sf2gen::kDecayVolEnv, env.decay}, {sf2gen::kReleaseVolEnv, env.release}};
     for (const auto& [op, value] : phases)

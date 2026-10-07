@@ -15,22 +15,24 @@ namespace
 
 using Open = std::unique_ptr<Music> (*)(const Rom&, const Overrides&, std::string&);
 
-// The drivers in the order detection looks for them. Rare's, Quintet's, Nintendo R&D2's and Brownie Brown's drivers and
-// MP2K come first, since their detection uses code alone, where Konami's can fall back on a data scan, which might
-// mistake another driver's data for a song table. R&D2's comes before MP2K, since a game can play most of its music
-// with R&D2's driver and the rest with MP2K.
+// The drivers in the order detection looks for them. Rare's, Quintet's, Nintendo R&D2's and Brownie Brown's drivers,
+// MP2K and Krawall come first, since their detection uses code alone, where Konami's can fall back on a data scan,
+// which might mistake another driver's data for a song table. R&D2's comes before MP2K, since a game can play most of
+// its music with R&D2's driver and the rest with MP2K.
 const struct
 {
     Driver driver;
     Open open;
 } kDrivers[] = {
-    {Driver::kRare, rare::OpenMusic}, {Driver::kQuintet, quintet::OpenMusic}, {Driver::kRd2, rd2::OpenMusic},
-    {Driver::kMp2k, mp2k::OpenMusic}, {Driver::kBrownie, brownie::OpenMusic}, {Driver::kKonami, konami::OpenMusic},
+    {Driver::kRare, rare::OpenMusic},       {Driver::kQuintet, quintet::OpenMusic},
+    {Driver::kRd2, rd2::OpenMusic},         {Driver::kMp2k, mp2k::OpenMusic},
+    {Driver::kBrownie, brownie::OpenMusic}, {Driver::kKrawall, krawall::OpenMusic},
+    {Driver::kKonami, konami::OpenMusic},
 };
 
 // Returns the error for a game in which detection finds none of the drivers that `driver` allows. Rare's driver and
 // MP2K can read the songs that --song-table gives without the driver's code, so their errors suggest it. Quintet's,
-// Nintendo R&D2's and Brownie Brown's drivers need their code to find their other tables.
+// Nintendo R&D2's and Brownie Brown's drivers and Krawall need their code to find their other tables.
 std::string NotFound(Driver driver)
 {
     const std::string kUnknown =
@@ -49,8 +51,10 @@ std::string NotFound(Driver driver)
         return "no MP2K sound driver found (try --song-table)";
     case Driver::kBrownie:
         return "no Brownie Brown sound driver found" + kUnknown;
+    case Driver::kKrawall:
+        return "no Krawall sound driver found" + kUnknown;
     default:
-        return "no Konami, Rare, Quintet, Nintendo R&D2, Brownie Brown or MP2K sound driver found" + kUnknown;
+        return "no Konami, Rare, Quintet, Nintendo R&D2, Brownie Brown, Krawall or MP2K sound driver found" + kUnknown;
     }
 }
 

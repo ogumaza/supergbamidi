@@ -3,6 +3,7 @@
 #include "rare/driver.h"
 
 #include <cstdio>
+#include <initializer_list>
 
 #include "thumb.h"
 
@@ -61,10 +62,24 @@ constexpr uint32_t kLdrPcMask = 0xFFFFF000;    // ldr rX, [pc, #imm12], without 
 constexpr uint32_t kLdrR6Pc = 0xE59F6000;
 constexpr uint32_t kLdrR4Pc = 0xE59F4000;
 constexpr uint32_t kLdrR2Pc = 0xE59F2000;
-constexpr uint32_t kLoadR4 = 0xE5944000; // ldr r4, [r4]
+constexpr uint32_t kLoadR4 = 0xE5944000;    // ldr r4, [r4]
+constexpr uint32_t kCompareR2 = 0xE3520000; // cmp r2, #imm8, without the operand
+constexpr uint32_t kFreeState = 0xE3A03010; // mov r3, #0x10, the state of a free slot
+constexpr uint32_t kStoreR0 = 0xE5C03000;   // strb r3, [r0]
 
 // The size of a note slot in the driver's RAM.
 constexpr uint32_t kSlotSize = 0x28;
+
+// An ARM instruction that detection looks for, with the bits it doesn't compare clear in `mask`.
+struct ArmMatch
+{
+    uint32_t value;
+    uint32_t mask = 0xFFFFFFFF;
+};
+
+// Any branch, and any branch taken when the last comparison was equal.
+constexpr ArmMatch kAnyBranch = {0xEA000000, 0xFF000000};
+constexpr ArmMatch kAnyBranchIfEqual = {0x0A000000, 0xFF000000};
 
 std::string Hex(uint32_t v)
 {
@@ -171,6 +186,31 @@ uint32_t FindArmTable(const Rom& rom, const InitCode& init, uint32_t load, uint3
     return 0;
 }
 
+// Returns true if the driver's code has the instructions of `pattern` one after another.
+bool HasArmCode(const Rom& rom, const InitCode& init, std::initializer_list<ArmMatch> pattern)
+{
+    const uint32_t size = uint32_t(pattern.size()) * 4;
+    for (uint32_t at = init.code; at + size <= init.code + init.code_size; at += 4)
+    {
+        uint32_t next = at;
+        for (const ArmMatch& m : pattern)
+        {
+            if ((rom.U32(next) & m.mask) != m.value)
+            {
+                break;
+            }
+
+            next += 4;
+        }
+        if (next == at + size)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 // Reads the format and tables from the driver's code. Returns false if its command dispatch isn't there.
 bool ReadDriverCode(const Rom& rom, const InitCode& init, DriverInfo& info)
 {
@@ -236,6 +276,22 @@ bool ReadDriverCode(const Rom& rom, const InitCode& init, DriverInfo& info)
     {
         info.warnings.push_back("the driver's fade table wasn't found, so the envelopes' fades are approximate");
     }
+
+    // The controller handler of Donkey Kong Country 3's revision compares the controller with 20 to 23 in turn:
+    // cmp r2, #20; beq; cmp r2, #21; beq; and so on.
+    info.envelope_controllers = HasArmCode(rom, init,
+                                           {{kCompareR2 | kCtrlAttack},
+                                            kAnyBranchIfEqual,
+                                            {kCompareR2 | kCtrlDecay},
+                                            kAnyBranchIfEqual,
+                                            {kCompareR2 | kCtrlSustain},
+                                            kAnyBranchIfEqual,
+                                            {kCompareR2 | kCtrlRelease}});
+
+    // When the routine that moves the notes on takes a sample past its end, it stores the free state in loop modes 3
+    // and 1: mov r3, #0x10; strb r3, [r0]; b; mov r3, #0x10; strb r3, [r0]. The older revisions store mode 1's through
+    // r8, which doesn't hold the slot's address.
+    info.frees_loop_once = HasArmCode(rom, init, {{kFreeState}, {kStoreR0}, kAnyBranch, {kFreeState}, {kStoreR0}});
 
     return true;
 }
@@ -390,6 +446,10 @@ bool DetectDriver(const Rom& rom, const DriverOverrides& overrides, DriverInfo& 
         info.log.push_back("mixer: " + std::to_string(info.mix_rate) + " Hz, up to " +
                            std::to_string(info.voice_limit) + " voices, " + std::to_string(info.slots_per_channel) +
                            " notes a channel");
+        if (info.envelope_controllers)
+        {
+            info.log.push_back("controllers 20-23 set a channel's attack, decay, sustain and release");
+        }
     }
     info.log.push_back("tune table at " + Hex(info.tune_table) + ": " + std::to_string(info.tune_count) + " tune" +
                        (info.tune_count == 1 ? "" : "s"));
@@ -409,7 +469,12 @@ uint32_t TuneAddress(const Rom& rom, const DriverInfo& info, int tune)
 
 int FadeFrames(const DriverInfo& info, uint32_t index)
 {
-    return index < info.fade_table.size() && info.fade_table[index] ? info.fade_table[index] + 1 : 0;
+    return index < info.fade_table.size() ? FadeEntryFrames(info.fade_table[index]) : 0;
+}
+
+int FadeEntryFrames(uint32_t entry)
+{
+    return entry ? int(entry) + 1 : 0;
 }
 
 } // namespace supergbamidi::rare

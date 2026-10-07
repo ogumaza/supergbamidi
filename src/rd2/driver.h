@@ -26,10 +26,22 @@ struct DriverOverrides
     int sequence_count = 0;
 };
 
+// The revisions of the driver, which detection tells apart by the code that works out a sample voice's level.
+enum class Revision
+{
+    kLinkToThePast,      // The Legend of Zelda: A Link to the Past
+    kSuperMarioAdvance2, // Super Mario Advance 2, an older revision without the player's second volume, whose bends,
+                         // levels and mix differ
+};
+
+// Returns the revision's name, as --info prints it.
+const char* RevisionName(Revision r);
+
 // The driver's tables in a ROM, and the tables the game gives it. Each table of offsets holds a word for each entry,
 // counted from the table's start.
 struct DriverInfo
 {
+    Revision revision = Revision::kLinkToThePast;
     uint32_t init = 0;             // the driver's init routine (Thumb), or 0 if it wasn't found
     uint32_t settings = 0;         // the game's settings, which it passes to init
     uint32_t sample_sets = 0;      // the offset of each sample set's table of sample offsets

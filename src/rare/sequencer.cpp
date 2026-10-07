@@ -79,11 +79,11 @@ const std::vector<Action>& Sequencer::Step()
         ended_ = at_end == int(tracks_.size());
 
         UpdateVibrato();
-        for (Slot& s : slots_)
+        for (size_t i = 0; i < slots_.size(); i++)
         {
-            if (s.state == kSlotOn || s.state == kSlotReleased)
+            if (slots_[i].state == kSlotOn || slots_[i].state == kSlotReleased)
             {
-                UpdateEnvelope(s);
+                UpdateEnvelope(int(i));
             }
         }
     }
@@ -365,6 +365,17 @@ void Sequencer::Control(int t, const Event& e, Track& track)
         c.mono = e.a == kCtrlMonoOn;
         break;
 
+    case kCtrlAttack:
+    case kCtrlDecay:
+    case kCtrlSustain:
+    case kCtrlRelease:
+        if (info_.envelope_controllers)
+        {
+            uint8_t* settings[] = {&c.envelope.attack, &c.envelope.decay, &c.envelope.sustain, &c.envelope.release};
+            *settings[e.a - kCtrlAttack] = e.b;
+        }
+        break;
+
     default:
         break;
     }
@@ -382,6 +393,7 @@ void Sequencer::Program(int t, const Event& e)
     ChannelState& c = channels_[e.channel];
     c.instrument = rom_.U32(header_.instruments + 4u * index);
     c.program = e.a;
+    c.envelope = EnvelopeSettings();
 
     Action a;
     a.kind = Action::kProgram;
@@ -411,10 +423,27 @@ void Sequencer::UpdateVibrato()
     }
 }
 
-void Sequencer::UpdateEnvelope(Slot& s)
+void Sequencer::UpdateEnvelope(int index)
 {
+    Slot& s = slots_[size_t(index)];
     Instrument inst;
     ReadInstrument(rom_, s.instrument, inst);
+
+    // The channel's settings from controllers 20-23 count where each phase starts, and the conversion learns which
+    // settings each note's phases took.
+    const EnvelopeSettings& settings = channels_[size_t(s.channel)].envelope;
+    auto took = [&](const EnvelopeSettings& used)
+    {
+        if (!used.None())
+        {
+            Action a;
+            a.kind = Action::kEnvelope;
+            a.channel = uint8_t(s.channel);
+            a.slot = index;
+            a.envelope = used;
+            actions_.push_back(a);
+        }
+    };
 
     auto stop = [&s]()
     {
@@ -428,8 +457,9 @@ void Sequencer::UpdateEnvelope(Slot& s)
     case 0:
         {
             // The attack takes `steps` + 1 frames, from 0 to the full level.
+            took({.attack = settings.attack});
             const uint32_t attack = inst.attack > 99 ? 99 : inst.attack;
-            const uint32_t steps = Divide((99 - attack) << 5, 99).quotient;
+            const uint32_t steps = settings.attack < 0x80 ? settings.attack : Divide((99 - attack) << 5, 99).quotient;
             if (steps == 0)
             {
                 s.phase = 2;
@@ -463,11 +493,16 @@ void Sequencer::UpdateEnvelope(Slot& s)
 
     case 2:
         {
-            // The decay falls from the full level to the sustain level in the fade table's number of frames.
+            // The decay falls from the full level to the sustain level in the fade table's number of frames. Where a
+            // channel sets the sustain level but not the decay, the driver reads the decay from a register that holds
+            // whatever the code before left there, so the model takes the instrument's.
+            took({.decay = settings.decay, .sustain = settings.sustain});
             const Quotient whole = Divide(inst.sustain << 7, 99);
-            const uint32_t sustain = (whole.quotient << 8) | Divide(whole.remainder << 8, 99).quotient;
+            const uint32_t sustain = settings.sustain < 0x80
+                                         ? uint32_t(settings.sustain) << 8
+                                         : (whole.quotient << 8) | Divide(whole.remainder << 8, 99).quotient;
             s.sustain = int32_t(sustain << 4);
-            const int frames = FadeFrames(info_, inst.decay);
+            const int frames = settings.decay < 0x80 ? FadeEntryFrames(settings.decay) : FadeFrames(info_, inst.decay);
             if (frames == 0)
             {
                 s.phase = 4;
@@ -536,7 +571,8 @@ void Sequencer::UpdateEnvelope(Slot& s)
     }
 
     // Phase 5: the release falls from the level the note had to 0 in the fade table's number of frames.
-    const int frames = FadeFrames(info_, inst.release);
+    took({.release = settings.release});
+    const int frames = settings.release < 0x80 ? FadeEntryFrames(settings.release) : FadeFrames(info_, inst.release);
     if (frames == 0)
     {
         stop();
@@ -612,15 +648,16 @@ void Sequencer::Advance(Slot& s)
     s.fraction = uint32_t(moved & 0x7FFFFF);
     s.position = uint32_t(moved >> 23);
 
-    // Past the sample's end, a loop goes back by its length. In loop mode 1 the driver stores the free state through a
-    // register that doesn't hold the slot's address, so the slot stays in use until the mixer next takes the voice.
+    // Past the sample's end, a loop goes back by its length. In loop mode 1 the older revisions store the free state
+    // through a register that doesn't hold the slot's address, so the slot stays in use until the mixer next takes the
+    // voice.
     Instrument inst;
     ReadInstrument(rom_, s.instrument, inst);
-    if (int32_t(s.position) < int32_t(inst.end) || s.loop_mode == kLoopOnce)
+    if (int32_t(s.position) < int32_t(inst.end) || (s.loop_mode == kLoopOnce && !info_.frees_loop_once))
     {
         return;
     }
-    if (s.loop_mode == kLoopOnceB)
+    if (s.loop_mode == kLoopOnce || s.loop_mode == kLoopOnceB)
     {
         s.state = kSlotFree;
         return;

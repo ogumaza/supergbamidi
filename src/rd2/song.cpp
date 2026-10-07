@@ -41,10 +41,12 @@ uint32_t VarLength(const Rom& rom, uint32_t address, uint32_t& size)
 
 } // namespace
 
-Command DecodeCommand(const Rom& rom, uint32_t address, uint16_t length, uint8_t velocity, uint16_t wait)
+Command DecodeCommand(const Rom& rom, const DriverInfo& info, uint32_t address, uint16_t length, uint8_t velocity,
+                      uint16_t wait)
 {
     Command c;
     const uint8_t op = rom.U8(address);
+    const bool mario = info.revision == Revision::kSuperMarioAdvance2;
     char text[160];
     if (op <= 0xBF)
     {
@@ -160,8 +162,9 @@ Command DecodeCommand(const Rom& rom, uint32_t address, uint16_t length, uint8_t
 
     case 0xE4:
         {
-            uint32_t size = 0;
-            const uint32_t tempo = VarLength(rom, address + 1, size);
+            // The Super Mario Advance 2 revision's tempo is a byte.
+            uint32_t size = 1;
+            const uint32_t tempo = mario ? rom.U8(address + 1) : VarLength(rom, address + 1, size);
             c.size = 1 + size;
             c.text = "tempo " + std::to_string(tempo);
             break;
@@ -188,7 +191,15 @@ Command DecodeCommand(const Rom& rom, uint32_t address, uint16_t length, uint8_t
         break;
 
     case 0xEA:
-        with("player volume");
+        // The Super Mario Advance 2 revision has no player volume, and EA is one of the commands that do nothing.
+        if (mario)
+        {
+            c.text = "nothing";
+        }
+        else
+        {
+            with("player volume");
+        }
         break;
 
     case 0xF0:
@@ -259,7 +270,7 @@ bool DumpSong(const Rom& rom, const DriverInfo& info, int song, const std::strin
         std::set<uint32_t> seen;
         for (int n = 0; n < kMaxListedCommands; n++)
         {
-            const Command c = DecodeCommand(rom, address, length, velocity, wait);
+            const Command c = DecodeCommand(rom, info, address, length, velocity, wait);
             const uint8_t op = rom.U8(address);
             std::string bytes;
             for (uint32_t i = 0; i < c.size; i++)

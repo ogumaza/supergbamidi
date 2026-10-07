@@ -12,6 +12,7 @@ envelope goal, counter, sustain level, outputs and wave. It reports the first di
 """
 import argparse
 import contextlib
+import gc
 import io
 import multiprocessing
 import re
@@ -28,6 +29,9 @@ def driver_lines(rom_path, song, frames):
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
         driver_emu.trace(load_rom(rom_path), song, frames)
+    # The emulator and its hooks form a reference cycle. Collect it now to avoid keeping emulators in memory for several
+    # songs.
+    gc.collect()
     return out.getvalue().splitlines()
 
 
