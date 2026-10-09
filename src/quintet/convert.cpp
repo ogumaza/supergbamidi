@@ -19,6 +19,7 @@
 #include "program.h"
 #include "quintet/sequencer.h"
 #include "sf2.h"
+#include "song_banks.h"
 
 namespace supergbamidi::quintet
 {
@@ -191,7 +192,8 @@ Simulation Simulate(const Rom& rom, const DriverInfo& info, int song, int loops,
     int loop_channel = -1;
     size_t times = 1; // the passes the loop channel makes through its loop in each of the song's
     bool planned = false;
-    uint32_t run_on = 0; // the MIDI ticks the model runs on for after the loop channel's last pass
+    bool finished = false; // the song played what the plan requires
+    uint32_t run_on = 0;   // the MIDI ticks the model runs on for after the loop channel's last pass
     for (uint32_t f = 0; f < kMaxFrames && !seq.Ended(); f++)
     {
         seq.Step();
@@ -279,6 +281,7 @@ Simulation Simulate(const Rom& rom, const DriverInfo& info, int song, int loops,
         }
         if (planned && loop_channel < 0)
         {
+            finished = true;
             break;
         }
         const size_t needed = (size_t(loops) + (second ? 1 : 0)) * times; // the loop channel's passes in the song
@@ -287,6 +290,7 @@ Simulation Simulate(const Rom& rom, const DriverInfo& info, int song, int loops,
             const int last = passes[size_t(loop_channel)][needed - 1];
             if (sim.frame_ticks[f] >= sim.frame_ticks[sim.events[size_t(last)].frame] + run_on)
             {
+                finished = true;
                 break;
             }
         }
@@ -355,7 +359,7 @@ Simulation Simulate(const Rom& rom, const DriverInfo& info, int song, int loops,
     }
 
     sim.warnings = seq.Warnings();
-    if (sim.frames.size() == kMaxFrames)
+    if (!finished && !seq.Ended() && sim.frames.size() == kMaxFrames)
     {
         sim.warnings.push_back("the song was cut off after an hour");
     }
@@ -1129,9 +1133,9 @@ std::vector<Sf2Zone> SwitchZones(int first, int frames, int second)
     return {a, b};
 }
 
-// Adds the SoundFont presets of a song's instruments, in bank `bank` and those after it if there are more than 128.
-// Returns the warnings for instruments with nothing to play.
-std::vector<std::string> AddPresets(SoundfontBuilder& sf, const NoteMaker& maker, int bank)
+// Adds the SoundFont presets of a song's instruments, each in the bank and program of `slots` that its program number
+// picks. Returns the warnings for instruments with nothing to play.
+std::vector<std::string> AddPresets(SoundfontBuilder& sf, const NoteMaker& maker, const std::vector<BankProgram>& slots)
 {
     std::vector<std::string> warnings;
     for (const auto& [inst, program] : maker.Programs())
@@ -1210,7 +1214,8 @@ std::vector<std::string> AddPresets(SoundfontBuilder& sf, const NoteMaker& maker
             }
         }
 
-        sf.AddPreset(name, bank + program / 128, program % 128, sf.AddInstrument(name, std::move(zones)));
+        const BankProgram& slot = slots[size_t(program)];
+        sf.AddPreset(name, slot.bank, slot.program, sf.AddInstrument(name, std::move(zones)));
     }
 
     return warnings;
@@ -1222,9 +1227,11 @@ int BendValue(double bend, int range)
     return std::clamp(8192 + int(std::lround(bend / range * 8192)), 0, 16383);
 }
 
-// Writes the MIDI file: a conductor track, then a track for each channel that plays notes.
+// Writes the MIDI file: a conductor track, then a track for each channel that plays notes. `slots` gives each program
+// number its preset's bank and program.
 bool WriteMidi(const std::string& path, const std::string& title, const std::string& about, const Simulation& sim,
-               const std::array<std::vector<Note>, kChannels>& notes, int bank, std::string& error)
+               const std::array<std::vector<Note>, kChannels>& notes, const std::vector<BankProgram>& slots,
+               std::string& error)
 {
     const Plan& plan = sim.plan;
     const uint32_t end = plan.end;
@@ -1272,8 +1279,8 @@ bool WriteMidi(const std::string& path, const std::string& title, const std::str
         const int range = widest > 0 ? std::clamp(int(std::ceil(widest - 1e-9)), 2, kMaxBendRange) : 0;
 
         int program = list[0].program;
-        mt.Bank(0, c, bank + program / 128);
-        mt.Program(0, c, program % 128);
+        mt.Bank(0, c, slots[size_t(program)].bank);
+        mt.Program(0, c, slots[size_t(program)].program);
         mt.Control(0, c, cc::kVolume, 127);
         mt.Control(0, c, cc::kPan, 64);
         mt.Control(0, c, cc::kExpression, 0);
@@ -1310,13 +1317,13 @@ bool WriteMidi(const std::string& path, const std::string& title, const std::str
             forget(n.on);
             if (n.program != program)
             {
-                if (program < 0 || n.program / 128 != program / 128)
+                if (program < 0 || slots[size_t(n.program)].bank != slots[size_t(program)].bank)
                 {
-                    mt.Bank(n.on, c, bank + n.program / 128);
+                    mt.Bank(n.on, c, slots[size_t(n.program)].bank);
                 }
 
                 program = n.program;
-                mt.Program(n.on, c, program % 128);
+                mt.Program(n.on, c, slots[size_t(program)].program);
             }
 
             // Each frame's levels and bend.
@@ -1423,10 +1430,19 @@ SongSummary Run(const Rom& rom, const DriverInfo& info, int song, const ConvertO
         return sum;
     }
 
-    // The SoundFont's presets, in the song's file or the shared one.
+    // The SoundFont's presets, in the song's file or the shared one, in the banks and programs that it gives the song.
     SoundfontBuilder own(rom);
     SoundfontBuilder& sf = shared ? *shared : own;
-    for (const std::string& w : AddPresets(sf, maker, opt.bank))
+    const int count = int(maker.Programs().size());
+    const std::vector<BankProgram> slots = sf.Banks().Place(opt.bank, count);
+    if (int(slots.size()) < count)
+    {
+        sum.warnings.push_back("needs " + std::to_string(count) +
+                               " presets, more than the SoundFont's banks have free" +
+                               (shared ? "; convert the song without --single-sf2" : ""));
+        return sum;
+    }
+    for (const std::string& w : AddPresets(sf, maker, slots))
     {
         sum.warnings.push_back(w);
     }
@@ -1439,7 +1455,7 @@ SongSummary Run(const Rom& rom, const DriverInfo& info, int song, const ConvertO
         Utf8(PathFromUtf8(opt.out_dir) / PathFromUtf8(SafeFileName(opt.base_name) + "_" + TwoDigits(song)));
     std::string error;
     sum.midi_path = stem + ".mid";
-    if (!WriteMidi(sum.midi_path, title, about, sim, notes, opt.bank, error))
+    if (!WriteMidi(sum.midi_path, title, about, sim, notes, slots, error))
     {
         sum.warnings.push_back(error);
         return sum;

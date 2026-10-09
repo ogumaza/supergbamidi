@@ -31,8 +31,8 @@ scripts, and the `compare_notes.py` scripts apart from Rare's and MP2K's, run
 driver's files.
 
 Driver-specific scripts are in `tools/konami/`, `tools/rare/`, `tools/quintet/`,
-`tools/rd2/`, `tools/mp2k/`, `tools/brownie/` and `tools/krawall/`. Run the
-commands below from the repository root.
+`tools/rd2/`, `tools/mp2k/`, `tools/brownie/`, `tools/krawall/` and
+`tools/ubimilan/`. Run the commands below from the repository root.
 
 ## Konami's driver
 
@@ -695,6 +695,9 @@ play as before.
 
 `driver_emu.py render` writes the mixer's 8-bit stereo output at the mixer's
 rate. It names a module by the address of its header, which `--info` lists.
+`--song N` plays song N of a module that separates songs with `+++`, in song
+mode. supergbamidi converts each such song that way. The two comparisons play it
+that way too.
 
 ### Working out Krawall
 
@@ -741,3 +744,82 @@ entry to `GAMES` with:
 `test_song.py` also needs, in its `GAMES`, the game's table of samples and its
 count, and the player's literals that give the tables of samples and
 instruments.
+
+## Ubisoft Milan's driver
+
+| Script | Description |
+|---|---|
+| `driver_emu.py` | runs the game's sound engine under the Unicorn ARM emulator: each frame's writes to the PSG's registers, the track and each voice that the mixer plays, and a render of the mixer's output |
+| `compare_trace.py` | diffs `supergbamidi --trace` against the emulated engine, frame by frame, for every piece of music |
+| `compare_notes.py` | checks a conversion's MIDI files and SoundFonts against the samples and PSG notes that the emulated engine plays |
+
+### Checking supergbamidi against Ubisoft Milan's driver
+
+```sh
+python tools/ubimilan/compare_trace.py rom.gba build/supergbamidi -j 4  # the model: every piece, 12000 frames
+build/supergbamidi -q -o rom rom.gba                                    # convert every piece into rom/
+python tools/ubimilan/compare_notes.py rom.gba build/supergbamidi rom   # the conversion, note by note
+python tools/ubimilan/driver_emu.py rom.gba render 3 600 ref.wav        # piece 3's first 600 frames
+```
+
+`compare_trace.py` runs `supergbamidi --trace` and the game's code side by
+side, and compares, frame by frame, every write to the PSG's registers, the
+track's countdown, next command and next sequence, and each voice that the
+mixer plays. A key outside channel 9's kit makes the engine play bytes from a
+mirror of the ROM. The model leaves those notes out. The script doesn't compare
+their voices, and counts their frames instead.
+
+`compare_notes.py` converts the ROM again with `--frame-timing`, and checks
+that the conversion on the beat has the same notes within 1.65 frames and the
+same SoundFonts. It then runs the game's code with hooks on the routines that
+start a sample on a voice and stop a voice. Each sample that sounds has to be a
+note on MIDI channel 10 on its frame, at the velocity that its volume gives,
+ending where the voice stops, with a zone that plays the sample's points at the
+mixer's rate. The PSG's notes that sound have to match the MIDI file's.
+
+`driver_emu.py render` writes the mixer's 8-bit output at its rate, 32704 Hz,
+on both sides.
+
+### Working out Ubisoft Milan's driver
+
+The engine is Thumb code in ROM, and its mixer ARM code in IWRAM:
+
+1. **Find the entry points.** The ROM's literals of the sound and DMA registers
+   led to the sound init, the DMA interrupts and the PSG's routines. The PSG's
+   note routine led to the track's step, whose commands are MIDI's, and the
+   track's callers to the routine that starts a piece of music and to the
+   game's VBlank task. The literals of the engine's RAM led to the game's
+   sound update. The game's start hands the engine its sound bank, a file of
+   its archive.
+2. **Disassemble.** `gbadis.py` was run from those routines, and from the mixer
+   as ARM code at its address in the ROM. The sound init's float gave Timer 0's
+   reload.
+3. **Model and compare.** The track, the pieces' lists, the kit's voices, the
+   mixer's progress through each sample and the PSG's notes were reimplemented
+   from that reading, and compared with the game's code running in
+   `driver_emu.py`, until every frame of every piece matched.
+4. **Check the conversion.** The converted MIDI files and SoundFonts were
+   checked note by note with `compare_notes.py`, and rendered and compared with
+   the mixer's output.
+
+`driver_emu.py` picks the addresses by the ROM's game code. Those of *Tomb
+Raider: The Prophecy* (`AL9P`) are built in. For another game, add an entry to
+`GAMES` with:
+
+* `file_lookup` and `bank_file`: the archive's lookup and the number of the
+  file that the game's start hands the engine as its sound bank.
+* `init`, `voices_init`, `start`, `step` and `update`: the engine's init, the
+  routine that clears the mixer's voices, the routine that starts a piece of
+  music, the track's step and the game's sound update.
+* `play_sample` and `stop_voice`: the routines that start a sample on a voice
+  and stop a voice. `compare_notes.py` hooks them.
+* `mixer`, `mixer_size`, `mixer_ram`, `mixer_pointer` and `mixer_flag`: the
+  mixer in the ROM, the word that gives its size, where the harness copies it,
+  the variable that the DMA interrupts call it through, and the flag that lets
+  the first interrupt run it.
+* `track`, `voices` and `output`: the track, the mixer's voices and its output.
+* `timer_reload`: Timer 0's reload.
+
+The harness copies the mixer to IWRAM itself, because the game's copy goes
+through its memory manager. Unicorn has no DMA, and the harness does DMA 3's
+copies itself.

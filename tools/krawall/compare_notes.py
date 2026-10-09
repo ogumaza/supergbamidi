@@ -43,7 +43,6 @@ from gbarom import ROM_BASE, load_rom
 
 TIME_TOLERANCE = 0.001   # seconds that an event can be from the driver's tick, for the MIDI tempos' rounding
 PITCH_TOLERANCE_CENTS = 5
-ROOT_KEY = 60            # the key on which a SoundFont sample plays at its rate
 DRUM_CHANNEL = 9
 
 
@@ -115,9 +114,10 @@ def game_sample(rom, header):
     return points, (length - loop_length, len(points))
 
 
-def driver_ticks(rom, module, frames):
-    """Runs the game's code and returns each tick's time in the mixer's samples and the state of each of the module's
-    channels after it."""
+def driver_ticks(rom, play, frames):
+    """Runs the game's code as krapPlay() plays `play`, a (module, mode, song), and returns each tick's time in the
+    mixer's samples and the state of each of the module's channels after it."""
+    module, mode, song = play
     emu = driver_emu.KrawallEmulator(rom)
     a = emu.addr
     channels = rom[module - ROM_BASE]
@@ -158,7 +158,7 @@ def driver_ticks(rom, module, frames):
 
     emu.uc.hook_add(UC_HOOK_CODE, on_set_pos, begin=a.set_pos, end=a.set_pos)
     emu.uc.hook_add(UC_HOOK_CODE, after_tick, begin=a.after_tick, end=a.after_tick)
-    emu.play(module)
+    emu.play(module, mode, song)
     for f in range(frames):
         frame[0] = f
         emu.frame()
@@ -239,7 +239,7 @@ def check_song(rom, info, song, midi_path, sf2_path, report):
     module, scale = info['modules'][song], info['scale']
     seconds = midi_length(midi_path) if midi_path else info['seconds'][song]
     frames = int(seconds * 16384 / 276) + 3
-    ticks = driver_ticks(rom, module, frames)
+    ticks = driver_ticks(rom, info['plays'][song], frames)
     first = ticks[0][0]
     times = [(t - first) / 16384 for t, _ in ticks]
     end = min(range(len(times)), key=lambda i: abs(times[i] - seconds))
@@ -339,6 +339,7 @@ def main():
 
     rom = load_rom(a.rom)
     info = read_info(a.supergbamidi, a.rom)
+    info['plays'] = driver_emu.song_plays(rom, info['modules'])
     files = dict(conversion.midi_files(a.folder, 'krawall'))
     if not files:
         raise SystemExit('found no MIDI files to check in %s' % a.folder)

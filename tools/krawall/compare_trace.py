@@ -23,10 +23,11 @@ import driver_emu
 from gbarom import load_rom
 
 
-def driver_lines(rom_path, module, frames):
+def driver_lines(rom_path, play, frames):
+    module, mode, song = play
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
-        driver_emu.trace(load_rom(rom_path), module, frames)
+        driver_emu.trace(load_rom(rom_path), module, frames, mode, song)
     return out.getvalue().splitlines()
 
 
@@ -37,8 +38,8 @@ def model_lines(tool, rom_path, song, frames):
 
 def compare(job):
     """Returns a description of the first difference in one module, or None if there's none."""
-    tool, rom_path, song, module, frames = job
-    driver = driver_lines(rom_path, module, frames)
+    tool, rom_path, song, play, frames = job
+    driver = driver_lines(rom_path, play, frames)
     model = model_lines(tool, rom_path, song, frames)
     for i, (a, b) in enumerate(zip(driver, model)):
         if a != b:
@@ -79,8 +80,9 @@ def main():
     a = p.parse_args()
 
     modules = listed_modules(a.supergbamidi, a.rom)
+    plays = driver_emu.song_plays(load_rom(a.rom), modules)
     songs = parse_range(a.songs) if a.songs else sorted(modules)
-    jobs = [(a.supergbamidi, a.rom, s, modules[s], a.frames) for s in songs]
+    jobs = [(a.supergbamidi, a.rom, s, plays[s], a.frames) for s in songs]
     if a.jobs > 1:
         with multiprocessing.Pool(a.jobs) as pool:
             results = pool.map(compare, jobs)

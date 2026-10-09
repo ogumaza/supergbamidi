@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
-// Converts the music of GBA games with Konami's, Rare's, Quintet's, Nintendo R&D2's or Brownie Brown's sound driver,
-// Nintendo's MP2K or Krawall, to MIDI files and SoundFonts.
+// Converts the music of GBA games with Konami's, Rare's, Quintet's, Nintendo R&D2's, Brownie Brown's or Ubisoft Milan's
+// sound driver, Nintendo's MP2K or Krawall, to MIDI files and SoundFonts.
 
 #include <algorithm>
 #include <cmath>
@@ -54,10 +54,10 @@ void Usage(FILE* f)
                  "\n"
                  "Converts every song in each GBA ROM (.gba) or GSF rip (.gsflib, .minigsf) to\n"
                  "a MIDI file and a matching SoundFont, for games whose music uses Konami's,\n"
-                 "Rare's, Quintet's, Nintendo R&D2's or Brownie Brown's sound driver,\n"
-                 "Nintendo's MP2K or Krawall. A game with more than one of them has each one's\n"
-                 "songs converted. The results go in a folder beside the input file, with the\n"
-                 "same name. You can also drop files on the program.\n"
+                 "Rare's, Quintet's, Nintendo R&D2's, Brownie Brown's or Ubisoft Milan's sound\n"
+                 "driver, Nintendo's MP2K or Krawall. A game with more than one of them has each\n"
+                 "one's songs converted. The results go in a folder beside the input file, with\n"
+                 "the same name. You can also drop files on the program.\n"
                  "\n"
                  "options:\n"
                  "  -o, --output DIR      output directory (default: <file's folder>/<base name>)\n"
@@ -67,10 +67,11 @@ void Usage(FILE* f)
                  "  -t, --tracks LIST     only convert these tracks, e.g. 4-15 (default: all; in\n"
                  "                        Konami's driver, 0-3 are the PSG channels and 4 and up\n"
                  "                        the sample voices, in Quintet's, 0-3 are the PSG\n"
-                 "                        channels and 4 and 5 the PCM channels, and in Brownie\n"
+                 "                        channels and 4 and 5 the PCM channels, in Brownie\n"
                  "                        Brown's, 0-3 are the music's PSG channels, 4-7 the sound\n"
-                 "                        effects' and 8 and up the sample channels, and in\n"
-                 "                        Krawall, the module's channels)\n"
+                 "                        effects' and 8 and up the sample channels, in Ubisoft\n"
+                 "                        Milan's, 0-2 are the PSG channels and 9 the kit, and in\n"
+                 "                        Krawall, the module's channels, 0-19)\n"
                  "      --single-sf2      write one SoundFont for all songs\n"
                  "      --voice-channels  give each of the driver's sound channels a MIDI channel\n"
                  "                        (MP2K), so that notes stop where the game cuts them\n"
@@ -80,11 +81,12 @@ void Usage(FILE* f)
                  "      --dump            also write a text listing of each song's sequence data\n"
                  "      --info            print each driver's detected tables and songs, then\n"
                  "                        exit\n"
-                 "      --driver NAME     use only konami, rare, quintet, rd2, brownie, krawall or\n"
-                 "                        mp2k, instead of every driver detection finds\n"
+                 "      --driver NAME     use only konami, rare, quintet, rd2, brownie, ubimilan,\n"
+                 "                        krawall or mp2k, instead of every driver detection finds\n"
                  "      --song-table ADDR    use this song table address (hex; in Nintendo R&D2's\n"
                  "                           driver, the address of the game's settings for it,\n"
-                 "                           and in Krawall, the game's table of modules)\n"
+                 "                           in Ubisoft Milan's, the sound bank, and in Krawall,\n"
+                 "                           the game's table of modules)\n"
                  "      --song-count N       use this many songs\n"
                  "      --sample-table ADDR  use this sample table address (hex; Konami's driver)\n"
                  "      --mix-rate HZ        use this DirectSound mixer rate (Konami's driver)\n"
@@ -113,7 +115,11 @@ void Usage(FILE* f)
                  "                        in Krawall, the mixer's variables (frame g), the\n"
                  "                        player's record (frame p), each of the module's\n"
                  "                        channels (frame c0) and each mixer channel (frame m0),\n"
-                 "                        in hex, when they change\n"
+                 "                        in hex, when they change; in Ubisoft Milan's, each\n"
+                 "                        write to the PSG's registers (frame w address size\n"
+                 "                        value), the track (frame t countdown command next\n"
+                 "                        plays ending) and each mixer voice that plays (frame\n"
+                 "                        v0 position loop-start end loop-end volume loops)\n"
                  "      --trace-frames N  frames to trace (default: 3000)\n"
                  "  -q, --quiet           only print warnings and errors\n"
                  "  -h, --help            show this help\n"
@@ -129,6 +135,7 @@ struct Options
     ConvertSettings convert;
     Overrides overrides;
     bool info = false, dump = false, quiet = false, single_sf2 = false;
+    bool tracks_given = false; // a -t has replaced the default of every track
     int trace_song = -1;
     long long trace_frames = 3000;
 };
@@ -267,17 +274,23 @@ int ParseArgs(const std::vector<std::string>& args, Options& o)
                 return 2;
             }
 
+            // Krawall's modules have up to 20 channels, and the other drivers 16 tracks at most.
             std::set<int> tracks;
-            if (!ParseList(v, tracks) || tracks.empty() || *tracks.rbegin() >= 16)
+            if (!ParseList(v, tracks) || tracks.empty() || *tracks.rbegin() >= 20)
             {
-                OptionError("bad track list (tracks are 0-15)");
+                OptionError("bad track list (tracks are 0-19)");
                 return 2;
             }
 
-            o.convert.track_mask = 0;
+            // Each -t adds its tracks to those of the ones before it.
+            if (!o.tracks_given)
+            {
+                o.convert.track_mask = 0;
+                o.tracks_given = true;
+            }
             for (int t : tracks)
             {
-                o.convert.track_mask |= uint16_t(1u << t);
+                o.convert.track_mask |= 1u << t;
             }
         }
         else if (a == "--single-sf2")
@@ -335,9 +348,13 @@ int ParseArgs(const std::vector<std::string>& args, Options& o)
             {
                 o.overrides.driver = Driver::kKrawall;
             }
+            else if (v == "ubimilan")
+            {
+                o.overrides.driver = Driver::kUbiMilan;
+            }
             else
             {
-                OptionError("--driver needs konami, rare, quintet, rd2, brownie, krawall or mp2k");
+                OptionError("--driver needs konami, rare, quintet, rd2, brownie, ubimilan, krawall or mp2k");
                 return 2;
             }
         }
@@ -470,6 +487,8 @@ const char* DriverName(Driver driver)
         return "brownie";
     case Driver::kKrawall:
         return "krawall";
+    case Driver::kUbiMilan:
+        return "ubimilan";
     default:
         return "";
     }
@@ -490,9 +509,14 @@ std::string TimeString(double seconds)
 // followed by each song's data address, note-playing track count, length and loop points, calculated with the current
 // conversion options. The drivers come in the order detection finds them. With --driver, --song-table or --song-count
 // there's only one.
-void PrintInfo(const Rom& rom, const std::vector<FoundMusic>& drivers, const Options& o)
+void PrintInfo(const Rom& rom, const std::vector<FoundMusic>& drivers, const std::vector<std::string>& unread,
+               const Options& o)
 {
     std::printf("ROM: %s (%s)%s\n", rom.Title().c_str(), rom.GameCode().c_str(), rom.FromGsf() ? ", from GSF" : "");
+    for (const std::string& w : unread)
+    {
+        std::printf("  warning: %s; its songs are left out\n", w.c_str());
+    }
 
     for (size_t d = 0; d < drivers.size(); d++)
     {
@@ -529,6 +553,10 @@ void PrintInfo(const Rom& rom, const std::vector<FoundMusic>& drivers, const Opt
 
             std::printf("  %3d  0x%08X  %6d  %-9s  %s\n", s, unsigned(r.address), r.tracks,
                         TimeString(r.seconds).c_str(), loop.c_str());
+            for (const std::string& w : r.warnings)
+            {
+                std::printf("       warning: %s\n", w.c_str());
+            }
         }
     }
 }
@@ -557,13 +585,13 @@ int Trace(const Music& music, const Options& o)
 }
 
 // Reports the conversion result, including songs skipped because they play no notes. `song_label` comes before the
-// song's number.
-void ReportSong(const std::string& song_label, int song, const SongReport& r, uint16_t track_mask)
+// song's number. `tracks_chosen` is true when --tracks chose the tracks.
+void ReportSong(const std::string& song_label, int song, const SongReport& r, bool tracks_chosen)
 {
     if (r.silent)
     {
         std::printf("%s %2d: %s, skipped\n", song_label.c_str(), song,
-                    track_mask == 0xFFFF ? "plays no notes" : "no notes on the chosen tracks");
+                    tracks_chosen ? "no notes on the chosen tracks" : "plays no notes");
         return;
     }
 
@@ -582,7 +610,6 @@ void ReportSong(const std::string& song_label, int song, const SongReport& r, ui
 // The songs that the conversion of a file has dealt with so far.
 struct Tally
 {
-    int selected = 0; // songs that the options pick and the song tables have
     int converted = 0;
     int silent = 0;   // songs without notes on the chosen tracks, which aren't written
     int failures = 0; // songs that failed, and files that couldn't be written
@@ -622,7 +649,6 @@ void ConvertSongs(Music& music, const ConvertSettings& settings, const std::stri
             continue;
         }
 
-        tally.selected++;
         const SongReport r = music.ConvertSong(s, settings);
         if (!r.ok)
         {
@@ -633,7 +659,7 @@ void ConvertSongs(Music& music, const ConvertSettings& settings, const std::stri
             (r.silent ? tally.silent : tally.converted)++;
             if (!o.quiet)
             {
-                ReportSong(song_label, s, r, o.convert.track_mask);
+                ReportSong(song_label, s, r, o.tracks_given);
             }
         }
 
@@ -644,9 +670,8 @@ void ConvertSongs(Music& music, const ConvertSettings& settings, const std::stri
 
         if (o.dump)
         {
-            char file[32];
-            std::snprintf(file, sizeof file, "_%02d.txt", s);
-            if (!music.DumpSong(s, Utf8(out_dir / PathFromUtf8(settings.base_name + file)), error))
+            const std::string file = settings.base_name + "_" + music.FileNumber(s) + ".txt";
+            if (!music.DumpSong(s, Utf8(out_dir / PathFromUtf8(file)), error))
             {
                 std::fprintf(stderr, "%s%s %d: %s\n", prefix.c_str(), song_label.c_str(), s, error.c_str());
                 tally.failures++;
@@ -669,8 +694,8 @@ void ConvertSongs(Music& music, const ConvertSettings& settings, const std::stri
     }
 }
 
-// Converts one input file, which messages call `label`. `done` holds the ROM images already converted in this run, and
-// `failed` those in which detection found no music it could read, so dropping several mini-GSFs of one set reads it
+// Converts one input file, which messages call `label`. `done` holds the ROM images already converted or listed in this
+// run, and `failed` those in which detection found no music it could read. A set of several mini-GSFs is then read
 // once.
 int ConvertFile(const std::string& input, const std::string& label, const Options& o, std::vector<fs::path>& done,
                 std::vector<fs::path>& failed)
@@ -694,8 +719,8 @@ int ConvertFile(const std::string& input, const std::string& label, const Option
         {
             if (!o.quiet)
             {
-                std::printf("%s: same music as %s, already converted\n", label.c_str(),
-                            Utf8(source.filename()).c_str());
+                std::printf("%s: same music as %s, already %s\n", label.c_str(), Utf8(source.filename()).c_str(),
+                            o.info ? "listed" : "converted");
             }
 
             return 0;
@@ -713,7 +738,8 @@ int ConvertFile(const std::string& input, const std::string& label, const Option
 
     // A game can have more than one driver. The report covers each, and a conversion converts each one's songs, but
     // --trace follows the first, and the table overrides go to the first alone.
-    std::vector<FoundMusic> drivers = OpenAllMusic(rom, o.overrides, error);
+    std::vector<std::string> unread;
+    std::vector<FoundMusic> drivers = OpenAllMusic(rom, o.overrides, error, unread);
     if (drivers.empty())
     {
         std::fprintf(stderr, "%s: %s\n", label.c_str(), error.c_str());
@@ -727,7 +753,8 @@ int ConvertFile(const std::string& input, const std::string& label, const Option
 
     if (o.info)
     {
-        PrintInfo(rom, drivers, o);
+        PrintInfo(rom, drivers, unread, o);
+        done.push_back(source);
         return 0;
     }
     if (o.trace_song >= 0)
@@ -735,9 +762,34 @@ int ConvertFile(const std::string& input, const std::string& label, const Option
         return Trace(*drivers.front().music, o);
     }
 
+    // Nothing is written, not even the output folder, when the options pick none of the songs.
+    const auto picks = [&o](const FoundMusic& f)
+    {
+        for (int s = 0; s < f.music->SongCount(); s++)
+        {
+            if ((o.songs.empty() || o.songs.count(s)) && f.music->HasSong(s))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    };
+    if (std::none_of(drivers.begin(), drivers.end(), picks))
+    {
+        std::fprintf(stderr, "%s: no songs selected\n", label.c_str());
+        return 1;
+    }
+
+    // The output goes in a folder named after the game, beside it. A file without an extension would share its path
+    // with that folder. The folder then gets a suffix.
     done.push_back(source);
     const std::string name = SafeFileName(o.name.empty() ? Utf8(source.stem()) : o.name);
-    const fs::path out_dir = o.out_dir.empty() ? source.parent_path() / PathFromUtf8(name) : PathFromUtf8(o.out_dir);
+    fs::path out_dir = o.out_dir.empty() ? source.parent_path() / PathFromUtf8(name) : PathFromUtf8(o.out_dir);
+    if (o.out_dir.empty() && out_dir.lexically_normal() == source.lexically_normal())
+    {
+        out_dir += "_output";
+    }
     fs::create_directories(out_dir, ec);
     if (ec)
     {
@@ -761,6 +813,10 @@ int ConvertFile(const std::string& input, const std::string& label, const Option
             std::printf("%d sound drivers\n", int(drivers.size()));
         }
     }
+    for (const std::string& w : unread)
+    {
+        std::fprintf(stderr, "%swarning: %s; its songs are left out\n", prefix.c_str(), w.c_str());
+    }
 
     const auto voice_channels = [](const FoundMusic& f)
     {
@@ -782,12 +838,6 @@ int ConvertFile(const std::string& input, const std::string& label, const Option
         settings.out_dir = Utf8(out_dir);
         settings.base_name = d == 0 ? name : name + "_" + driver;
         ConvertSongs(*drivers[d].music, settings, d == 0 ? "song" : driver + " song", label, prefix, o, tally);
-    }
-
-    if (tally.selected == 0)
-    {
-        std::fprintf(stderr, "%s: no songs selected\n", label.c_str());
-        return 1;
     }
 
     if (!o.quiet)
@@ -837,7 +887,13 @@ int Run(const std::vector<std::string>& args)
         std::string label = o.inputs[i];
         try
         {
-            label = Utf8(PathFromUtf8(o.inputs[i]).filename());
+            // A path that ends in a separator names the folder before it.
+            fs::path path = PathFromUtf8(o.inputs[i]);
+            if (path.filename().empty())
+            {
+                path = path.parent_path();
+            }
+            label = Utf8(path.filename());
             if (ConvertFile(o.inputs[i], label, o, done, failed))
             {
                 result = 1;

@@ -101,21 +101,21 @@ bool Rom::Load(const std::string& path, std::string& error)
     std::error_code ec;
     if (std::filesystem::is_directory(PathFromUtf8(path), ec))
     {
-        error = path + " is a folder, not a ROM or GSF file";
+        error = "it's a folder, not a ROM or GSF file";
         return false;
     }
 
     std::vector<uint8_t> file;
     if (!ReadFile(path, file))
     {
-        error = "can't read " + path;
+        error = "it can't be read";
         return false;
     }
 
     // An archive would otherwise be read as a ROM that has no driver supergbamidi knows.
     if (IsArchive(file))
     {
-        error = path + " is an archive: extract the ROM or GSF files from it first";
+        error = "it's an archive: extract the ROM or GSF files from it first";
         return false;
     }
 
@@ -132,7 +132,7 @@ bool Rom::Load(const std::string& path, std::string& error)
     {
         if (file.size() < 0xC0)
         {
-            error = path + " is too small to be a GBA ROM";
+            error = "it's too small to be a GBA ROM";
             return false;
         }
 
@@ -145,7 +145,7 @@ bool Rom::Load(const std::string& path, std::string& error)
     }
     if (data_.empty())
     {
-        error = path + " contains no ROM data";
+        error = "it contains no ROM data";
         return false;
     }
 
@@ -160,20 +160,23 @@ bool Rom::LoadGsf(const std::string& path, int depth, std::string& error)
         return false;
     }
 
+    // Messages about the file itself follow its name, and those about a library name it.
+    const std::string who = depth == 0 ? "it" : "the library " + Utf8(PathFromUtf8(path).filename());
+    const std::string whose = depth == 0 ? "its" : who + "'s";
     std::vector<uint8_t> file;
     if (!ReadFile(path, file))
     {
-        error = "can't read " + path;
+        error = who + " can't be read";
         return false;
     }
     if (file.size() < 16 || std::memcmp(file.data(), "PSF", 3) != 0)
     {
-        error = path + " isn't a PSF file";
+        error = who + " isn't a PSF file";
         return false;
     }
     if (file[3] != 0x22)
     {
-        error = path + " isn't a GSF (PSF version 0x22) file";
+        error = who + " isn't a GSF (PSF version 0x22) file";
         return false;
     }
 
@@ -181,7 +184,7 @@ bool Rom::LoadGsf(const std::string& path, int depth, std::string& error)
     const uint32_t program_size = Le32(&file[8]);
     if (uint64_t(16) + reserved_size + program_size > file.size())
     {
-        error = path + " is truncated";
+        error = who + " is truncated";
         return false;
     }
 
@@ -202,9 +205,34 @@ bool Rom::LoadGsf(const std::string& path, int depth, std::string& error)
         return {};
     };
 
+    // A _lib tag names a file beside this one. Where the folder has no file of the tag's name, one whose name differs
+    // only in case takes its place. Windows and macOS find that file anyway.
     auto lib_path = [&](const std::string& name)
     {
-        return Utf8(PathFromUtf8(path).parent_path() / PathFromUtf8(name));
+        const std::filesystem::path exact = PathFromUtf8(path).parent_path() / PathFromUtf8(name);
+        std::error_code ec;
+        if (std::filesystem::exists(exact, ec))
+        {
+            return Utf8(exact);
+        }
+
+        const std::filesystem::path folder =
+            exact.parent_path().empty() ? std::filesystem::path(".") : exact.parent_path();
+        const std::string wanted = Utf8(exact.filename());
+        const auto same = [](char a, char b)
+        {
+            return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+        };
+        for (std::filesystem::directory_iterator it(folder, ec), end; !ec && it != end; it.increment(ec))
+        {
+            const std::string found = Utf8(it->path().filename());
+            if (found.size() == wanted.size() && std::equal(found.begin(), found.end(), wanted.begin(), same))
+            {
+                return Utf8(it->path());
+            }
+        }
+
+        return Utf8(exact);
     };
 
     // As the PSF format specifies, _lib is loaded first, then the file's program on top of it, then _lib2, _lib3 and so
@@ -227,12 +255,12 @@ bool Rom::LoadGsf(const std::string& path, int depth, std::string& error)
         std::string zerr;
         if (!ZlibDecompress(&file[program_pos], program_size, program, zerr))
         {
-            error = path + ": " + zerr;
+            error = whose + " program: " + zerr;
             return false;
         }
         if (!ApplyGsfProgram(program, error))
         {
-            error = path + ": " + error;
+            error = whose + " program: " + error;
             return false;
         }
     }

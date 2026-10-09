@@ -2,7 +2,9 @@
 
 #include "konami/seqformat.h"
 
+#include <algorithm>
 #include <cstdio>
+#include <string>
 
 namespace supergbamidi::konami
 {
@@ -493,11 +495,16 @@ bool ReadSongHeader(const Rom& rom, uint32_t song_table, int song, Revision revi
 }
 
 bool WalkTrack(const Rom& rom, const SongHeader& song, int track, Revision revision,
-               const std::function<void(const Command&, uint32_t frame)>& visit, uint32_t max_commands)
+               const std::function<void(const Command&, uint32_t frame)>& visit, uint32_t max_commands,
+               bool follow_calls)
 {
     uint32_t start = song.offsets[track];
     uint32_t pos = 0;
     uint32_t frame = 0;
+    // The call that the walk follows: the start and position to go back to, and the commands left to play.
+    uint32_t saved_start = 0;
+    uint32_t ret = 0;
+    int call_commands = 0;
 
     auto read_delay_at = [&]()
     {
@@ -537,9 +544,41 @@ bool WalkTrack(const Rom& rom, const SongHeader& song, int track, Revision revis
             pos = 0;
             break;
 
+        case Op::kCall:
+            {
+                // 90-9E and F5 count setting the duty or the wave as the call's first command. A count of 0 plays none
+                // of the fragment. 9F and F4 play 256 commands for 0.
+                const bool sets_first =
+                    revision == Revision::kDungeonDiceMonsters ? c.opcode == 0xF5 : c.opcode != 0x9F;
+                const int count = c.count == 0 && !sets_first ? 256 : c.count;
+                // A call of no commands only sets the duty or the wave. Inside another call, it also ends that call's
+                // count. The driver does the same.
+                if (!follow_calls || count == 0)
+                {
+                    call_commands = 0;
+                    pos += c.length;
+                    break;
+                }
+
+                // The count below takes the call itself as one of its commands.
+                saved_start = start;
+                ret = pos + c.length;
+                call_commands = count + 1;
+                start = song.offsets[track];
+                pos = uint32_t(c.value);
+                break;
+            }
+
         default:
             pos += c.length;
             break;
+        }
+
+        // Each command counts towards the call's commands, and the track goes back after the last one.
+        if (call_commands > 0 && --call_commands == 0)
+        {
+            start = saved_start;
+            pos = ret;
         }
 
         if (!read_delay_at())
@@ -713,21 +752,26 @@ std::string Describe(const Command& c, int track, Revision revision)
     case Op::kCall:
         {
             const int nibble = c.opcode & 15;
-            char action[40] = "";
+            std::string action;
             if (dungeon_dice)
             {
-                std::snprintf(action, sizeof action, "%s", c.opcode == 0xF5 ? ", first the next byte's command" : "");
-            }
-            else if (nibble < 4)
-            {
-                std::snprintf(action, sizeof action, ", duty %s", kDutyNames[nibble]);
+                action = c.opcode == 0xF5 ? ", first the next byte's command" : "";
             }
             else if (nibble < 15)
             {
-                std::snprintf(action, sizeof action, ", wave %d", nibble - 4);
+                // 90-9E set the duty byte or the wave as 80-8E do, and are described the same way, in one line.
+                Command set;
+                set.op = nibble < 4 ? Op::kDuty : Op::kWave;
+                const bool as_it_is = revision == Revision::kRaveMaster || revision == Revision::kEternalDuelist;
+                set.value = nibble >= 4 ? nibble - 4 : as_it_is ? nibble : nibble << 6;
+                std::string what = Describe(set, track, revision);
+                what.erase(std::unique(what.begin(), what.end(), [](char a, char b) { return a == ' ' && b == ' '; }),
+                           what.end());
+                action = ", " + what;
             }
 
-            std::snprintf(buf, sizeof buf, "call       %d commands at +0x%04X%s", c.count, unsigned(c.value), action);
+            std::snprintf(buf, sizeof buf, "call       %d commands at +0x%04X%s", c.count, unsigned(c.value),
+                          action.c_str());
             break;
         }
 

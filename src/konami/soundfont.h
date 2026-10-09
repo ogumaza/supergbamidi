@@ -13,6 +13,7 @@
 #include "konami/driver.h"
 #include "rom.h"
 #include "sf2.h"
+#include "song_banks.h"
 
 namespace supergbamidi::konami
 {
@@ -31,14 +32,16 @@ constexpr int kWaveRowLevel = 2 * kPsgLevelPerVolume * 15;
 class SoundfontBuilder
 {
 public:
-    // Sample, instrument and preset counts for Restore().
+    // Sample, instrument and preset counts and the banks given out, for Restore().
     struct Checkpoint
     {
         size_t samples = 0, instruments = 0, presets = 0;
+        SongBanks banks = SongBanks(1);
     };
 
-    // Keeps references to `rom` and `info`, which have to outlive the builder.
-    SoundfontBuilder(const Rom& rom, const DriverInfo& info);
+    // Keeps references to `rom` and `info`. Both have to outlive the builder. In a SoundFont that `songs` songs share,
+    // SongBanks gives each song's presets their bank and programs.
+    SoundfontBuilder(const Rom& rom, const DriverInfo& info, int songs = 1);
 
     // Returns the SoundFont that the builder adds samples to.
     Sf2File& File()
@@ -46,10 +49,16 @@ public:
         return file_;
     }
 
-    // Saves the current sample, instrument and preset counts.
+    // Saves the current sample, instrument and preset counts and the banks given out.
     Checkpoint Save() const
     {
-        return {file_.samples.size(), file_.instruments.size(), file_.presets.size()};
+        return {file_.samples.size(), file_.instruments.size(), file_.presets.size(), banks_};
+    }
+
+    // Returns the banks and programs of the presets.
+    SongBanks& Banks()
+    {
+        return banks_;
     }
 
     // Removes everything added since checkpoint `c`, including samples.
@@ -107,6 +116,7 @@ private:
     const double square_note0_hz_; // frequency of PSG square note 0
     const int square_base_;
     Sf2File file_;
+    SongBanks banks_;
     std::map<std::pair<int, int>, int> cache_; // (kind, parameter) -> SF2 sample
     std::map<int, Pitch> pitch_;
 };

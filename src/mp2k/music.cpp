@@ -48,6 +48,12 @@ public:
         return info_.song_count;
     }
 
+    // The files' numbers have as many digits as the largest song's.
+    std::string FileNumber(int song) const override
+    {
+        return SongNumber(song, SongCount());
+    }
+
     // An entry whose header has no tracks is a placeholder.
     bool HasSong(int song) const override
     {
@@ -149,7 +155,7 @@ private:
     {
         ConvertOptions opt;
         opt.loops = settings.loops;
-        opt.track_mask = settings.track_mask;
+        opt.track_mask = uint16_t(settings.track_mask);
         opt.frame_timing = settings.frame_timing;
         opt.voice_channels = settings.voice_channels;
         opt.out_dir = settings.out_dir;

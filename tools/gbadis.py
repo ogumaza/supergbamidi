@@ -89,8 +89,10 @@ class Disassembler:
                     self.labels.setdefault(target, ('sub_%08x' if is_call else 'loc_%08x') % target)
                     self.xrefs.setdefault(target, []).append(addr)
                     work.append((target, (not thumb) if m == 'blx' else thumb))
-                ends = (m in ('b', 'bx') or (m in ('pop', 'ldm') and 'pc' in ins.op_str) or
-                        (m in ('mov', 'add', 'ldr') and ins.op_str.startswith('pc,')))
+                # An unconditional branch, or an instruction that loads pc, such as pop {pc}, ldmdb fp, {fp, sp, pc}
+                # or subs pc, lr, #4.
+                ends = (m in ('b', 'bx') or (m in ('pop', 'ldm', 'ldmib', 'ldmda', 'ldmdb') and 'pc' in ins.op_str)
+                        or (m in ('mov', 'movs', 'add', 'adds', 'sub', 'subs', 'ldr') and ins.op_str.startswith('pc,')))
                 if ends:
                     break
                 addr += ins.size

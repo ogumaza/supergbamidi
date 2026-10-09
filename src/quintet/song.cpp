@@ -223,7 +223,8 @@ Command DecodeCommand(const Rom& rom, const DriverInfo& info, uint32_t address, 
         cmd.text = "repeat from here";
         break;
     case 0xD7:
-        cmd.text = Format("play the repeat %d times", arg);
+        // The driver's pass count wraps around. A count of 0 makes 256 passes.
+        cmd.text = Format("play the repeat %d times", arg ? arg : 256);
         break;
     case 0xDA:
         cmd.text = Format("wave %d into bank %d", arg & 0x7F, arg >> 7);
@@ -268,8 +269,17 @@ Command DecodeCommand(const Rom& rom, const DriverInfo& info, uint32_t address, 
         cmd.text = Format("detune %d", int16_t(at(1) | at(2) << 8));
         break;
     case 0xE7:
-        cmd.text = at(3) == at(2) ? Format("play %d%% to %d%% of the sample", at(1), at(2))
-                                  : Format("play %d%% to %d%% of the sample, then loop from %d%%", at(1), at(2), at(3));
+        // A range of 0, 0 and 0 keeps the start of the last range that the FIFO played since DC or DD.
+        if (at(1) == 0 && at(2) == 0 && at(3) == 0)
+        {
+            cmd.text = "play the sample once, from the last range's start, or from its start after DC or DD";
+        }
+        else
+        {
+            cmd.text = at(3) == at(2)
+                           ? Format("play %d%% to %d%% of the sample", at(1), at(2))
+                           : Format("play %d%% to %d%% of the sample, then loop from %d%%", at(1), at(2), at(3));
+        }
         break;
     case 0xE8:
         cmd.text = Format("SOUNDBIAS resolution %d", arg);
@@ -405,7 +415,7 @@ bool DumpSong(const Rom& rom, const DriverInfo& info, int song, const std::strin
                 int& left = repeats.back().second;
                 if (left == 0)
                 {
-                    left = rom.U8(address - 1);
+                    left = rom.U8(address - 1) ? rom.U8(address - 1) : 256;
                 }
                 if (--left > 0)
                 {

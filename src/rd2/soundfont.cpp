@@ -79,6 +79,14 @@ int Centibels(double level, double full)
     return level <= 0 ? kSilent : std::clamp(int(std::lround(-200.0 * std::log10(level / full))), 0, kSilent);
 }
 
+// Returns the SoundFont release of a sample or wave voice. Its release takes a share of its level off each frame.
+int SampleRelease(uint8_t release)
+{
+    const double per_frame = -20.0 * std::log10((release + 0xE6) / 512.0);
+
+    return Timecents(100.0 / per_frame / kFrameRate);
+}
+
 std::string Name(const char* kind, uint32_t address)
 {
     char b[32];
@@ -203,13 +211,20 @@ Sf2Envelope EnvelopeFor(const Rom& rom, uint32_t address, uint8_t release, bool 
     // bits, or silences it at once.
     if (!psg)
     {
-        const double per_frame = -20.0 * std::log10((release + 0xE6) / 512.0);
-        env.release = Timecents(100.0 / per_frame / kFrameRate);
+        env.release = SampleRelease(release);
     }
     else if (release >> 5)
     {
         env.release = Timecents(FadeSeconds(15.0 * (release >> 5) / 64.0 * kFrameRate));
     }
+
+    return env;
+}
+
+Sf2Envelope WaveEnvelope(uint8_t release)
+{
+    Sf2Envelope env;
+    env.release = SampleRelease(release);
 
     return env;
 }
@@ -245,7 +260,8 @@ void AddEnvelope(Sf2Zone& zone, const Sf2Envelope& envelope)
     zone.gens.insert(zone.gens.end() - (zone.gens.empty() ? 0 : 1), gens.begin(), gens.end());
 }
 
-SoundfontBuilder::SoundfontBuilder(const Rom& rom) : rom_(rom)
+SoundfontBuilder::SoundfontBuilder(const Rom& rom, double psg_share, int songs)
+    : rom_(rom), psg_share_(psg_share), banks_(songs)
 {
 }
 
@@ -328,7 +344,7 @@ int SoundfontBuilder::SquareSample(int duty)
         const double level = step < high ? 1.0 - high / 8.0 : -high / 8.0;
         for (int i = 0; i < kStepPoints; i++)
         {
-            cycle.push_back(int16_t(std::lround(level * 32767)));
+            cycle.push_back(int16_t(std::lround(level * psg_share_ * 32767)));
         }
     }
 
@@ -359,7 +375,7 @@ int SoundfontBuilder::WaveSample(uint32_t address)
         const uint8_t b = rom_.U8(address + i);
         for (int v : {b >> 4, b & 15})
         {
-            cycle.push_back(int16_t(std::lround((v - 7.5) / 7.5 * 32767)));
+            cycle.push_back(int16_t(std::lround((v - 7.5) / 7.5 * psg_share_ * 32767)));
         }
     }
 
@@ -397,7 +413,7 @@ int SoundfontBuilder::NoiseSample(uint8_t nr43)
     uint32_t clock = 0;
     for (uint32_t i = 0; i < kNoisePoints; i++)
     {
-        s.pcm.push_back(shift < 14 ? int16_t((lfsr & 1) ? -16384 : 16384) : 0);
+        s.pcm.push_back(shift < 14 ? int16_t(std::lround(((lfsr & 1) ? -16384 : 16384) * psg_share_)) : 0);
         if (shift >= 14)
         {
             continue;

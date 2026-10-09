@@ -160,26 +160,25 @@ struct Simulation
     std::vector<PitchChange> pitches;
     std::vector<uint64_t> frame_starts; // with frame timing, the tick each frame starts at
     std::vector<std::string> warnings;
-    std::optional<uint64_t> cut_off; // the tick where the model gave up, at the frame limit
+    std::optional<uint64_t> cut_off;                       // the tick where the model gave up, at the frame limit
+    std::array<EnvelopeSettings, kChannels> end_envelopes; // each channel's settings from controllers 20-23 at the end
 };
 
-// Returns the tempo changes in `actions` as (tick, tempo), in the order of their ticks.
+// Returns the tempo changes in `actions` as (tick, tempo), in the order the model runs them. The driver keeps the tempo
+// it set last. A change can run after one with a later tick when two tracks change the tempo within about a frame.
+// Such a change starts at that later tick, as in TickClock.
 std::vector<std::pair<uint64_t, uint32_t>> TempoChanges(const std::vector<Action>& actions)
 {
     std::vector<std::pair<uint64_t, uint32_t>> tempos;
+    uint64_t at = 0;
     for (const Action& a : actions)
     {
         if (a.kind == Action::kTempo)
         {
-            tempos.emplace_back(a.tick, a.value);
+            at = std::max(at, a.tick);
+            tempos.emplace_back(at, a.value);
         }
     }
-
-    const auto by_tick = [](const auto& a, const auto& b)
-    {
-        return a.first < b.first;
-    };
-    std::stable_sort(tempos.begin(), tempos.end(), by_tick);
 
     return tempos;
 }
@@ -247,6 +246,7 @@ Simulation Simulate(const Rom& rom, const DriverInfo& info, int song, const Tune
     TickClock clock(header.ticks_per_quarter);
     std::array<int64_t, kChannels> last = {};
     uint32_t frames = 0;
+    bool finished = false; // the tune reached the plan's end, or the driver stopped it
     for (uint32_t f = 0; f < kMaxFrames; f++)
     {
         // A pitch change that a bend or program change makes, without vibrato, belongs at that command's tick. Vibrato
@@ -292,16 +292,21 @@ Simulation Simulate(const Rom& rom, const DriverInfo& info, int song, const Tune
         }
         if (done || seq.Ended())
         {
+            finished = true;
             break;
         }
     }
 
-    if (frames == kMaxFrames)
+    if (!finished && frames == kMaxFrames)
     {
         sim.warnings.push_back("the tune was cut off after an hour");
         sim.cut_off = clock.FrameTick(frames);
     }
     sim.warnings.insert(sim.warnings.end(), seq.Warnings().begin(), seq.Warnings().end());
+    for (int ch = 0; ch < kChannels; ch++)
+    {
+        sim.end_envelopes[size_t(ch)] = seq.Channel(ch).envelope;
+    }
 
     if (frame_timing)
     {
@@ -523,8 +528,15 @@ std::vector<Note> CollectNotes(const Simulation& sim, const Plan& plan, uint16_t
         }
     }
 
+    // The MIDI file releases the notes still playing at the end. Each takes the release that its channel's settings
+    // give there. The driver's release would take the same.
     for (size_t i = 0; i < notes.size(); i++)
     {
+        Note& n = notes[i];
+        if (n.open && n.envelope.release >= 0x80)
+        {
+            n.envelope.release = sim.end_envelopes[size_t(n.channel)].release;
+        }
         close(int(i), plan.end);
     }
 
@@ -584,16 +596,16 @@ double TickSeconds(const std::vector<Action>& actions, uint32_t per_quarter, uin
     double seconds = 0;
     uint64_t at = 0;
     uint32_t tempo = 500000;
-    for (const Action& a : actions)
+    for (const auto& [change, value] : TempoChanges(actions))
     {
-        if (a.kind != Action::kTempo || a.tick >= tick)
+        if (change >= tick)
         {
-            continue;
+            break;
         }
 
-        seconds += double(a.tick - at) * tempo / per_quarter / 1e6;
-        at = a.tick;
-        tempo = a.value;
+        seconds += double(change - at) * tempo / per_quarter / 1e6;
+        at = change;
+        tempo = value;
     }
 
     // The final segment runs from the last tempo change to `tick`.
@@ -651,10 +663,24 @@ void WriteChannelSetup(MidiTrack& mt, int ch, int range, int bank, bool volume_a
     }
 }
 
-// Adds a preset for each program the notes play, in each note's bank, and in the drum bank too for those on the drum
-// channel without envelope settings, when the tune's bank is 0. Returns the programs whose instruments have nothing to
-// play.
-std::set<int> AddPresets(SoundfontBuilder& sf, const std::vector<Note>& notes, int bank)
+// Returns the instrument of the preset at `bank` and `program` in `file`, or -1 if there's none.
+int PresetInstrument(const Sf2File& file, int bank, int program)
+{
+    for (const Sf2Preset& p : file.presets)
+    {
+        if (p.bank == bank && p.program == program)
+        {
+            return p.instrument;
+        }
+    }
+
+    return -1;
+}
+
+// Adds a preset for each program the notes play, in each note's bank. A note on the drum channel without envelope
+// settings gets a copy in the drum bank too. In a shared SoundFont, another set of instruments can have the program
+// there already, and `clashes` gets the program. Returns the programs whose instruments have nothing to play.
+std::set<int> AddPresets(SoundfontBuilder& sf, const std::vector<Note>& notes, std::set<int>& clashes)
 {
     std::set<int> missing;
     for (const Note& n : notes)
@@ -667,9 +693,17 @@ std::set<int> AddPresets(SoundfontBuilder& sf, const std::vector<Note>& notes, i
         }
 
         sf.AddPreset(n.bank, n.program, instrument);
-        if (n.channel == kDrumChannel && bank == 0 && n.envelope.None())
+        if (n.channel == kDrumChannel && n.envelope.None())
         {
-            sf.AddPreset(kDrumBank, n.program, instrument);
+            const int drum = PresetInstrument(sf.File(), kDrumBank, n.program);
+            if (drum < 0)
+            {
+                sf.AddPreset(kDrumBank, n.program, instrument);
+            }
+            else if (drum != instrument)
+            {
+                clashes.insert(n.program);
+            }
         }
     }
 
@@ -795,10 +829,11 @@ bool WriteMidi(const std::string& path, const std::string& title, const std::str
         home[size_t(ch)] = first[size_t(ch)] < int(header.track_count) ? track[size_t(first[size_t(ch)])] : nullptr;
     }
 
-    // The tempo goes in the conductor track, at the GBA's speed. Program changes and volume go in the track that gave
-    // them, if it's in the file, or else in the channel's track.
+    // The tempo goes in the conductor track, at the GBA's speed, on the ticks that TempoChanges() gives. Program
+    // changes and volume go in the track that gave them, if it's in the file, or else in the channel's track.
     std::array<bool, kChannels> volume_at_start = {};
     std::vector<ProgramChange> programs;
+    uint64_t tempo_tick = 0;
     for (const Action& a : sim.actions)
     {
         if (a.tick > plan.end || (a.tick == plan.end && a.kind != Action::kTempo))
@@ -811,7 +846,8 @@ bool WriteMidi(const std::string& path, const std::string& title, const std::str
         switch (a.kind)
         {
         case Action::kTempo:
-            conductor.Tempo(uint32_t(a.tick), uint32_t(std::lround(a.value * kTempoScale)));
+            tempo_tick = std::max(tempo_tick, a.tick);
+            conductor.Tempo(uint32_t(tempo_tick), uint32_t(std::lround(a.value * kTempoScale)));
             break;
 
         case Action::kProgram:
@@ -951,10 +987,11 @@ SongSummary Run(const Rom& rom, const DriverInfo& info, int song, const ConvertO
         tracks.insert(n.track);
     }
 
+    // The notes that the driver drops, of the tracks that the conversion keeps.
     int dropped = 0;
     for (const Action& a : sim.actions)
     {
-        dropped += a.kind == Action::kNoteDropped && a.tick < plan.end ? 1 : 0;
+        dropped += a.kind == Action::kNoteDropped && a.tick < plan.end && (opt.track_mask >> a.track & 1) ? 1 : 0;
     }
     if (dropped)
     {
@@ -979,9 +1016,15 @@ SongSummary Run(const Rom& rom, const DriverInfo& info, int song, const ConvertO
     {
         n.bank = sf.BankFor(opt.bank, n.envelope);
     }
-    for (int program : AddPresets(sf, notes, opt.bank))
+    std::set<int> clashes;
+    for (int program : AddPresets(sf, notes, clashes))
     {
         sum.warnings.push_back("program " + std::to_string(program) + "'s instrument has no samples to play");
+    }
+    for (int program : clashes)
+    {
+        sum.warnings.push_back("channel 10's program " + std::to_string(program) +
+                               " is another set of instruments' in the drum bank, which some players use there");
     }
 
     const std::string title = rom.Title() + " #" + TwoDigits(song);
@@ -1055,6 +1098,7 @@ bool DumpSong(const Rom& rom, const DriverInfo& info, int song, const std::strin
 
         uint32_t address = h.tracks[t];
         uint64_t tick = 0;
+        bool loop_started = false;
         for (int n = 0; n < kMaxListedCommands; n++)
         {
             Event e;
@@ -1073,16 +1117,22 @@ bool DumpSong(const Rom& rom, const DriverInfo& info, int song, const std::strin
                 std::snprintf(b, sizeof b, "%02X ", rom.U8(address + i));
                 bytes += b;
             }
-            std::snprintf(line, sizeof line, "0x%08X %8llu  %-15s %s\n", unsigned(address),
-                          static_cast<unsigned long long>(tick), bytes.c_str(), DescribeEvent(e).c_str());
+            // The driver ignores a loop's end before its start.
+            const bool control = e.command == kCmdControl;
+            const bool loop_end = control && e.a == kCtrlLoopEnd && loop_started;
+            const char* const note =
+                control && e.a == kCtrlLoopEnd && !loop_started ? " (no loop to end; ignored)" : "";
+            std::snprintf(line, sizeof line, "0x%08X %8llu  %-15s %s%s\n", unsigned(address),
+                          static_cast<unsigned long long>(tick), bytes.c_str(), DescribeEvent(e).c_str(), note);
             text += line;
 
             address += e.size;
+            loop_started = loop_started || (control && e.a == kCtrlLoopStart);
             if (e.command == kCmdDelay1 || e.command == kCmdDelay2 || e.command == kCmdDelay3)
             {
                 tick += e.value;
             }
-            if (e.command == kCmdEnd || (e.command == kCmdControl && e.a == kCtrlLoopEnd))
+            if (e.command == kCmdEnd || loop_end)
             {
                 break;
             }

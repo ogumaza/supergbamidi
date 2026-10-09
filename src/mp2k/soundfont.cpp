@@ -49,6 +49,22 @@ constexpr int kPsgAttenuation = 63;
 // The PSG's envelope steps: one for each count of its counter, which counts 16 times every 15 frames.
 constexpr double kPsgStepsPerSecond = kFrameRate * 16 / 15;
 
+// Returns the level of a PSG channel at its full volume against a full-scale sample. Camelot's mixer plays a sample
+// channel at 9/8 of the driver's full level, so the PSG is that much quieter against it. The samples hold the levels,
+// rather than the zones' attenuation, which FluidSynth applies at 0.4 of its value.
+double PsgLevel(const DriverInfo& info)
+{
+    const double level = std::pow(10.0, -kPsgAttenuation / 200.0);
+    return info.camelot_mixer ? level * 8 / 9 : level;
+}
+
+// Returns the level of a sample channel at its full level against a full-scale sample: the driver's master volume
+// scales it, where Camelot's mixer leaves the master volume out.
+double DirectLevel(const DriverInfo& info)
+{
+    return info.camelot_mixer ? 1.0 : (info.master_volume + 1) / 16.0;
+}
+
 // Game Boy square duty waveforms, 8 steps, most significant bit first: 12.5%, 25%, 50% and 75%.
 constexpr uint8_t kDutyPatterns[4] = {0x01, 0x81, 0x87, 0x7E};
 
@@ -179,17 +195,9 @@ struct Part
 void AddParts(const DriverInfo& info, const Voice& voice, int sample, bool loops, const std::vector<Part>& parts,
               int rhythm_pan, Sf2Instrument& instrument)
 {
-    // The driver's master volume scales its sample channels, and the PSG channels are quieter than a sample channel at
-    // its full level. Camelot's mixer leaves out the master volume, and plays a sample channel at 9/8 of the driver's
-    // full level.
+    // The samples hold the levels of the sample and PSG channels (see DirectLevel() and PsgLevel()).
     const int psg = voice.PsgChannel();
     const Sf2Envelope env = EnvelopeFor(info, voice);
-    int attenuation = psg ? kPsgAttenuation : Centibels((info.master_volume + 1) / 16.0);
-    if (info.camelot_mixer)
-    {
-        attenuation = psg ? kPsgAttenuation + Centibels(8.0 / 9.0) : 0;
-    }
-
     for (const Part& part : parts)
     {
         Sf2Zone z;
@@ -213,10 +221,6 @@ void AddParts(const DriverInfo& info, const Voice& voice, int sample, bool loops
         if (env.sustain)
         {
             z.gens.push_back(Sf2Gen::Value(sf2gen::kSustainVolEnv, env.sustain));
-        }
-        if (attenuation)
-        {
-            z.gens.push_back(Sf2Gen::Value(sf2gen::kInitialAttenuation, attenuation));
         }
 
         // A tuning of a semitone or more goes partly into the coarse tune, since the fine tune only reaches 99 cents.
@@ -643,6 +647,7 @@ int SoundfontBuilder::DirectSample(uint32_t address)
     static const int8_t kSteps[16] = {0, 1, 4, 9, 16, 25, 36, 49, -64, -49, -36, -25, -16, -9, -4, -1};
     Sf2Sample s;
     s.name = Name(reverse ? "Reversed" : "Sample", wave.address);
+    const double level = DirectLevel(info_);
     int8_t point = 0;
     for (uint32_t i = 0; i < wave.size; i++)
     {
@@ -662,7 +667,7 @@ int SoundfontBuilder::DirectSample(uint32_t address)
             point = int8_t(uint8_t(point + kSteps[n % 2 ? byte & 0xF : byte >> 4]));
         }
 
-        s.pcm.push_back(int16_t(point * 256));
+        s.pcm.push_back(int16_t(std::lround(point * 256 * level)));
     }
     if (reverse)
     {
@@ -715,11 +720,12 @@ int SoundfontBuilder::SquareSample(int duty)
     static const char* const kDutyNames[4] = {"12.5%", "25%", "50%", "75%"};
     Sf2Sample s;
     s.name = std::string("Square ") + kDutyNames[duty];
+    const int16_t amplitude = int16_t(std::lround(32767 * PsgLevel(info_)));
     std::vector<int16_t> cycle;
     for (int step = 0; step < 8; step++)
     {
         const bool high = (kDutyPatterns[duty] >> (7 - step)) & 1;
-        cycle.insert(cycle.end(), 8, high ? 32767 : -32767);
+        cycle.insert(cycle.end(), 8, high ? amplitude : int16_t(-amplitude));
     }
     SetCycle(s, cycle);
     s.rate = uint32_t(std::lround(64 * kMiddleC));
@@ -752,7 +758,7 @@ int SoundfontBuilder::WaveSample(uint32_t address)
     {
         const uint8_t byte = rom_.U8(address + i / 2);
         const int point = i % 2 ? byte & 0xF : byte >> 4;
-        cycle.push_back(int16_t(std::lround((point - 7.5) * 32767 / 7.5)));
+        cycle.push_back(int16_t(std::lround((point - 7.5) * 32767 / 7.5 * PsgLevel(info_))));
     }
     SetCycle(s, cycle);
     s.rate = uint32_t(std::lround(16 * kMiddleC));
@@ -780,10 +786,11 @@ int SoundfontBuilder::NoiseSample(int narrow)
     s.rate = kNoiseRate;
     s.root_key = 60;
     const uint32_t points = narrow ? 127 * 8 : 32767;
+    const int16_t amplitude = int16_t(std::lround(32767 * PsgLevel(info_)));
     uint32_t lfsr = 0x7FFF;
     for (uint32_t i = 0; i < points + kLoopGuard; i++)
     {
-        s.pcm.push_back((lfsr & 1) ? -32767 : 32767);
+        s.pcm.push_back((lfsr & 1) ? int16_t(-amplitude) : amplitude);
         const uint32_t bit = (lfsr ^ (lfsr >> 1)) & 1;
         lfsr = (lfsr >> 1) | (bit << 14);
         if (narrow)

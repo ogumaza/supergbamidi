@@ -6,14 +6,13 @@
 #include <cstdint>
 #include <cstdio>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
-#include "files.h"
 #include "krawall/convert.h"
 #include "krawall/driver.h"
 #include "krawall/player.h"
-#include "krawall/song.h"
 #include "midi.h"
 #include "music.h"
 #include "rom.h"
@@ -173,6 +172,27 @@ public:
         }
 
         return header;
+    }
+
+    // Makes the module at `header` hold songs separated by +++. Each song plays its patterns in turn.
+    void Songs(uint32_t header, const std::vector<std::vector<uint8_t>>& songs)
+    {
+        std::vector<uint8_t> orders;
+        for (size_t s = 0; s < songs.size(); s++)
+        {
+            if (s > 0)
+            {
+                orders.push_back(kOrderSkip);
+            }
+            Put8(header + 0x123 + uint32_t(s), uint8_t(orders.size()));
+            orders.insert(orders.end(), songs[s].begin(), songs[s].end());
+        }
+
+        Put8(header + 1, uint8_t(orders.size()));
+        for (uint32_t o = 0; o < 256; o++)
+        {
+            Put8(header + 3 + o, o < orders.size() ? orders[o] : kOrderEnd);
+        }
     }
 
     Rom ToRom() const
@@ -367,7 +387,8 @@ std::vector<Cell> LoopingCells()
 
 // Detection finds the player by its code, its tables from the code and the values in them, the mixer's settings, the
 // game's calls of the library's settings and the modules, in the order of the game's table and then the one it doesn't
-// list. A game with the version string of another build gets an error that names the build.
+// list. A count for the modules applies to the game's table, and leaves out the one it doesn't list. A game with the
+// version string of another build gets an error that names the build.
 void TestDetection()
 {
     Cart cart;
@@ -379,10 +400,13 @@ void TestDetection()
     other.PutString(kVersion, "$Id: Krawall $Id: version.h 8 2005-04-21 12:24:45Z seb $");
     const Rom other_rom = other.ToRom();
     const Rom blank = Cart(false).ToRom();
-    DriverInfo info, other_info, blank_info;
-    std::string error, other_error, blank_error;
+    DriverInfo info, counted_info, other_info, blank_info;
+    std::string error, counted_error, other_error, blank_error;
+    DriverOverrides one;
+    one.module_count = 1;
 
     const bool found = DetectDriver(rom, DriverOverrides(), info, error);
+    const bool counted = DetectDriver(rom, one, counted_info, counted_error);
     const bool found_other = DetectDriver(other_rom, DriverOverrides(), other_info, other_error);
     const bool found_blank = DetectDriver(blank, DriverOverrides(), blank_info, blank_error);
 
@@ -401,6 +425,7 @@ void TestDetection()
     SUPERGBAMIDI_CHECK_EQ(info.module_table, kModuleTable);
     SUPERGBAMIDI_CHECK_EQ(info.table_count, 2);
     SUPERGBAMIDI_CHECK(info.modules == std::vector<uint32_t>({first, second, unlisted}));
+    SUPERGBAMIDI_CHECK(counted && counted_info.modules == std::vector<uint32_t>({first}));
     SUPERGBAMIDI_CHECK(!found_other && other_error ==
                                            "found Krawall, but not a build that supergbamidi knows ($Id: Krawall $Id: "
                                            "version.h 8 2005-04-21 12:24:45Z seb $): it reads the build of 2003/09/01");
@@ -509,6 +534,39 @@ void TestMixer()
 // channel, on the keys their rates give, with a program for each sample and start offset. The five-row loop, from the
 // first row back to it, plays twice; the volume slide becomes CC11 and the portamento bends upwards. SoundFont presets
 // preserve sample offsets and C-4 rates, and bidirectional loops contain both the forward and reverse samples.
+void TestSongs()
+{
+    // A module holds two songs separated by +++: the first plays pattern 0, with a note on C-4, and the second pattern
+    // 1, with a note an octave up. Each converts on its own in the player's song mode. At its end it goes back to its
+    // start, and it never plays the other song.
+    Cart cart;
+    const uint32_t module = cart.Module(1, {{4, {{0, 0, 49, 1}}}, {4, {{0, 0, 61, 1}}}});
+    cart.Songs(module, {{0}, {1}});
+    const Rom rom = cart.ToRom();
+    const DriverInfo info = Detect(rom);
+    ConvertOptions opt;
+    opt.out_dir = test::g_temp.string();
+    opt.base_name = "krawall_songs";
+
+    const SongSummary first = ConvertSong(rom, info, 0, opt, nullptr);
+    const SongSummary second = ConvertSong(rom, info, 1, opt, nullptr);
+
+    SUPERGBAMIDI_CHECK(info.songs == (std::vector<ModuleSong>{{module, 0}, {module, 1}}));
+    SUPERGBAMIDI_CHECK(first.ok && second.ok && !first.silent && !second.silent);
+    std::vector<std::set<int>> keys;
+    for (const SongSummary* s : {&first, &second})
+    {
+        std::set<int> played;
+        for (const auto& e : ReadMidi(s->midi_path).Find(0x90))
+        {
+            played.insert(e.second[1]);
+        }
+        keys.push_back(played);
+    }
+    SUPERGBAMIDI_CHECK(keys[0].size() == 1 && keys[1].size() == 1);
+    SUPERGBAMIDI_CHECK(!keys[0].empty() && !keys[1].empty() && *keys[0].begin() + 12 == *keys[1].begin());
+}
+
 void TestConversion()
 {
     Cart cart;
@@ -551,10 +609,10 @@ void TestConversion()
     // The notes: C-4 on key 60 at the start of each pass, and E-4 on key 64, again 2 rows on from its point.
     const auto first_on = midi.Find(0x90);
     const auto second_on = midi.Find(0x91);
-    SUPERGBAMIDI_CHECK_EQ(first_on.size(), 2u);
+    SUPERGBAMIDI_REQUIRE_EQ(first_on.size(), 2u);
     SUPERGBAMIDI_CHECK(first_on.size() == 2 && first_on[0].first == 0 && first_on[0].second[1] == 60 &&
                        first_on[1].first == 15);
-    SUPERGBAMIDI_CHECK_EQ(second_on.size(), 4u);
+    SUPERGBAMIDI_REQUIRE_EQ(second_on.size(), 4u);
     SUPERGBAMIDI_CHECK(second_on.size() == 4 && second_on[0].second[1] == 64 && second_on[1].first == 6);
     const auto programs = midi.Find(0xC1);
     SUPERGBAMIDI_CHECK(programs.size() >= 2 && programs[0].second[1] != programs[1].second[1]);
@@ -648,8 +706,34 @@ void TestBars()
     SUPERGBAMIDI_CHECK_EQ(ReadMidi(compound.midi_path).division, 4 * kSpeed);
 }
 
-// A module can have up to 20 channels, of which --tracks names the first 16. The channels after those are converted
-// when every channel is, and share MIDI channels with the first ones, as the 16th does.
+// The intro's row pans the channel to the left, and the loop plays a note on its first row and then pans the channel to
+// the right, which it keeps when the module jumps back. The first pass's note plays on the left and the later passes'
+// on the right, so the marked loop starts at the second pass, and the module plays the first pass once before it.
+void TestLoopStartsAtSecondPass()
+{
+    Cart cart;
+    cart.Module(1, {{1, {{0, 0, -1, 0, -1, kPan, 0x00}}},
+                    {4, {{0, 0, 49, 1, -1, -1, 0}, {2, 0, -1, 0, -1, kPan, 0x80}, {3, 0, -1, 0, -1, kJump, 0x01}}}});
+    const Rom rom = cart.ToRom();
+    const DriverInfo info = Detect(rom);
+    ConvertOptions opt;
+    opt.out_dir = test::g_temp.string();
+    opt.base_name = "krawall_second";
+
+    const SongSummary sum = ConvertSong(rom, info, 0, opt, nullptr);
+
+    // The loop runs from the second pass, after the intro's row and the first pass's four, for four rows. The file
+    // plays the note in the first pass and in the loop's two passes.
+    const double row_seconds = kSpeed * double(kTickSamples) / 16384;
+    SUPERGBAMIDI_CHECK(sum.ok);
+    SUPERGBAMIDI_CHECK(std::fabs(sum.loop_start - 5 * row_seconds) < 1e-9);
+    SUPERGBAMIDI_CHECK(std::fabs(sum.loop_end - 9 * row_seconds) < 1e-9);
+    SUPERGBAMIDI_CHECK(std::fabs(sum.seconds - 13 * row_seconds) < 1e-9);
+    SUPERGBAMIDI_REQUIRE_EQ(ReadMidi(sum.midi_path).Find(0x90).size(), 3u);
+}
+
+// A module can have up to 20 channels, and --tracks can name each of them. The channels from the 16th on share MIDI
+// channels with the first ones.
 void TestManyChannels()
 {
     Cart cart;
@@ -661,13 +745,21 @@ void TestManyChannels()
     opt.base_name = "krawall_channels";
     ConvertOptions first_only = opt;
     first_only.track_mask = 1;
+    ConvertOptions last_only = opt;
+    last_only.track_mask = 1u << 17;
+    ConvertOptions first_sixteen = opt;
+    first_sixteen.track_mask = 0xFFFF;
 
     const SongSummary every = ConvertSong(rom, info, 0, opt, nullptr);
     const SongSummary chosen = InspectSong(rom, info, 0, first_only);
+    const SongSummary last = InspectSong(rom, info, 0, last_only);
+    const SongSummary sixteen = InspectSong(rom, info, 0, first_sixteen);
 
-    SUPERGBAMIDI_CHECK(every.ok && chosen.ok);
+    SUPERGBAMIDI_CHECK(every.ok && chosen.ok && last.ok && sixteen.ok);
     SUPERGBAMIDI_CHECK_EQ(every.tracks, 2);
     SUPERGBAMIDI_CHECK_EQ(chosen.tracks, 1);
+    SUPERGBAMIDI_CHECK_EQ(last.tracks, 1);
+    SUPERGBAMIDI_CHECK_EQ(sixteen.tracks, 1);
 
     // The 18th channel's E-4 is on key 64 of MIDI channel 3, after the 15 channels that the first 15 take, in each of
     // the loop's two passes.
@@ -719,8 +811,10 @@ void RunTests()
     TestDetection();
     TestPlayer();
     TestMixer();
+    TestSongs();
     TestConversion();
     TestBars();
+    TestLoopStartsAtSecondPass();
     TestManyChannels();
     TestMusic();
 }

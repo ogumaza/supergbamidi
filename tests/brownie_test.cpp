@@ -530,7 +530,7 @@ void TestLoops()
 
     const SongSummary sum = InspectSong(rom, info, 1, opt);
 
-    SUPERGBAMIDI_CHECK_EQ(loops.size(), 1);
+    SUPERGBAMIDI_REQUIRE_EQ(loops.size(), 1);
     SUPERGBAMIDI_CHECK_EQ(loops.size() ? loops[0].frame : 0, 49);
     SUPERGBAMIDI_CHECK_EQ(loops.size() ? loops[0].first : 0, 1);
     SUPERGBAMIDI_CHECK(sum.ok && sum.tracks == 1);
@@ -560,7 +560,7 @@ void TestLoopSettings()
 
 // A square on both sides plays a note at volume 0, and then loops a note at volume 0 and one at 6. The first time
 // through, the loop's first note has the level that the note before it left, but a player that jumps back to the loop's
-// start comes from the note at volume 6, so the level is written again there.
+// start comes from the note at volume 6, so the level is written again there, and so is the tempo.
 void TestLoopSettingsAgain()
 {
     Cart cart;
@@ -594,12 +594,10 @@ void TestLoopSettingsAgain()
 
     // The setup's level of 0, the first note's, the same again at the loop's start, and then the note at volume 6's.
     SUPERGBAMIDI_CHECK(sum.ok && loop_start > 0);
-    SUPERGBAMIDI_CHECK(levels.size() > 3);
-    if (levels.size() > 3)
-    {
-        SUPERGBAMIDI_CHECK(levels[2] == std::make_pair(loop_start, levels[1].second));
-        SUPERGBAMIDI_CHECK(levels[3].first > loop_start && levels[3].second < levels[2].second);
-    }
+    SUPERGBAMIDI_CHECK(test::RepeatsTempoAtLoopStart(midi));
+    SUPERGBAMIDI_REQUIRE(levels.size() > 3);
+    SUPERGBAMIDI_CHECK(levels[2] == std::make_pair(loop_start, levels[1].second));
+    SUPERGBAMIDI_CHECK(levels[3].first > loop_start && levels[3].second < levels[2].second);
 }
 
 // A sound with too few notes for a beat plays on its frames, at 30 frames a quarter note and 480 ticks to the quarter,
@@ -647,7 +645,7 @@ void TestConversion()
     SUPERGBAMIDI_CHECK_EQ(cents, -33);
     SUPERGBAMIDI_CHECK(sum.ok && sum.tracks == 3);
     SUPERGBAMIDI_CHECK_EQ(midi.division, 480);
-    SUPERGBAMIDI_CHECK_EQ(square_on.size(), 1);
+    SUPERGBAMIDI_REQUIRE_EQ(square_on.size(), 1);
     SUPERGBAMIDI_CHECK_EQ(square_on.size() ? square_on[0].first : 1, 0);
     SUPERGBAMIDI_CHECK_EQ(square_on.size() ? square_on[0].second[1] : 0, 61);
     SUPERGBAMIDI_CHECK_EQ(sample_on.size() ? sample_on[0].second[1] : 0, 39);
@@ -677,8 +675,8 @@ void TestWaveRests()
     const auto ons = midi.Find(0x92);
     const auto offs = midi.Find(0x82);
     SUPERGBAMIDI_CHECK(sum.ok && sum.tracks == 2);
-    SUPERGBAMIDI_CHECK_EQ(ons.size(), 2);
-    SUPERGBAMIDI_CHECK_EQ(offs.size(), 2);
+    SUPERGBAMIDI_REQUIRE_EQ(ons.size(), 2);
+    SUPERGBAMIDI_REQUIRE_EQ(offs.size(), 2);
     SUPERGBAMIDI_CHECK_EQ(ons.size() == 2 ? ons[1].first : 0, 48 * 16);
     SUPERGBAMIDI_CHECK_EQ(offs.size() == 2 ? offs[0].first : 0, 24 * 16);
     SUPERGBAMIDI_CHECK_EQ(offs.size() == 2 ? offs[1].first : 0, 73 * 16);
@@ -890,7 +888,7 @@ void TestVacationConversion()
     // Key 49 plays at 17349 Hz, a cent below the semitone above the samples' 16384 Hz, so its zone has key 85 for its
     // root and a fine tune of -1, and key 48 plays at 16384 Hz on its own key.
     SUPERGBAMIDI_CHECK(sum.ok && sum.tracks == 1);
-    SUPERGBAMIDI_CHECK_EQ(notes.size(), 2);
+    SUPERGBAMIDI_REQUIRE_EQ(notes.size(), 2);
     SUPERGBAMIDI_CHECK_EQ(notes.size() == 2 ? notes[0].second[1] : 0, 86);
     SUPERGBAMIDI_CHECK_EQ(notes.size() == 2 ? notes[1].second[1] : 0, 85);
     SUPERGBAMIDI_CHECK(tuned);

@@ -26,6 +26,9 @@ namespace
 // Maximum conversion duration: one hour, measured in frames.
 constexpr uint32_t kMaxFrames = 60 * 60 * 60;
 
+// The frames that the model runs past the end, for notes whose attack takes a while to sound.
+constexpr uint32_t kAttackFrames = 16;
+
 // The driver's ticks: 24 to a quarter note, and 150 of a frame's tempo counter to a tick.
 constexpr int kTicksPerQuarter = 24;
 constexpr double kTickCounter = 150;
@@ -44,21 +47,6 @@ constexpr int kDrumBank = 128;
 // Maximum number of commands DumpSong() lists per track.
 constexpr int kMaxListedCommands = 200000;
 
-// Returns a song's number for file names and titles: at least two digits, and as many as the largest song's.
-std::string SongNumber(int song, int count)
-{
-    int digits = 2;
-    for (int n = count - 1; n >= 100; n /= 10)
-    {
-        digits++;
-    }
-
-    char b[16];
-    std::snprintf(b, sizeof b, "%0*d", digits, song);
-
-    return b;
-}
-
 // The stretch of a song that the conversion covers: its loop, and the tick at which the MIDI file ends.
 struct Plan
 {
@@ -71,8 +59,9 @@ struct Plan
 // Plans the conversion: looping songs play `loops` passes; other songs run until the last track ends. Tracks can have
 // different loop points and lengths. The overall loop starts once all looping tracks have entered their loops and all
 // other tracks have played their last command and released their notes. It ends when all looping tracks return to their
-// loop starts, subject to the length limit in LoopLength(). Only tracks that fit in the music player count.
-Plan PlanSong(const Rom& rom, const SongHeader& header, int track_count, int loops)
+// loop starts, subject to the length limit in LoopLength(). Only tracks that fit in the music player count. With
+// `second`, the loop starts at the song's second pass through it, and the song plays the first pass before it.
+Plan PlanSong(const Rom& rom, const SongHeader& header, int track_count, int loops, bool second)
 {
     Plan plan;
     uint64_t longest_end = 0;
@@ -97,7 +86,7 @@ Plan PlanSong(const Rom& rom, const SongHeader& header, int track_count, int loo
     if (plan.loops)
     {
         const uint64_t length = LoopLength(lengths);
-        plan.loop_start = std::max(plan.loop_start, last_command);
+        plan.loop_start = std::max(plan.loop_start, last_command) + (second ? length : 0);
         plan.loop_end = plan.loop_start + length;
         plan.end = plan.loop_start + uint64_t(loops) * length;
     }
@@ -129,6 +118,7 @@ Simulation Simulate(const Rom& rom, const DriverInfo& info, int song, const Plan
     }
 
     uint32_t frames = 0;
+    bool finished = false; // the song reached the plan's end, or its tracks ended
     for (uint32_t f = 0; f < kMaxFrames; f++)
     {
         const std::vector<Action>& actions = seq.Step();
@@ -137,16 +127,30 @@ Simulation Simulate(const Rom& rom, const DriverInfo& info, int song, const Plan
         frames = f + 1;
         if (seq.Tick() > plan.end || seq.TracksEnded())
         {
+            finished = true;
             break;
         }
     }
 
-    if (frames == kMaxFrames)
+    if (!finished && frames == kMaxFrames)
     {
         sim.warnings.push_back("the song was cut off after an hour");
         sim.cut_off = seq.Tick();
     }
     sim.warnings.insert(sim.warnings.end(), seq.Warnings().begin(), seq.Warnings().end());
+
+    // A PSG note's attack can take 8 frames to raise its level above 0. So the model runs on past the end, and keeps
+    // the notes that become audible there. It keeps the note ons too. They tell a channel's next note apart.
+    for (uint32_t f = 0; f < kAttackFrames && !sim.cut_off; f++)
+    {
+        for (const Action& a : seq.Step())
+        {
+            if (a.kind == Action::kNoteOn || a.kind == Action::kAudible)
+            {
+                sim.actions.push_back(a);
+            }
+        }
+    }
 
     return sim;
 }
@@ -168,6 +172,7 @@ struct Note
     bool audible = false;         // it got louder than silence in the game
     bool removed = false;         // the driver stopped it before it started
     bool before_programs = false; // it plays with the program from before its track's program changes on its tick
+    int step = 0;                 // its step at its tick: it plays after the program change of that step
     int midi_channel = 0;         // the MIDI channel it plays on
     int sound_channel = -1;       // with a MIDI channel for each sound channel, the driver's channel that plays it
     uint64_t stop = 0;            // with a MIDI channel for each sound channel, where the driver stops its sound, or 0
@@ -468,6 +473,44 @@ std::vector<TempoChange> TempoMap(const std::vector<Action>& actions)
     return map;
 }
 
+// Returns true if the song's second pass through its loop plays at the tempos of its first: the same tempo where each
+// starts, and the same changes at the same ticks from the pass's start. A tempo that the loop's end leaves carries into
+// the next pass, unlike the one that the song's start gives the first, and a player that loops on the markers can't
+// repeat that. The driver's tempos are compared rather than the MIDI file's, whose tick of each change also holds part
+// of the old tempo, as much as the driver had counted at it. `sim` has to hold two passes of the loop.
+bool TemposRepeat(const Simulation& sim, const Plan& plan)
+{
+    // The tempo after each tick that changes it.
+    std::map<uint64_t, int> tempos;
+    for (const Action& a : sim.actions)
+    {
+        if (a.kind == Action::kTempo)
+        {
+            tempos[a.tick] = a.value;
+        }
+    }
+
+    const auto tempo_at = [&](uint64_t tick)
+    {
+        const auto after = tempos.upper_bound(tick);
+        return after == tempos.begin() ? kDefaultTempo : std::prev(after)->second;
+    };
+
+    const uint64_t length = plan.loop_end - plan.loop_start;
+    PassComparison passes(plan.loop_start, length);
+    passes.Add(plan.loop_start, 0, 0, {double(tempo_at(plan.loop_start))});
+    passes.Add(plan.loop_end, 0, 0, {double(tempo_at(plan.loop_end))});
+    for (const auto& [tick, tempo] : tempos)
+    {
+        if (tick != plan.loop_start && tick != plan.loop_end)
+        {
+            passes.Add(tick, 0, 0, {double(tempo)});
+        }
+    }
+
+    return passes.Alike();
+}
+
 // Returns the microseconds a quarter note lasts when a tick takes `frames` frames, at the GBA's frame rate.
 uint32_t QuarterMicros(double frames)
 {
@@ -486,6 +529,11 @@ struct FrameGrid
 };
 
 constexpr uint16_t kFrameQuarterTicks = uint16_t(kTicksPerQuarter * kTickCounter);
+
+// The MIDI file's ticks for each of the driver's, which put 960 to the quarter note. FluidSynth rounds its position to
+// a whole tick at each tempo change, so at the driver's 24 to the quarter note it lost up to half a tick at each one,
+// and rushed a song's ritardandos and accelerandos.
+constexpr uint32_t kMidiTicksPerTick = 40;
 
 // Returns the frame grid of a song. A frame adds the tempo that was set before it started; a tempo of 0 counts as 1, so
 // that each frame lasts a tick.
@@ -538,7 +586,8 @@ uint64_t LoopFrom(const Plan& plan, const FrameGrid* frames)
 }
 
 // Writes the MIDI file. With frame timing, the events go at the start of the frames the driver plays them in, and the
-// conductor track, which has no tempos yet, gets the frames' tempos.
+// conductor track, which has no tempos yet, gets the frames' tempos. Otherwise each of the driver's ticks becomes
+// kMidiTicksPerTick of the file's.
 bool WriteMidiFile(MidiFile& midi, MidiTrack& conductor, const FrameGrid* frames, const std::string& path,
                    std::string& error)
 {
@@ -554,6 +603,11 @@ bool WriteMidiFile(MidiFile& midi, MidiTrack& conductor, const FrameGrid* frames
             conductor.Tempo(uint32_t(tick), QuarterMicros(kTickCounter / tempo));
         }
         midi.SetDivision(kFrameQuarterTicks);
+    }
+    else
+    {
+        midi.Retime([](uint32_t tick) { return tick * kMidiTicksPerTick; });
+        midi.SetDivision(uint16_t(kTicksPerQuarter * kMidiTicksPerTick));
     }
 
     return midi.Write(path, error);
@@ -901,11 +955,14 @@ struct ProgramChange
     uint64_t tick;
     int track;
     int program;
+    int step; // its place among its track's program changes at its tick
 };
 
 // Makes the MIDI file play each note with the program that the driver plays it with. A player takes program changes
-// before note ons on the same tick, where the driver runs a track's commands in order. So a note that comes before its
-// track's change of voice on the same tick goes before the program changes, or gets a program change of its own.
+// before note ons on the same tick. The driver runs a track's commands in order. So a note whose program comes from
+// before its track's changes of voice on its tick goes before the program changes. A note whose program one of them
+// sets goes at that change's step, after it and before the next. Any other note gets a program change of its own, after
+// the tick's others.
 void MatchPrograms(std::vector<Note>& notes, std::vector<ProgramChange>& programs)
 {
     auto in_order = [](const ProgramChange& a, const ProgramChange& b)
@@ -916,27 +973,39 @@ void MatchPrograms(std::vector<Note>& notes, std::vector<ProgramChange>& program
 
     for (Note& n : notes)
     {
-        int before = -1, after = -1;
-        for (const ProgramChange& p : programs)
-        {
-            if (p.track == n.track && p.tick <= n.on)
-            {
-                after = p.program;
-                before = p.tick < n.on ? p.program : before;
-            }
-        }
-        if (n.program == after)
-        {
-            continue;
-        }
-        if (n.program == before)
-        {
-            n.before_programs = true;
-            continue;
-        }
+        // The track's changes at the note's tick, and its program before them.
+        const ProgramChange at = {n.on, n.track, 0, 0};
+        const auto first = std::lower_bound(programs.begin(), programs.end(), at, in_order);
+        const auto last = std::upper_bound(first, programs.end(), at, in_order);
+        const bool track_before = first != programs.begin() && std::prev(first)->track == n.track;
+        const int before = track_before ? std::prev(first)->program : -1;
 
-        const ProgramChange change = {n.on, n.track, n.program};
-        programs.insert(std::upper_bound(programs.begin(), programs.end(), change, in_order), change);
+        const auto sets = [&n](const ProgramChange& p)
+        {
+            return p.program == n.program;
+        };
+        if (first != last && sets(*std::prev(last)))
+        {
+            n.step = int(last - first) - 1;
+        }
+        else if (n.program == before)
+        {
+            n.before_programs = first != last;
+        }
+        else if (const auto change = std::find_if(first, last, sets); change != last)
+        {
+            n.step = int(change - first);
+        }
+        else
+        {
+            n.step = int(last - first);
+            programs.insert(last, {n.on, n.track, n.program, 0});
+        }
+    }
+
+    for (size_t i = 0; i < programs.size(); i++)
+    {
+        programs[i].step = i > 0 && !in_order(programs[i - 1], programs[i]) ? programs[i - 1].step + 1 : 0;
     }
 }
 
@@ -1048,7 +1117,7 @@ bool WriteMidi(const std::string& path, const std::string& title, const std::str
         case Action::kVoice:
             if (mt)
             {
-                programs.push_back({a.tick, a.track, a.a});
+                programs.push_back({a.tick, a.track, a.a, 0});
             }
             break;
 
@@ -1089,15 +1158,15 @@ bool WriteMidi(const std::string& path, const std::string& title, const std::str
         const int ch = channel[size_t(p.track)];
         if (!presets)
         {
-            mt.Program(uint32_t(p.tick), ch, p.program);
+            mt.Program(uint32_t(p.tick), ch, p.program, p.step);
             continue;
         }
 
         // A track left on the drum channel plays the copies in the drum bank, which players find with bank 0.
         const auto slot = presets->slots.find(p.program);
         const PresetSlot s = slot != presets->slots.end() ? slot->second : PresetSlot{0, p.program};
-        mt.Bank(uint32_t(p.tick), ch, ch == kDrumChannel ? 0 : s.bank);
-        mt.Program(uint32_t(p.tick), ch, s.program);
+        mt.Bank(uint32_t(p.tick), ch, ch == kDrumChannel ? 0 : s.bank, p.step);
+        mt.Program(uint32_t(p.tick), ch, s.program, p.step);
     }
 
     for (int t = 0; t < 16; t++)
@@ -1112,7 +1181,7 @@ bool WriteMidi(const std::string& path, const std::string& title, const std::str
     {
         MidiTrack& mt = *track[size_t(n.track)];
         const int ch = channel[size_t(n.track)];
-        mt.NoteOn(uint32_t(n.on), ch, n.key, n.velocity, n.before_programs);
+        mt.NoteOn(uint32_t(n.on), ch, n.key, n.velocity, n.before_programs, n.step);
         mt.NoteOff(uint32_t(n.off), ch, n.key);
     }
 
@@ -1338,7 +1407,19 @@ SongSummary Run(const Rom& rom, const DriverInfo& info, int song, const ConvertO
     }
 
     const int track_count = std::min(header.track_count, SongPlayer(rom, info, song).track_count);
-    Plan plan = PlanSong(rom, header, track_count, opt.loops);
+    // The marked loop starts at the song's second pass if its first plays at other tempos, as when a track sets the
+    // tempo on the loop's first tick before the loop starts, or the loop's end leaves another tempo. A song that the
+    // model gave up on before its second pass ended keeps its loop.
+    Plan plan = PlanSong(rom, header, track_count, opt.loops, false);
+    if (plan.loops)
+    {
+        const Plan two = PlanSong(rom, header, track_count, 2, false);
+        const Simulation check = Simulate(rom, info, song, two);
+        if ((!check.cut_off || *check.cut_off >= two.end) && !TemposRepeat(check, two))
+        {
+            plan = PlanSong(rom, header, track_count, opt.loops, true);
+        }
+    }
     const Simulation sim = Simulate(rom, info, song, plan);
 
     // A song that the model gave up on ends where it stopped.

@@ -1332,7 +1332,6 @@ uint32_t Player::LinearFreq(uint32_t period) const
     // The octave above the table's, and the step within it, of 768 to the octave.
     const uint32_t octave = ((period >> 6) * 0xAAAB) >> 19;
     const uint32_t step = period - octave * 768;
-
     return ShiftRight(rom_.U32(info_.linear + 4 * step), 23 - octave);
 }
 

@@ -26,6 +26,7 @@ namespace supergbamidi::rd2
 namespace
 {
 
+using test::Le16;
 using test::Le32;
 using test::MidiEvents;
 using test::ReadAll;
@@ -57,13 +58,16 @@ constexpr uint32_t kBank = kRomBase + 0x4000;
 constexpr uint32_t kSequenceData = kRomBase + 0x6000;
 
 // The test bank's instruments.
-constexpr uint8_t kLooped = 0; // a looped sample, with an envelope that rises and falls
-constexpr uint8_t kPlain = 1;  // a sample without a loop, held at full level
-constexpr uint8_t kSquare = 2; // square 2 at a duty of 25%
-constexpr uint8_t kDrums = 3;  // a drum kit from note 36: the plain sample panned left, and square 2
-constexpr uint8_t kKeyed = 4;  // a sample for each key
-constexpr uint8_t kSplit = 5;  // the plain sample up to note 59, the looped one above
-constexpr uint8_t kNoise = 6;  // noise
+constexpr uint8_t kLooped = 0;      // a looped sample, with an envelope that rises and falls
+constexpr uint8_t kPlain = 1;       // a sample without a loop, held at full level
+constexpr uint8_t kSquare = 2;      // square 2 at a duty of 25%
+constexpr uint8_t kDrums = 3;       // a drum kit from note 36: the plain sample panned left, and square 2
+constexpr uint8_t kKeyed = 4;       // a sample for each key
+constexpr uint8_t kSplit = 5;       // the plain sample up to note 59, the looped one above
+constexpr uint8_t kNoise = 6;       // noise
+constexpr uint8_t kSquareSteps = 7; // square 2 with a table of duties: 12.5%, 25%, then 75%, a frame each
+constexpr uint8_t kNoiseSteps = 8;  // noise with a table of widths: the 7-bit noise, then the 15-bit one
+constexpr uint8_t kWave = 9;        // the wave voice: it leaves out its envelope, the one that rises and falls
 
 // A track's data being written, one command at a time.
 class Track
@@ -368,6 +372,13 @@ private:
             add({59, 0, uint8_t(low), uint8_t(low >> 8), 255, 0, uint8_t(looped), uint8_t(looped >> 8)});
         Put16(kBank + 2 * kSplit, add({0x12, 0, uint8_t(split), uint8_t(split >> 8), 0, 0, 0, 0}));
         Put16(kBank + 2 * kNoise, add(region(4, 0, 0, held, 0x20, 0x30)));
+        const uint16_t duties = add({3, 0, 0, 1, 3});
+        Put16(kBank + 2 * kSquareSteps, add(region(2, 1, duties, held, 0x40, 0x30)));
+        const uint16_t widths = add({2, 0, 1, 0});
+        Put16(kBank + 2 * kNoiseSteps, add(region(4, 1, widths, held, 0x20, 0x30)));
+        const uint16_t wave =
+            add({0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10});
+        Put16(kBank + 2 * kWave, add(region(3, 0, wave, rise, 0x46, 0x30)));
     }
 
     std::vector<uint8_t> d_;
@@ -418,7 +429,7 @@ void TestDetection()
     SUPERGBAMIDI_CHECK_EQ(info.wave_volumes, kWaveVolumes);
     SUPERGBAMIDI_CHECK_EQ(info.voice_classes, kVoiceClasses);
     SUPERGBAMIDI_CHECK_EQ(info.key_envelope, kKeyEnvelope);
-    SUPERGBAMIDI_CHECK_EQ(info.sequence_addresses.size(), 2);
+    SUPERGBAMIDI_REQUIRE_EQ(info.sequence_addresses.size(), 2);
     SUPERGBAMIDI_CHECK_EQ(info.sequence_addresses[0], kSequenceData);
 
     // A game without the driver's code has no sign of it, unless it's given the settings.
@@ -433,6 +444,10 @@ void TestDetection()
     SUPERGBAMIDI_CHECK(error.empty());
     SUPERGBAMIDI_CHECK(!DetectDriver(none, given, tables, error));
     SUPERGBAMIDI_CHECK(!error.empty());
+
+    // Detection starts from nothing. A game without the driver keeps none of an earlier game's tables.
+    SUPERGBAMIDI_CHECK(!DetectDriver(none, DriverOverrides(), info, error));
+    SUPERGBAMIDI_CHECK(info.init == 0 && info.sequence_addresses.empty());
 }
 
 void TestSuperMarioAdvance2()
@@ -477,7 +492,7 @@ void TestSuperMarioAdvance2()
     SUPERGBAMIDI_CHECK_EQ(info.noise_table, kNoiseTable);
     SUPERGBAMIDI_CHECK_EQ(info.lfo_table, kLfoTable);
     SUPERGBAMIDI_CHECK_EQ(info.voice_classes, kVoiceClasses);
-    SUPERGBAMIDI_CHECK_EQ(notes.size(), 3);
+    SUPERGBAMIDI_REQUIRE_EQ(notes.size(), 3);
     SUPERGBAMIDI_CHECK_EQ(notes[1].first, 4);
     SUPERGBAMIDI_CHECK_EQ(notes[2].first, 8);
 
@@ -527,14 +542,14 @@ void TestTiming()
             }
         }
     }
-    SUPERGBAMIDI_CHECK_EQ(ons.size(), 4);
+    SUPERGBAMIDI_REQUIRE_EQ(ons.size(), 4);
     SUPERGBAMIDI_CHECK_EQ(ons[0].first, 0);
     SUPERGBAMIDI_CHECK_EQ(ons[1].first, 4);
     SUPERGBAMIDI_CHECK_EQ(ons[1].second, 300);
     SUPERGBAMIDI_CHECK_EQ(ons[2].first, 4);
     SUPERGBAMIDI_CHECK_EQ(ons[3].first, 8);
     SUPERGBAMIDI_CHECK_EQ(ons[3].second, 600);
-    SUPERGBAMIDI_CHECK_EQ(releases.size(), 1);
+    SUPERGBAMIDI_REQUIRE_EQ(releases.size(), 1);
     SUPERGBAMIDI_CHECK_EQ(releases[0].first, 5);
 }
 
@@ -666,7 +681,7 @@ void TestInstruments()
         }
     }
 
-    SUPERGBAMIDI_CHECK_EQ(notes.size(), 5);
+    SUPERGBAMIDI_REQUIRE_EQ(notes.size(), 5);
     SUPERGBAMIDI_CHECK(notes[0].lookup.drum);
     SUPERGBAMIDI_CHECK_EQ(notes[0].lookup.drum_pan, 0x20);
     SUPERGBAMIDI_CHECK_EQ(pitches[0], 0x8000);
@@ -708,16 +723,13 @@ void TestConversion()
     const MidiEvents midi = ReadMidi(sum.midi_path);
     SUPERGBAMIDI_CHECK_EQ(midi.division, 3600);
     const auto first = midi.Find(0x90);
-    SUPERGBAMIDI_CHECK(first.size() >= 2);
-    if (first.size() >= 2)
-    {
-        SUPERGBAMIDI_CHECK_EQ(first[0].first, 0);
-        SUPERGBAMIDI_CHECK_EQ(first[0].second[1], 60);
-        SUPERGBAMIDI_CHECK_EQ(first[0].second[2], 127);
-        SUPERGBAMIDI_CHECK_EQ(first[1].first, 900);
-        SUPERGBAMIDI_CHECK_EQ(first[1].second[1], 64);
-        SUPERGBAMIDI_CHECK_EQ(first[1].second[2], int(std::lround(127 * std::sqrt(64 / 127.0))));
-    }
+    SUPERGBAMIDI_REQUIRE(first.size() >= 2);
+    SUPERGBAMIDI_CHECK_EQ(first[0].first, 0);
+    SUPERGBAMIDI_CHECK_EQ(first[0].second[1], 60);
+    SUPERGBAMIDI_CHECK_EQ(first[0].second[2], 127);
+    SUPERGBAMIDI_CHECK_EQ(first[1].first, 900);
+    SUPERGBAMIDI_CHECK_EQ(first[1].second[1], 64);
+    SUPERGBAMIDI_CHECK_EQ(first[1].second[2], int(std::lround(127 * std::sqrt(64 / 127.0))));
 
     const auto metas = midi.Find(0xFF);
     const auto is_tempo = [](const auto& e)
@@ -738,6 +750,148 @@ void TestConversion()
     const auto zone = sf.ZoneGens(0);
     SUPERGBAMIDI_CHECK_EQ(zone.at(58), 48);
     SUPERGBAMIDI_CHECK_EQ(Le32(sf.Record("shdr", 46, 0) + 36), 21024);
+}
+
+void TestPsgTables()
+{
+    // A square that steps through a table of duties, a frame each, holds the last one, 75%. A noise holds the last of
+    // its widths, the 15-bit noise. Each SoundFont zone plays what its voice holds.
+    Cart cart;
+    cart.Sequences({{Track()
+                         .Bytes({0xC2, kSquareSteps})
+                         .Note(0x30, 12, 127)
+                         .Wait(12)
+                         .Bytes({0xC2, kNoiseSteps})
+                         .Note(0x30, 12, 127)
+                         .Wait(12)
+                         .End()}});
+    const Rom rom = cart.ToRom();
+    const DriverInfo info = Detect(rom);
+    ConvertOptions opt;
+    opt.out_dir = Utf8(test::g_temp);
+    opt.base_name = "rd2_psg_tables";
+
+    const SongSummary sum = ConvertSong(rom, info, 0, opt, nullptr);
+
+    SUPERGBAMIDI_CHECK(sum.ok);
+    const Sf2Records sf = ReadSf2(sum.sf2_path);
+    std::vector<std::string> squares;
+    std::vector<int> noises;
+    for (size_t s = 0; s + 1 < sf.Count("shdr", 46); s++)
+    {
+        const std::string name(reinterpret_cast<const char*>(sf.Record("shdr", 46, s)), 20);
+        const std::string trimmed = name.substr(0, name.find('\0'));
+        if (trimmed.rfind("Square", 0) == 0)
+        {
+            squares.push_back(trimmed);
+        }
+        if (trimmed.rfind("Noise ", 0) == 0)
+        {
+            noises.push_back(std::stoi(trimmed.substr(6), nullptr, 16));
+        }
+    }
+    SUPERGBAMIDI_CHECK(squares == std::vector<std::string>{"Square 75%"});
+    SUPERGBAMIDI_CHECK(noises.size() == 1 && (noises[0] & 8) == 0);
+}
+
+void TestDrumPanAndWave()
+{
+    // A drum keeps its pan whatever its track's pan is. So the drum kit's zones replace the default modulator from CC10
+    // with one of no amount, and the plain instrument's zone keeps the default. The wave voice leaves its region's
+    // envelope out. Its zone has the release alone.
+    Cart cart;
+    cart.Sequences({{Track()
+                         .Bytes({0xC3, 0x60, 0xC2, kDrums})
+                         .Note(36, 4, 100)
+                         .Note(37, 4, 100)
+                         .Wait(4)
+                         .Bytes({0xC2, kWave})
+                         .Note(48, 8, 100)
+                         .Wait(8)
+                         .Bytes({0xC2, kPlain})
+                         .Note(60, 4, 100)
+                         .Wait(4)
+                         .End()}});
+    const Rom rom = cart.ToRom();
+    const DriverInfo info = Detect(rom);
+    ConvertOptions opt;
+    opt.out_dir = Utf8(test::g_temp);
+    opt.base_name = "rd2_drum_wave";
+
+    const SongSummary sum = ConvertSong(rom, info, 0, opt, nullptr);
+
+    SUPERGBAMIDI_CHECK(sum.ok);
+    const Sf2Records sf = ReadSf2(sum.sf2_path);
+    auto zones_of = [&](const std::string& suffix)
+    {
+        std::vector<size_t> zones;
+        for (size_t i = 0; i + 1 < sf.Count("inst", 22); i++)
+        {
+            const std::string name(reinterpret_cast<const char*>(sf.Record("inst", 22, i)));
+            if (name.size() >= suffix.size() && name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0)
+            {
+                for (size_t z = Le16(sf.Record("inst", 22, i) + 20); z < Le16(sf.Record("inst", 22, i + 1) + 20); z++)
+                {
+                    zones.push_back(z);
+                }
+            }
+        }
+
+        return zones;
+    };
+    auto keeps_pan = [&](size_t zone)
+    {
+        bool found = false;
+        for (size_t m = Le16(sf.Record("ibag", 4, zone) + 2); m < Le16(sf.Record("ibag", 4, zone + 1) + 2); m++)
+        {
+            const uint8_t* mod = sf.Record("imod", 10, m);
+            found = found || (Le16(mod) == 0x028A && Le16(mod + 2) == sf2gen::kPan && Le16(mod + 4) == 0);
+        }
+
+        return found;
+    };
+    const std::vector<size_t> drums = zones_of(" instrument 3"), plain = zones_of(" instrument 1");
+    const std::vector<size_t> wave = zones_of(" instrument 9");
+    SUPERGBAMIDI_REQUIRE_EQ(drums.size(), 2);
+    SUPERGBAMIDI_CHECK(std::all_of(drums.begin(), drums.end(), keeps_pan));
+    SUPERGBAMIDI_CHECK(plain.size() == 1 && !keeps_pan(plain[0]));
+    SUPERGBAMIDI_REQUIRE_EQ(wave.size(), 1);
+    const auto gens = sf.ZoneGens(wave[0]);
+    for (uint16_t op : {sf2gen::kInitialAttenuation, sf2gen::kAttackVolEnv, sf2gen::kHoldVolEnv, sf2gen::kDecayVolEnv,
+                        sf2gen::kSustainVolEnv})
+    {
+        SUPERGBAMIDI_CHECK(!gens.count(op));
+    }
+    SUPERGBAMIDI_CHECK(gens.count(sf2gen::kReleaseVolEnv));
+}
+
+void TestLevelOrder()
+{
+    // At a tempo of 300, a frame lasts two ticks. Track 0 sets its pan at tick 4, and then, in the same frame, track 1
+    // sets the player's volume to 0 at tick 3. Track 0 plays with both from that frame on. So the MIDI file gives them
+    // both at tick 4, and track 0's last CC11 silences it.
+    Cart cart;
+    cart.Sequences(
+        {{Track().Bytes({0xE4, 0x81, 0x2C, 0xC2, kPlain}).Note(60, 20, 127).Wait(4).Bytes({0xC3, 0x10}).Wait(16).End(),
+          Track().Wait(3).Bytes({0xEA, 0}).Wait(17).End()}});
+    const Rom rom = cart.ToRom();
+    const DriverInfo info = Detect(rom);
+    ConvertOptions opt;
+    opt.out_dir = Utf8(test::g_temp);
+    opt.base_name = "rd2_level_order";
+
+    const SongSummary sum = ConvertSong(rom, info, 0, opt, nullptr);
+
+    SUPERGBAMIDI_CHECK(sum.ok);
+    std::vector<std::pair<uint32_t, int>> expression;
+    for (const auto& e : ReadMidi(sum.midi_path).Find(0xB0))
+    {
+        if (e.second[1] == 11)
+        {
+            expression.emplace_back(e.first, e.second[2]);
+        }
+    }
+    SUPERGBAMIDI_CHECK(!expression.empty() && expression.back() == std::make_pair(600u, 0));
 }
 
 void TestLoopLengths()
@@ -774,9 +928,9 @@ void TestLoopLengths()
 }
 
 // A track sets volume 200 and plays a note, and then loops: volume 200 and a note, and volume 100, pan 100 and a note.
-// The first time through, the loop's first note has the levels that the note before it left, but a player that jumps
-// back to the loop's start comes from volume 100, so the loudness is written again there, at the MIDI file's tick 900.
-// The game keeps pan 100 from then on, as such a player does, so the pan isn't written again.
+// The game keeps pan 100 when the track jumps back, so the loop's first note plays in the middle the first time through
+// and at pan 100 after that. The marked loop therefore starts at the second pass, at the MIDI file's tick 2700, and a
+// player that jumps back there from the loop's end has the loudness and pan that the file's next pass starts with.
 void TestLoopSettingsAgain()
 {
     Cart cart;
@@ -800,37 +954,53 @@ void TestLoopSettingsAgain()
 
     const SongSummary sum = ConvertSong(rom, info, 0, opt, nullptr);
 
-    std::vector<std::pair<uint32_t, int>> pans, levels;
-    for (const auto& [tick, bytes] : ReadMidi(sum.midi_path).Find(0xB0))
+    const test::MidiEvents midi = ReadMidi(sum.midi_path);
+    std::vector<std::pair<uint32_t, std::string>> markers;
+    for (const auto& [tick, bytes] : midi.Find(0xFF))
     {
-        if (bytes[1] == cc::kPan)
+        if (bytes[1] == 0x06)
         {
-            pans.emplace_back(tick, bytes[2]);
-        }
-        if (bytes[1] == cc::kExpression)
-        {
-            levels.emplace_back(tick, bytes[2]);
+            markers.emplace_back(tick, std::string(bytes.begin() + 3, bytes.end()));
         }
     }
 
+    // Returns a controller's value after the events up to and including `tick`.
+    const auto value_at = [&](int controller, uint32_t tick)
+    {
+        int value = -1;
+        for (const auto& [t, bytes] : midi.Find(0xB0))
+        {
+            if (t <= tick && bytes[1] == controller)
+            {
+                value = bytes[2];
+            }
+        }
+
+        return value;
+    };
+
+    const std::vector<std::pair<uint32_t, std::string>> kMarkers = {{2700, "loopStart"}, {4500, "loopEnd"}};
     SUPERGBAMIDI_CHECK(sum.ok);
-    SUPERGBAMIDI_CHECK_EQ(levels.size(), 5);
-    if (levels.size() == 5)
-    {
-        SUPERGBAMIDI_CHECK(levels[1] == std::make_pair(900u, levels[0].second));
-        SUPERGBAMIDI_CHECK(levels[2].first == 1800 && levels[2].second < levels[1].second);
-    }
-    SUPERGBAMIDI_CHECK_EQ(pans.size(), 2);
-    if (pans.size() == 2)
-    {
-        SUPERGBAMIDI_CHECK(pans[0] == std::make_pair(0u, 64) && pans[1].first == 1800 && pans[1].second > 64);
-    }
+    SUPERGBAMIDI_CHECK(markers == kMarkers);
+    SUPERGBAMIDI_CHECK(value_at(cc::kPan, 900) == 64 && value_at(cc::kPan, 2700) > 64);
+    SUPERGBAMIDI_CHECK_EQ(value_at(cc::kPan, 2700), value_at(cc::kPan, 4500));
+    SUPERGBAMIDI_CHECK_EQ(value_at(cc::kExpression, 2700), value_at(cc::kExpression, 4500));
 }
 
+// The listing follows each track in the sequence's header, and then each track that F8 starts.
 void TestDump()
 {
+    // The track starts track 3 at the note after its end. The track's data starts at offset 4, after the sequence's
+    // header and the track's offset. F8 takes 4 bytes.
+    const std::vector<uint8_t> first =
+        Track().Bytes({0xE4, 120, 0xC2, kPlain, 0xC3, 0x20}).Note(60, 6, 127).Wait(6).End();
+    const std::vector<uint8_t> started = Track().Note(62, 6, 127).Wait(6).End();
+    const uint16_t offset = uint16_t(4 + 4 + first.size());
+    std::vector<uint8_t> track = {0xF8, 3, uint8_t(offset), uint8_t(offset >> 8)};
+    track.insert(track.end(), first.begin(), first.end());
+    track.insert(track.end(), started.begin(), started.end());
     Cart cart;
-    cart.Sequences({{Track().Bytes({0xE4, 120, 0xC2, kPlain, 0xC3, 0x20}).Note(60, 6, 127).Wait(6).End()}});
+    cart.Sequences({{track}});
     const Rom rom = cart.ToRom();
     const DriverInfo info = Detect(rom);
     std::string error;
@@ -845,6 +1015,10 @@ void TestDump()
     SUPERGBAMIDI_CHECK(text.find("pan 32") != std::string::npos);
     SUPERGBAMIDI_CHECK(text.find("note 60 (C4), length 6, velocity 127") != std::string::npos);
     SUPERGBAMIDI_CHECK(text.find("      6  FF") != std::string::npos);
+    SUPERGBAMIDI_CHECK(text.find("start track 3 at 0x") != std::string::npos);
+    SUPERGBAMIDI_CHECK(text.find("; ---- track 3 at 0x") != std::string::npos);
+    SUPERGBAMIDI_CHECK(text.find(", started by F8 at 0x") != std::string::npos);
+    SUPERGBAMIDI_CHECK(text.find("note 62 (D4), length 6, velocity 127") != std::string::npos);
 }
 
 void TestMusic()
@@ -884,6 +1058,9 @@ void RunTests()
     TestPsg();
     TestInstruments();
     TestConversion();
+    TestPsgTables();
+    TestDrumPanAndWave();
+    TestLevelOrder();
     TestLoopLengths();
     TestLoopSettingsAgain();
     TestDump();

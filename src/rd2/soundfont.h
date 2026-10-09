@@ -13,6 +13,7 @@
 #include "rd2/driver.h"
 #include "rom.h"
 #include "sf2.h"
+#include "song_banks.h"
 
 namespace supergbamidi::rd2
 {
@@ -40,6 +41,10 @@ struct Sf2Envelope
 // value. `psg` selects a square or noise voice's release, which the PSG's envelope plays.
 Sf2Envelope EnvelopeFor(const Rom& rom, uint32_t address, uint8_t release, bool psg);
 
+// Returns the SoundFont envelope of a wave voice. The wave voice leaves its region's envelope out, and its level holds
+// until the release. The release of a region's release value fades it as a sample voice's release does.
+Sf2Envelope WaveEnvelope(uint8_t release);
+
 // Adds an envelope's generators to a zone, before its last generator (the sample).
 void AddEnvelope(Sf2Zone& zone, const Sf2Envelope& envelope);
 
@@ -47,12 +52,21 @@ void AddEnvelope(Sf2Zone& zone, const Sf2Envelope& envelope);
 class SoundfontBuilder
 {
 public:
-    // Keeps a reference to `rom`, which has to outlive the builder.
-    explicit SoundfontBuilder(const Rom& rom);
+    // Keeps a reference to `rom`. The ROM has to outlive the builder. The square, wave and noise samples play at
+    // `psg_share` of full scale, the PSG's level against a full-scale sample that PsgShare() gives. The level is in the
+    // samples rather than the zones' attenuation. FluidSynth applies only 0.4 of a zone's attenuation. In a SoundFont
+    // that `songs` sequences share, SongBanks gives each sequence's presets their bank and programs.
+    SoundfontBuilder(const Rom& rom, double psg_share, int songs = 1);
 
     Sf2File& File()
     {
         return file_;
+    }
+
+    // Returns the banks and programs of the presets.
+    SongBanks& Banks()
+    {
+        return banks_;
     }
 
     // Each returns the index of the SF2 sample for a sound, which is made on first use and shared afterwards.
@@ -72,7 +86,9 @@ public:
 
 private:
     const Rom& rom_;
+    double psg_share_;
     Sf2File file_;
+    SongBanks banks_;
     std::map<uint32_t, int> game_samples_;
     std::map<int, int> squares_;
     std::map<uint32_t, int> waves_;

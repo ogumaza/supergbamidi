@@ -14,12 +14,14 @@ same two buffers and a frame's samples each time. It captures what the player an
                 work out periods and frequencies.
     render      the mix's 8-bit output, left and right
 
-    driver_emu.py ROM trace MODULE FRAMES
-    driver_emu.py ROM render MODULE FRAMES OUT.wav
+    driver_emu.py ROM trace MODULE FRAMES [--song N]
+    driver_emu.py ROM render MODULE FRAMES OUT.wav [--song N]
 
-MODULE is the address of the module's header in hex, as `supergbamidi --info` lists it. The routine and RAM addresses
-are chosen by the ROM's game code. Those of Digimon Racing (BDGE) are built in. Another game needs its own values; see
-GAMES and docs/krawall.md.
+MODULE is the address of the module's header in hex. `supergbamidi --info` lists the addresses. krapPlay() plays the
+module in loop mode. With --song, krapPlay() plays song N of a module whose orders separate songs with +++, in song
+mode. Song mode loops back to the song's start at the song's end. The routine and RAM addresses are chosen by the ROM's
+game code. Those of Digimon Racing (BDGE) are built in. Another game requires its values in GAMES (see
+docs/krawall.md).
 """
 import argparse
 import struct
@@ -41,6 +43,8 @@ CHANNEL_SIZE = 0x60
 MIX_SIZE = 0x2C
 MIX_CHANNELS = 32
 PERIOD_POINTERS = (0x24, 0x2C)  # the player's pointers to the routines that work out periods and frequencies
+MODE_LOOP, MODE_SONG = 1, 2  # krapPlay()'s modes: loop the module, and play one of its songs
+ORDER_SKIP = 254  # the order that separates songs (+++)
 
 
 class DigimonRacing:
@@ -149,7 +153,7 @@ class KrawallEmulator:
     def read(self, address, size):
         return bytes(self.uc.mem_read(address, size))
 
-    def play(self, module, mode=1, song=0):
+    def play(self, module, mode=MODE_LOOP, song=0):
         self.call(self.addr.play, (module, mode, song))
 
     def frame(self):
@@ -177,9 +181,35 @@ class KrawallEmulator:
         return struct.unpack('<I', self.read(self.addr.player + 4, 4))[0] != 0
 
 
-def trace(rom, module, frames):
+def song_count(rom, module):
+    """Returns the number of songs that a module's orders separate with +++, or 0 if they have no marker. A song is a
+    run of orders between markers. supergbamidi counts them the same way."""
+    count = rom[module + 1 - ROM_BASE]
+    orders = rom[module + 3 - ROM_BASE:module + 3 + count - ROM_BASE]
+    songs, in_song = 0, False
+    for o in orders:
+        if o < ORDER_SKIP and not in_song:
+            songs += 1
+        in_song = o < ORDER_SKIP
+    return min(songs, 64) if ORDER_SKIP in orders else 0
+
+
+def song_plays(rom, modules):
+    """Returns how krapPlay() plays each piece that supergbamidi numbers, as (module, mode, song). `modules` maps the
+    numbers to the modules' addresses. A module without markers plays in loop mode. Each song of a module with markers
+    plays in song mode, in the order of the numbers."""
+    plays, seen = {}, {}
+    for n in sorted(modules):
+        module = modules[n]
+        song = seen.get(module, 0)
+        seen[module] = song + 1
+        plays[n] = (module, MODE_LOOP | MODE_SONG, song) if song_count(rom, module) else (module, MODE_LOOP, 0)
+    return plays
+
+
+def trace(rom, module, frames, mode=MODE_LOOP, song=0):
     emu = KrawallEmulator(rom)
-    emu.play(module)
+    emu.play(module, mode, song)
     last = {}
     for f in range(frames):
         emu.frame()
@@ -191,9 +221,9 @@ def trace(rom, module, frames):
             break
 
 
-def render(rom, module, frames, path):
+def render(rom, module, frames, path, mode=MODE_LOOP, song=0):
     emu = KrawallEmulator(rom)
-    emu.play(module)
+    emu.play(module, mode, song)
     out = bytearray()
     for _ in range(frames):
         left, right = emu.frame()
@@ -213,15 +243,17 @@ def main():
     p.add_argument('module', help="the module's address, in hex")
     p.add_argument('frames', type=int)
     p.add_argument('out', nargs='?')
+    p.add_argument('--song', type=int, help='play this song of a module that separates songs with +++, in song mode')
     a = p.parse_args()
     rom = load_rom(a.rom)
     module = int(a.module, 16)
+    mode, song = (MODE_LOOP | MODE_SONG, a.song) if a.song is not None else (MODE_LOOP, 0)
     if a.command == 'trace':
-        trace(rom, module, a.frames)
+        trace(rom, module, a.frames, mode, song)
         return
     if not a.out:
         p.error('render needs an output file')
-    render(rom, module, a.frames, a.out)
+    render(rom, module, a.frames, a.out, mode, song)
 
 
 if __name__ == '__main__':

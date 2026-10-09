@@ -4,7 +4,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <map>
+#include <tuple>
 #include <utility>
 
 #include "files.h"
@@ -80,9 +82,9 @@ void LevelsToControllers(double left, double right, int& cc10, int& cc11)
     cc11 = std::clamp(int(std::lround(127 * std::sqrt(amp / kLoudestCentred))), 0, 127);
 }
 
-void MidiTrack::AddEvent(uint32_t tick, int order, std::vector<uint8_t> bytes)
+void MidiTrack::AddEvent(uint32_t tick, int order, std::vector<uint8_t> bytes, int step)
 {
-    events_.push_back({tick, order, std::move(bytes)});
+    events_.push_back({tick, step, order, std::move(bytes)});
     end_ = std::max(end_, tick);
 }
 
@@ -100,15 +102,34 @@ void MidiTrack::Tempo(uint32_t tick, uint32_t micros_per_quarter)
     AddEvent(tick, kMeta, {0xFF, 0x51, 0x03, uint8_t(us >> 16), uint8_t(us >> 8), uint8_t(us)});
 }
 
+void MidiTrack::RepeatTempo(uint32_t tick)
+{
+    // The tempo at `tick` is the change at the latest tick up to it, and the last one added there.
+    const Event* last = nullptr;
+    for (const Event& e : events_)
+    {
+        const bool tempo = e.bytes.size() == 6 && e.bytes[0] == 0xFF && e.bytes[1] == 0x51;
+        if (tempo && e.tick <= tick && (!last || e.tick >= last->tick))
+        {
+            last = &e;
+        }
+    }
+
+    if (last)
+    {
+        AddEvent(tick, kMeta, last->bytes);
+    }
+}
+
 void MidiTrack::TimeSignature(uint32_t tick, int numerator, int denominator_pow2)
 {
     AddEvent(tick, kMeta, {0xFF, 0x58, 0x04, uint8_t(numerator), uint8_t(denominator_pow2), 24, 8});
 }
 
-void MidiTrack::NoteOn(uint32_t tick, int ch, int key, int velocity, bool before_programs)
+void MidiTrack::NoteOn(uint32_t tick, int ch, int key, int velocity, bool before_programs, int step)
 {
     AddEvent(tick, before_programs ? kNoteOnFirst : kNoteOn,
-             {uint8_t(0x90 | ch), Clamp7(key), std::max<uint8_t>(1, Clamp7(velocity))});
+             {uint8_t(0x90 | ch), Clamp7(key), std::max<uint8_t>(1, Clamp7(velocity))}, step);
 }
 
 void MidiTrack::NoteOff(uint32_t tick, int ch, int key)
@@ -121,15 +142,15 @@ void MidiTrack::Control(uint32_t tick, int ch, int cc, int value)
     AddEvent(tick, kControl, {uint8_t(0xB0 | ch), uint8_t(cc & 0x7F), Clamp7(value)});
 }
 
-void MidiTrack::Program(uint32_t tick, int ch, int program)
+void MidiTrack::Program(uint32_t tick, int ch, int program, int step)
 {
-    AddEvent(tick, kProgram, {uint8_t(0xC0 | ch), Clamp7(program)});
+    AddEvent(tick, kProgram, {uint8_t(0xC0 | ch), Clamp7(program)}, step);
 }
 
-void MidiTrack::Bank(uint32_t tick, int ch, int bank)
+void MidiTrack::Bank(uint32_t tick, int ch, int bank, int step)
 {
-    AddEvent(tick, kBank, {uint8_t(0xB0 | ch), cc::kBankSelect, uint8_t(bank & 0x7F)});
-    AddEvent(tick, kBank, {uint8_t(0xB0 | ch), cc::kBankSelectLsb, 0});
+    AddEvent(tick, kBank, {uint8_t(0xB0 | ch), cc::kBankSelect, uint8_t(bank & 0x7F)}, step);
+    AddEvent(tick, kBank, {uint8_t(0xB0 | ch), cc::kBankSelectLsb, 0}, step);
 }
 
 void MidiTrack::PitchBend(uint32_t tick, int ch, int value)
@@ -201,10 +222,10 @@ std::vector<uint8_t> MidiTrack::Encode() const
         sorted.push_back(&e);
     }
 
-    // Stable, so events of the same tick and order stay in the order they were added.
+    // Stable: events of the same tick, step and order stay in the order they were added.
     auto by_tick_then_order = [](const Event* a, const Event* b)
     {
-        return a->tick != b->tick ? a->tick < b->tick : a->order < b->order;
+        return std::tie(a->tick, a->step, a->order) < std::tie(b->tick, b->step, b->order);
     };
     std::stable_sort(sorted.begin(), sorted.end(), by_tick_then_order);
 

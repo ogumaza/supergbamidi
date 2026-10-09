@@ -152,6 +152,7 @@ std::string Hex(uint32_t v)
 
 bool DetectDriver(const Rom& rom, const DriverOverrides& overrides, DriverInfo& info, std::string& error)
 {
+    info = DriverInfo();
     error.clear();
     const std::vector<uint32_t> inits = FindThumb(rom, ParseThumbPattern(kInitPattern));
     info.init = inits.empty() ? 0 : inits[0];

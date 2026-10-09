@@ -164,7 +164,7 @@ private:
 
 } // namespace
 
-SoundfontBuilder::SoundfontBuilder(const Rom& rom) : rom_(rom)
+SoundfontBuilder::SoundfontBuilder(const Rom& rom, int songs) : rom_(rom), banks_(songs)
 {
 }
 

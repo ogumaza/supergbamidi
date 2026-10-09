@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <memory>
@@ -26,6 +27,7 @@ enum class Driver
     kMp2k,
     kBrownie,
     kKrawall,
+    kUbiMilan,
 };
 
 // Settings that override detection, from the command line. 0 means detect.
@@ -41,10 +43,10 @@ struct Overrides
 // The settings for converting songs.
 struct ConvertSettings
 {
-    int loops = 2;                // times a looping song's loop is played
-    uint16_t track_mask = 0xFFFF; // tracks to include (bit t = track t)
-    bool voice_channels = false;  // a MIDI channel for each of the driver's sound channels, where it can
-    bool frame_timing = false;    // each event on the frame the driver plays it in, rather than on the beat
+    int loops = 2;                    // times a looping song's loop is played
+    uint32_t track_mask = 0xFFFFFFFF; // tracks to include (bit t = track t; Krawall has 20, the others 16 at most)
+    bool voice_channels = false;      // a MIDI channel for each of the driver's sound channels, where it can
+    bool frame_timing = false;        // each event on the frame the driver plays it in, rather than on the beat
     std::string out_dir = ".";
     std::string base_name = "song";
 };
@@ -102,6 +104,9 @@ public:
     // Writes a text listing of every command of a song. Returns false and sets `error` if it can't.
     virtual bool DumpSong(int song, const std::string& path, std::string& error) const = 0;
 
+    // Returns a song's number as its files' names give it: two digits, or more for a song from 100 on.
+    virtual std::string FileNumber(int song) const;
+
     // Writes the state of the driver model to `out` after each of the first `frames` frames of a song, in the format of
     // the driver's tools/*/driver_emu.py trace, and adds the song's problems to `warnings`. Returns false if the song
     // can't be played.
@@ -119,11 +124,15 @@ struct FoundMusic
 // sets `error` if the game has none of the drivers, or the tables of the first one it finds can't be read.
 std::unique_ptr<Music> OpenMusic(const Rom& rom, const Overrides& overrides, std::string& error);
 
-// Finds every sound driver that `overrides` allows in the game in `rom`, which has to outlive the results, and reads
-// their tables, since a game can have more than one. They come in the order OpenMusic() looks for them, so the first is
-// the one it returns. Returns none and sets `error` as OpenMusic() does, and leaves out a later driver whose tables
-// can't be read.
-std::vector<FoundMusic> OpenAllMusic(const Rom& rom, const Overrides& overrides, std::string& error);
+// Finds every sound driver that `overrides` allows in the game in `rom`, and reads their tables. A game can have more
+// than one driver. `rom` has to outlive the results. The results come in the order OpenMusic() looks for the drivers.
+// A driver whose tables can't be read is left out, and `unread` gets the error. Returns none and sets `error` if the
+// game has none of the drivers, or if no driver's tables can be read, to the first driver's error.
+std::vector<FoundMusic> OpenAllMusic(const Rom& rom, const Overrides& overrides, std::string& error,
+                                     std::vector<std::string>& unread);
+
+// Returns a song's number for file names and titles: at least two digits, and as many as the largest of `count` songs'.
+std::string SongNumber(int song, int count);
 
 // The most times as long as the longest of its tracks' loops that a song's loop can be.
 constexpr uint64_t kMaxLoopFactor = 8;
@@ -132,6 +141,40 @@ constexpr uint64_t kMaxLoopFactor = 8;
 // that each of them divides, so that every track is back where its loop started, or the longest of them if that would
 // be more than kMaxLoopFactor times as long.
 uint64_t LoopLength(const std::vector<uint64_t>& lengths);
+
+// Collects the notes that start in a song's first two passes through its loop, to tell whether a player that loops on
+// the markers can repeat the first. A driver can carry a setting, such as a pan, a level, a program or the tempo, from
+// the loop's end into the next pass, so that the first pass, which comes from the song's start, plays unlike the later
+// ones. The marked loop then starts at the second pass.
+class PassComparison
+{
+public:
+    // The first pass runs from `start` for `length` of the driver's units of time, and the second for another `length`.
+    PassComparison(uint64_t start, uint64_t length);
+
+    // Adds a note that starts at `on` on channel or track `channel`, with its key and the settings it starts with, in
+    // whatever form the driver has them. A note that starts outside the two passes is left out.
+    void Add(uint64_t on, int channel, int key, std::vector<double> settings);
+
+    // Returns true if the two passes start the same notes at the same times from their starts, with the same settings.
+    bool Alike() const;
+
+private:
+    struct Start
+    {
+        bool operator<(const Start& other) const;
+        bool operator==(const Start& other) const;
+
+        uint64_t at = 0;
+        int channel = 0;
+        int key = 0;
+        std::vector<double> settings;
+    };
+
+    uint64_t start_;
+    uint64_t length_;
+    std::array<std::vector<Start>, 2> passes_;
+};
 
 // Each driver's part of OpenMusic(), which looks for that driver only. It returns null and sets `error` if the driver's
 // tables can't be read, or returns null and leaves `error` empty if the game shows no sign of the driver.
@@ -183,4 +226,11 @@ namespace krawall
 std::unique_ptr<Music> OpenMusic(const Rom& rom, const Overrides& overrides, std::string& error);
 
 } // namespace krawall
+
+namespace ubimilan
+{
+
+std::unique_ptr<Music> OpenMusic(const Rom& rom, const Overrides& overrides, std::string& error);
+
+} // namespace ubimilan
 } // namespace supergbamidi

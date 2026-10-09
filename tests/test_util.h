@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <map>
 #include <string>
@@ -68,6 +69,10 @@ struct MidiEvents
 // Reads a MIDI file's events.
 MidiEvents ReadMidi(const std::string& path);
 
+// Returns true if the first track has a loopStart marker and, at the marker's tick and after it, a tempo change to the
+// tempo in effect there.
+bool RepeatsTempoAtLoopStart(const MidiEvents& midi);
+
 // A SoundFont's records, as read back from a file.
 struct Sf2Records
 {
@@ -81,6 +86,20 @@ struct Sf2Records
     size_t Count(const std::string& chunk, size_t size) const
     {
         return chunks.count(chunk) ? chunks.at(chunk).size() / size : 0;
+    }
+
+    // Returns the largest size of any point of sample `sample`.
+    int SamplePeak(size_t sample) const
+    {
+        const uint8_t* header = Record("shdr", 46, sample);
+        const std::vector<uint8_t>& points = chunks.at("smpl");
+        int peak = 0;
+        for (uint32_t i = Le32(header + 20); i < Le32(header + 24); i++)
+        {
+            peak = std::max(peak, std::abs(int(int16_t(Le16(&points[2 * size_t(i)])))));
+        }
+
+        return peak;
     }
 
     // Returns the generators of instrument zone `zone`, as operator -> amount.
@@ -105,7 +124,7 @@ Sf2Records ReadSf2(const std::string& path);
 } // namespace supergbamidi::test
 
 // Each driver's tests, in konami_test.cpp, rare_test.cpp, quintet_test.cpp, mp2k_test.cpp, rd2_test.cpp,
-// brownie_test.cpp and krawall_test.cpp.
+// brownie_test.cpp, krawall_test.cpp and ubimilan_test.cpp.
 namespace supergbamidi::konami
 {
 
@@ -155,6 +174,13 @@ void RunTests();
 
 } // namespace supergbamidi::krawall
 
+namespace supergbamidi::ubimilan
+{
+
+void RunTests();
+
+} // namespace supergbamidi::ubimilan
+
 #define SUPERGBAMIDI_CHECK(cond)                                                          \
     do                                                                                    \
     {                                                                                     \
@@ -180,4 +206,28 @@ void RunTests();
             std::fprintf(stderr, "%s:%d: CHECK_EQ failed: %s == %s (%lld vs %lld)\n", __FILE__, __LINE__, #a, #b, va, \
                          vb);                                                                                         \
         }                                                                                                             \
+    } while (0)
+
+// Like SUPERGBAMIDI_CHECK and SUPERGBAMIDI_CHECK_EQ, but a failure also ends the test. A test checks a count with them
+// before it indexes what it counted. A wrong count then fails the check instead of reading past the end.
+#define SUPERGBAMIDI_REQUIRE(cond)                                    \
+    do                                                                \
+    {                                                                 \
+        const int failures_before = ::supergbamidi::test::g_failures; \
+        SUPERGBAMIDI_CHECK(cond);                                     \
+        if (::supergbamidi::test::g_failures != failures_before)      \
+        {                                                             \
+            return;                                                   \
+        }                                                             \
+    } while (0)
+
+#define SUPERGBAMIDI_REQUIRE_EQ(a, b)                                 \
+    do                                                                \
+    {                                                                 \
+        const int failures_before = ::supergbamidi::test::g_failures; \
+        SUPERGBAMIDI_CHECK_EQ(a, b);                                  \
+        if (::supergbamidi::test::g_failures != failures_before)      \
+        {                                                             \
+            return;                                                   \
+        }                                                             \
     } while (0)

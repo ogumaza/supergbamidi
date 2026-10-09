@@ -206,6 +206,7 @@ std::vector<uint32_t> ReadSongList(const Rom& rom, uint32_t songs, int limit)
 
 bool DetectDriver(const Rom& rom, const DriverOverrides& overrides, DriverInfo& info, std::string& error)
 {
+    info = DriverInfo();
     error.clear();
 
     // The driver's play routine resets the channels from its table of them, and in the J revision, the sound effects'

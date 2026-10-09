@@ -97,16 +97,30 @@ int Sequencer::LoopStartFrame() const
         return 0;
     }
 
-    int start = loop_frame_[size_t(loop_track_)];
+    const int looping = loop_frame_[size_t(loop_track_)];
+    int start = looping;
     for (int frame : loop_frame_)
     {
-        if (frame >= 0)
+        if (frame >= 0 && frame >= looping - kLoopPointWindow)
         {
             start = std::min(start, frame);
         }
     }
 
     return start;
+}
+
+bool Sequencer::LoopPointDelayed() const
+{
+    for (int t = 0; t < kTracks; t++)
+    {
+        if (loop_frame_[size_t(t)] >= 0 && loop_delay_[size_t(t)] > 0)
+        {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 void Sequencer::Warn(int track, uint32_t addr, const std::string& what)
@@ -116,13 +130,23 @@ void Sequencer::Warn(int track, uint32_t addr, const std::string& what)
     warnings_.push_back(buf + what);
 }
 
-void Sequencer::PassLoopPoint(int track)
+void Sequencer::PassLoopPoint(int track, int delay)
 {
     // Each loop point moves the track's start, so a loop takes the track back to the last one it passed. Those it
     // passes once the song has looped don't change where the loop starts.
     if (loops_ == 0)
     {
         loop_frame_[size_t(track)] = int(frame_);
+        loop_delay_[size_t(track)] = delay;
+    }
+}
+
+void Sequencer::EndForGood(int track)
+{
+    if (loops_ == 0)
+    {
+        loop_frame_[size_t(track)] = -1;
+        loop_delay_[size_t(track)] = 0;
     }
 }
 
@@ -374,6 +398,7 @@ UltimateMastersSequencer::Next UltimateMastersSequencer::RunCommand(int track, c
         if (c.op == Op::kEndTrackHard)
         {
             t.flags = 0;
+            EndForGood(track);
         }
 
         if (!o.Any())
@@ -509,7 +534,15 @@ UltimateMastersSequencer::Next UltimateMastersSequencer::RunCommand(int track, c
             // Opcodes 90-9F, F4-F6 and FA-FC, notes of sample numbers above EF and commands past the end of the ROM
             // decode as unknown ones, and the other ops belong to the older revisions.
             char buf[80];
-            std::snprintf(buf, sizeof buf, "unsupported opcode %02X; track stopped", c.opcode);
+            if (c.opcode >= 0xA0 && c.opcode < 0xF0 && c.sample > 0xEF)
+            {
+                std::snprintf(buf, sizeof buf, "note of sample %02X: samples above EF are unsupported; track stopped",
+                              c.sample);
+            }
+            else
+            {
+                std::snprintf(buf, sizeof buf, "unsupported opcode %02X; track stopped", c.opcode);
+            }
             Warn(track, c.addr, rom_.Contains(c.addr) ? buf : "track runs past the end of the ROM; track stopped");
             t.flags = 0;
             return Next::kStop;
@@ -1242,7 +1275,7 @@ DungeonDiceSequencer::Next DungeonDiceSequencer::RunCommand(int track, const Com
         // The loop starts with FA's two bytes, a delay and a command, which the track skips until the song loops.
         t.start = uint16_t(t.start + pos - 2);
         pos = 2;
-        PassLoopPoint(track);
+        PassLoopPoint(track, rom_.U8(header_.base + t.start));
         break;
 
     case Op::kCall:

@@ -66,6 +66,10 @@ constexpr double kFrameSeconds = 280896.0 / 16777216.0;
 // Maximum playback length, including loops (about 30 minutes).
 constexpr uint32_t kMaxFrames = 60 * 60 * 30;
 
+// The frames before the looping track's loop point in which another track's loop point still counts for the loop's
+// start. The checked songs' loop points are within a frame of each other.
+constexpr int kLoopPointWindow = 2;
+
 // Plays a song one frame at a time, as the driver's per-frame routine does.
 class Sequencer
 {
@@ -109,7 +113,13 @@ public:
     // Returns the frame a loop goes back to, or 0 if it has none. A loop sends every track back to its loop point at
     // once, so that's the earliest frame on which a track passed its loop point, where a player that loops leaves out
     // none of the loop's notes, or 0 if the track that loops the song has no loop point and goes back to its start.
+    // Only loop points within kLoopPointWindow frames before the looping track's count. A track whose loop point
+    // comes far earlier, such as at its first command, would make a looping player replay the other tracks' intros.
     int LoopStartFrame() const;
+
+    // Returns true if a track's loop point starts with a delay that the first pass skips. The later passes then play
+    // that track later than the first does.
+    bool LoopPointDelayed() const;
 
     // Returns echo bus `bus` (0-2): its settings and the voices routed to it.
     const EchoBus& Echo(int bus) const
@@ -171,8 +181,12 @@ protected:
     // Adds warning `what` about `track`'s data at `addr`, headed by the frame, the track and the address.
     void Warn(int track, uint32_t addr, const std::string& what);
 
-    // Records the frame on which `track` passes a loop point before the song first loops, for LoopStartFrame().
-    void PassLoopPoint(int track);
+    // Records the frame on which `track` passes a loop point before the song first loops, for LoopStartFrame(), and the
+    // frames of the delay at the loop point's start. The first pass skips that delay.
+    void PassLoopPoint(int track, int delay = 0);
+
+    // Clears `track`'s loop point when the track ends before the song first loops, never to restart.
+    void EndForGood(int track);
 
     const Rom& rom_;
     SongHeader header_;
@@ -189,6 +203,7 @@ private:
     int loops_ = 0;
     int loop_track_ = -1;
     std::array<int, kTracks> loop_frame_{}; // the frame each track last passed a loop point in the first pass, or -1
+    std::array<int, kTracks> loop_delay_{}; // the delay at the start of that loop point
     uint32_t frame_ = 0;
     std::vector<std::string> warnings_;
 };

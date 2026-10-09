@@ -464,9 +464,19 @@ void TestDetection()
     SUPERGBAMIDI_CHECK_EQ(info.samples[0], FileAddress(kSampleFile));
     SUPERGBAMIDI_CHECK_EQ(info.samples[1], 0);
     SUPERGBAMIDI_CHECK_EQ(info.songs, FileAddress(kMusicFile));
-    SUPERGBAMIDI_CHECK_EQ(info.song_addresses.size(), 2);
-    SUPERGBAMIDI_CHECK_EQ(info.sample_addresses[0].size(), 2);
+    SUPERGBAMIDI_REQUIRE_EQ(info.song_addresses.size(), 2);
+    SUPERGBAMIDI_REQUIRE_EQ(info.sample_addresses[0].size(), 2);
     SUPERGBAMIDI_CHECK(info.warnings.empty());
+
+    // Detection starts from nothing. A game without the driver keeps none of an earlier game's tables.
+    DriverInfo reused = info;
+    std::string reused_error;
+    Rom blank;
+    blank.Assign(std::vector<uint8_t>(0x1000, 0));
+
+    const bool found_blank = DetectDriver(blank, DriverOverrides(), reused, reused_error);
+
+    SUPERGBAMIDI_CHECK(!found_blank && reused.play == 0 && reused.song_addresses.empty());
 
     // The J revision has the sound effects' noise macros and samples too.
     Cart cart_j(Revision::kJ);
@@ -481,8 +491,8 @@ void TestDetection()
     SUPERGBAMIDI_CHECK_EQ(info_j.macros[0], FileAddress(kMacroFile));
     SUPERGBAMIDI_CHECK_EQ(info_j.macros[1], FileAddress(kSfxMacroFile));
     SUPERGBAMIDI_CHECK_EQ(info_j.samples[1], FileAddress(kSfxSampleFile));
-    SUPERGBAMIDI_CHECK_EQ(info_j.sample_addresses[1].size(), 3);
-    SUPERGBAMIDI_CHECK_EQ(info_j.song_addresses.size(), 1);
+    SUPERGBAMIDI_REQUIRE_EQ(info_j.sample_addresses[1].size(), 3);
+    SUPERGBAMIDI_REQUIRE_EQ(info_j.song_addresses.size(), 1);
 
     // An override of the song count.
     DriverOverrides one;
@@ -491,7 +501,7 @@ void TestDetection()
     std::string error;
 
     SUPERGBAMIDI_CHECK(DetectDriver(rom, one, first, error));
-    SUPERGBAMIDI_CHECK_EQ(first.song_addresses.size(), 1);
+    SUPERGBAMIDI_REQUIRE_EQ(first.song_addresses.size(), 1);
 
     // A cartridge without the driver shows no sign of it, unless the music file is given.
     Cart bare(Revision::kA, false);
@@ -608,6 +618,31 @@ void TestHold()
     const MidiEvents midi = ReadMidi(sum.midi_path);
     SUPERGBAMIDI_CHECK(sum.ok && sum.seconds > 0.65 && sum.seconds < 0.67 && sum.loop_start < 0);
     SUPERGBAMIDI_CHECK(!midi.Find(0xE0).empty() && midi.Find(0xE0).size() <= 41);
+}
+
+// Square 2 repeats a command 255 times 255 times, without a note, and the guard ends it after 10000 commands. Square 1
+// loops a quarter note. The plan takes square 2 as ended. The song therefore loops, without running for the hour that
+// a song cut off there takes.
+void TestCommandGuard()
+{
+    Cart cart(Revision::kA);
+    cart.Songs({Song({Channel().Bytes({0x7F, 90, 0xBF}).Note(0, 3).End(),
+                      Channel().Note(0, 3).Bytes({0xD6, 0xD6, 0xAF, 0x00, 0xD7, 0xFF, 0xD7, 0xFF}).End()})});
+    const Rom rom = cart.ToRom();
+    const DriverInfo info = Detect(rom);
+    ConvertOptions opt;
+    opt.out_dir = Utf8(test::g_temp);
+    opt.base_name = "guard";
+
+    const SongSummary sum = ConvertSong(rom, info, 0, opt, nullptr);
+
+    const auto has = [&sum](const std::string& text)
+    {
+        return std::any_of(sum.warnings.begin(), sum.warnings.end(),
+                           [&text](const std::string& w) { return w.find(text) != std::string::npos; });
+    };
+    SUPERGBAMIDI_CHECK(sum.ok && sum.seconds < 2);
+    SUPERGBAMIDI_CHECK(has("without reaching a note") && !has("cut off"));
 }
 
 void TestWaveSwitch()
@@ -873,12 +908,9 @@ void TestLoopSettingsAgain()
 
     // The setup's level of 0, the first note's, the same again at the loop's start, and then the note at volume 8's.
     SUPERGBAMIDI_CHECK(sum.ok && loop_start > 0);
-    SUPERGBAMIDI_CHECK(levels.size() > 3);
-    if (levels.size() > 3)
-    {
-        SUPERGBAMIDI_CHECK(levels[2] == std::make_pair(loop_start, levels[1].second));
-        SUPERGBAMIDI_CHECK(levels[3].first > loop_start && levels[3].second < levels[2].second);
-    }
+    SUPERGBAMIDI_REQUIRE(levels.size() > 3);
+    SUPERGBAMIDI_CHECK(levels[2] == std::make_pair(loop_start, levels[1].second));
+    SUPERGBAMIDI_CHECK(levels[3].first > loop_start && levels[3].second < levels[2].second);
 }
 
 void TestHourLimit()
@@ -1012,13 +1044,10 @@ void TestBanks()
         }
     }
 
-    SUPERGBAMIDI_CHECK(sources.size() >= 3);
-    if (sources.size() >= 3)
-    {
-        SUPERGBAMIDI_CHECK_EQ(sources[0], music[0]);
-        SUPERGBAMIDI_CHECK_EQ(sources[1], effects[1]);
-        SUPERGBAMIDI_CHECK_EQ(sources[2], effects[0]);
-    }
+    SUPERGBAMIDI_REQUIRE(sources.size() >= 3);
+    SUPERGBAMIDI_CHECK_EQ(sources[0], music[0]);
+    SUPERGBAMIDI_CHECK_EQ(sources[1], effects[1]);
+    SUPERGBAMIDI_CHECK_EQ(sources[2], effects[0]);
 }
 
 void TestNoiseDrums()
@@ -1148,10 +1177,13 @@ void TestConversion()
     SUPERGBAMIDI_CHECK(std::any_of(tempos.begin(), tempos.end(), is_marker));
 }
 
+// The listing follows the driver's repeats. A count of 0 makes 256 passes there. The listing also says what a range of
+// 0, 0 and 0 plays.
 void TestDump()
 {
     Cart cart(Revision::kA);
-    cart.Songs({Song({Channel().Bytes({0x7F, 90, 0xD6}).Note(0, 3).Bytes({0xD7, 2}).End()})});
+    cart.Songs({Song({Channel().Bytes({0x7F, 90, 0xD6}).Note(0, 3).Bytes({0xD7, 2}).End(),
+                      Channel().Bytes({0xE7, 0, 0, 0, 0xD6}).Note(0, 3).Bytes({0xD7, 0}).End()})});
     const Rom rom = cart.ToRom();
     const DriverInfo info = Detect(rom);
     const std::string path = Utf8(TempPath("dump.txt"));
@@ -1165,6 +1197,10 @@ void TestDump()
     SUPERGBAMIDI_CHECK(s.find("0x08007011       96  30                 note C, 96 ticks (1/4)") != std::string::npos);
     SUPERGBAMIDI_CHECK(s.find("0x08007014      192  FF                 end, or back to the loop point") !=
                        std::string::npos);
+    SUPERGBAMIDI_CHECK(s.find("play the sample once, from the last range's start, or from its start after DC or DD") !=
+                       std::string::npos);
+    SUPERGBAMIDI_CHECK(s.find("play the repeat 256 times") != std::string::npos);
+    SUPERGBAMIDI_CHECK(s.find("   24576  FF ") != std::string::npos);
 }
 
 // OpenMusic() finds Quintet's driver from its code. A game without the driver's code isn't read, even with the music
@@ -1201,6 +1237,7 @@ void RunTests()
     TestDecoding();
     TestTiming();
     TestHold();
+    TestCommandGuard();
     TestWaveSwitch();
     TestLoopStarts();
     TestLoopAfterTempoChange();

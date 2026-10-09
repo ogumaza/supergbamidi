@@ -388,4 +388,7 @@ pans within -64 and 64, and patterns whose index starts at 0 and doesn't go
 back. The game's table of modules is the longest run of words that each give a
 module that the scan found, and its order numbers the modules, with the ones it
 doesn't list after it, in the ROM's order. `--song-table` gives a table of
-modules instead, and `--song-count` the number of its entries.
+modules instead, and `--song-count` the number of entries in the given table or
+the game's table. With `--song-count`, the modules that the table doesn't list
+are left out. Without a table, `--song-count` keeps that many of the modules
+that the scan finds.

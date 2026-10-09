@@ -54,8 +54,8 @@ FREQ_TABLE = [2147483648, 2275179671, 2410468894, 2553802834, 2705659852, 286654
 
 def read_midi(path):
     """Returns the file's notes as (channel, key, velocity, on seconds, off seconds, program, seconds at the start of
-    the tick before the off), its volume changes and pitch bends as (seconds, channel, value), each channel's bend range
-    in semitones, and its length in seconds."""
+    the driver's tick before the off, a 24th of a quarter note), its volume changes and pitch bends as (seconds,
+    channel, value), each channel's bend range in semitones, and its length in seconds."""
     data = Path(path).read_bytes()
     division = struct.unpack('>H', data[12:14])[0]
     events = []
@@ -136,7 +136,7 @@ def read_midi(path):
             notes.append(open_notes[(ch, a)])
         elif kind == 'off' and (ch, a) in open_notes:
             note = open_notes.pop((ch, a))
-            note[4], note[6] = t, seconds(max(tick - 1, 0))
+            note[4], note[6] = t, seconds(max(tick - division // 24, 0))
         elif kind == 'program':
             program[ch] = a
         elif kind == 'bend':

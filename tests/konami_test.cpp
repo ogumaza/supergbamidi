@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <map>
@@ -413,6 +414,75 @@ void TestLoopStartLast()
     SUPERGBAMIDI_CHECK(looped_at == (std::vector<int>{14, 20, 26}));
 }
 
+// Track 5 plays a note of sample F0. Sample numbers above EF select a mode that supergbamidi leaves out. The track
+// stops with a warning that names the sample.
+void TestSampleAboveEf()
+{
+    Image m = SyntheticImage();
+    m.Bytes(kSongBase + 0x80, {0x00, 0xA0, 0xF0, 0x03, 0xFE});
+    const Rom rom = m.ToRom();
+    UltimateMastersSequencer seq(rom, SongsAt(kSongTable), 0);
+
+    for (int f = 0; f < 4; f++)
+    {
+        seq.Step();
+    }
+
+    const std::vector<std::string>& warnings = seq.Warnings();
+    SUPERGBAMIDI_CHECK(std::any_of(warnings.begin(), warnings.end(), [](const std::string& w)
+                                   { return w.find("note of sample F0") != std::string::npos; }));
+}
+
+// Runs an Ultimate Masters song until it first loops, and returns the frame it loops in.
+int FirstLoop(UltimateMastersSequencer& seq)
+{
+    for (int f = 0; f < 20; f++)
+    {
+        seq.Step();
+        if (seq.LoopedLastFrame())
+        {
+            return f;
+        }
+    }
+
+    return -1;
+}
+
+void TestLoopStartFarEarlier()
+{
+    // As in TestLoopStart, but track 0 passes a loop point at its first command, in frame 0. Such a loop point means
+    // the same as none: loop point, duty 25%, PSG note (vol 3, note 24), wait 12, rest, end. It comes more than
+    // kLoopPointWindow frames before track 5's loop point, at frame 5. So the loop starts at frame 5.
+    Image m = SyntheticImage();
+    m.Bytes(kSongBase + 0x07, {0xFE});
+    m.Bytes(kSongBase + 0x8B, {0xFF, 0x01, 0x00});
+    m.Bytes(kSongBase + 0x40, {0x00, 0xF3, 0x00, 0x81, 0x00, 0xD3, 0x18, 0x0C, 0xE0, 0x00, 0xFE});
+    const Rom rom = m.ToRom();
+    UltimateMastersSequencer seq(rom, SongsAt(kSongTable), 0);
+
+    const int looped_at = FirstLoop(seq);
+
+    SUPERGBAMIDI_CHECK_EQ(looped_at, 11);
+    SUPERGBAMIDI_CHECK_EQ(seq.LoopStartFrame(), 5);
+}
+
+void TestLoopStartEndedTrack()
+{
+    // As in TestLoopStartEarliest, but track 0 ends with FD. No loop restarts a track after FD. Track 0's loop point,
+    // at frame 4, no longer counts, and the loop starts at track 5's loop point, at frame 5.
+    Image m = SyntheticImage();
+    m.Bytes(kSongBase + 0x07, {0xFE});
+    m.Bytes(kSongBase + 0x8B, {0xFF, 0x01, 0x00});
+    m.Bytes(kSongBase + 0x40, {0x00, 0x81, 0x00, 0xD3, 0x18, 0x04, 0xF3, 0x00, 0xE0, 0x00, 0xFD});
+    const Rom rom = m.ToRom();
+    UltimateMastersSequencer seq(rom, SongsAt(kSongTable), 0);
+
+    const int looped_at = FirstLoop(seq);
+
+    SUPERGBAMIDI_CHECK_EQ(looped_at, 11);
+    SUPERGBAMIDI_CHECK_EQ(seq.LoopStartFrame(), 5);
+}
+
 void TestBendKept()
 {
     // Track 4: note, wait 1, bend by +16/32, wait 1, note, wait 1, vibrato of depth 16, wait 2, end. The other tracks
@@ -697,8 +767,9 @@ void TestSilentSongs()
 
 void TestSharedSoundfont()
 {
-    // A shared SoundFont puts each song's presets in the bank numbered after the song, and MIDI can't select a bank
-    // above 127. This table has the synthetic song as both song 0 and song 128.
+    // A shared SoundFont puts each song's presets in the bank numbered after the song. MIDI can't select a bank above
+    // 127. Song 128's presets therefore take the free programs after the presets of song 0 in bank 0. This table has
+    // the synthetic song as both song 0 and song 128.
     Image m = SyntheticImage();
     m.d.resize(0x3000);
     constexpr uint32_t kTable = kRomBase + 0x1000;
@@ -721,28 +792,19 @@ void TestSharedSoundfont()
     ConvertOptions opt;
     opt.frame_timing = true;
     opt.out_dir = Utf8(dir);
-    SoundfontBuilder shared(rom, info);
+    SoundfontBuilder shared(rom, info, 129);
 
     const SongSummary first = ConvertSong(rom, info, 0, opt, &shared);
+    const size_t first_count = shared.File().presets.size();
     const SongSummary last = ConvertSong(rom, info, 128, opt, &shared);
 
-    auto warns_about_banks = [](const SongSummary& s)
+    const std::vector<Sf2Preset>& presets = shared.File().presets;
+    SUPERGBAMIDI_CHECK(first.ok && last.ok && first.sf2_path.empty());
+    SUPERGBAMIDI_CHECK(first_count > 0 && presets.size() == 2 * first_count);
+    for (size_t i = 0; i < presets.size(); i++)
     {
-        for (const std::string& w : s.warnings)
-        {
-            if (w.find("banks above 127") != std::string::npos)
-            {
-                return true;
-            }
-        }
-
-        return false;
-    };
-
-    SUPERGBAMIDI_CHECK(first.ok && !warns_about_banks(first) && first.sf2_path.empty());
-    SUPERGBAMIDI_CHECK(last.ok && warns_about_banks(last));
-    SUPERGBAMIDI_CHECK_EQ(shared.File().presets.front().bank, 0);
-    SUPERGBAMIDI_CHECK_EQ(shared.File().presets.back().bank, 128);
+        SUPERGBAMIDI_CHECK(presets[i].bank == 0 && presets[i].program == int(i));
+    }
     fs::remove_all(dir, ec);
 }
 
@@ -794,7 +856,7 @@ void TestEchoRouting()
 
 // Song 2's sample track plays a note at volume 16, and then from its loop point a note at 16 and one at 8. The first
 // time through, the loop's first note has the level and program that the note before it left, but a player that jumps
-// back to the loop's start comes from the note at volume 8, so they're written again there.
+// back to the loop's start comes from the note at volume 8, so they're written again there, and so is the tempo.
 void TestLoopSettingsAgain()
 {
     Image m = SyntheticImage();
@@ -838,14 +900,52 @@ void TestLoopSettingsAgain()
 
     SUPERGBAMIDI_CHECK(sum.ok);
     SUPERGBAMIDI_CHECK_EQ(sum.loop_start_frame, 10);
-    SUPERGBAMIDI_CHECK_EQ(levels.size(), 6);
-    SUPERGBAMIDI_CHECK_EQ(programs.size(), 2);
-    if (levels.size() == 6 && programs.size() == 2)
-    {
-        SUPERGBAMIDI_CHECK(levels[2] == std::make_pair(10u, levels[1].second));
-        SUPERGBAMIDI_CHECK(levels[3].second != levels[2].second && levels[4] == std::make_pair(30u, levels[1].second));
-        SUPERGBAMIDI_CHECK(programs[1] == std::make_pair(10u, programs[0].second));
-    }
+    SUPERGBAMIDI_CHECK(test::RepeatsTempoAtLoopStart(test::ReadMidi(sum.midi_path)));
+    SUPERGBAMIDI_REQUIRE_EQ(levels.size(), 6);
+    SUPERGBAMIDI_REQUIRE_EQ(programs.size(), 2);
+    SUPERGBAMIDI_CHECK(levels[2] == std::make_pair(10u, levels[1].second));
+    SUPERGBAMIDI_CHECK(levels[3].second != levels[2].second && levels[4] == std::make_pair(30u, levels[1].second));
+    SUPERGBAMIDI_CHECK(programs[1] == std::make_pair(10u, programs[0].second));
+    fs::remove_all(dir, ec);
+}
+
+// Song 2's sample track pans to the left before its loop point, plays a note and then pans to the right, which the
+// driver keeps when every track goes back to its loop point. The first pass's note plays on the left and the later
+// passes' on the right, so the marked loop starts at the second pass, and the song plays the first pass before it.
+void TestLoopStartsAtSecondPass()
+{
+    Image m = SyntheticImage();
+    constexpr uint32_t kBase = kRomBase + 0x600;
+    m.Song(kSongTable, 2, kBase, 0x40, {{4, 0}});
+    m.Bytes(kBase, {0x00, 0xF0, 0x00, 0x00, 0xF3, 0x00, 0x00, 0x00, 0xA8, 0x10, 0x05, 0x0A, 0xF0, 0x7F, 0x0A, 0xFF,
+                    0x01, 0x00});
+    m.Bytes(kBase + 0x40, {0x00, 0xFD});
+    const Rom rom = m.ToRom();
+
+    DriverOverrides ov;
+    ov.song_table = kSongTable;
+    ov.song_count = 3;
+    ov.sample_table = kSampleTable;
+    ov.mix_rate = 16000;
+    DriverInfo info;
+    std::string err;
+    SUPERGBAMIDI_CHECK(DetectDriver(rom, ov, info, err));
+
+    std::error_code ec;
+    const fs::path dir = TempPath("loop_second");
+    fs::create_directories(dir, ec);
+    ConvertOptions opt;
+    opt.frame_timing = true;
+    opt.out_dir = Utf8(dir);
+
+    const SongSummary sum = ConvertSong(rom, info, 2, opt, nullptr);
+
+    // The first pass runs from frame 0 to 20, so the loop runs from 20 to 40, and the song ends after its second
+    // pass through it.
+    SUPERGBAMIDI_CHECK(sum.ok);
+    SUPERGBAMIDI_CHECK_EQ(sum.loop_start_frame, 20);
+    SUPERGBAMIDI_CHECK_EQ(sum.loop_end_frame, 40);
+    SUPERGBAMIDI_CHECK_EQ(sum.frames, 60u);
     fs::remove_all(dir, ec);
 }
 
@@ -900,13 +1000,10 @@ void TestNoiseKeys()
     }
 
     SUPERGBAMIDI_CHECK(sum.ok);
-    SUPERGBAMIDI_CHECK_EQ(sounds.size(), 130);
-    if (sounds.size() == 130)
-    {
-        SUPERGBAMIDI_CHECK(sounds.front() == std::make_pair(sounds.front().first, 36));
-        SUPERGBAMIDI_CHECK(sounds[92] == std::make_pair(sounds.front().first, 35));
-        SUPERGBAMIDI_CHECK(sounds[128].first != sounds.front().first && sounds[128].second == 127);
-    }
+    SUPERGBAMIDI_REQUIRE_EQ(sounds.size(), 130);
+    SUPERGBAMIDI_CHECK(sounds.front() == std::make_pair(sounds.front().first, 36));
+    SUPERGBAMIDI_CHECK(sounds[92] == std::make_pair(sounds.front().first, 35));
+    SUPERGBAMIDI_CHECK(sounds[128].first != sounds.front().first && sounds[128].second == 127);
 
     std::sort(sounds.begin(), sounds.end());
     SUPERGBAMIDI_CHECK(std::unique(sounds.begin(), sounds.end()) == sounds.end());
@@ -980,21 +1077,18 @@ void TestPsgPastTable()
 
     // Register 0 without the restart bit: note 9 goes on at 64 Hz, 12/32 semitone below note 0, and the second note FF,
     // after the rest, plays nothing. The bend range is 10 semitones, enough for the 300/32 between them.
-    SUPERGBAMIDI_CHECK_EQ(plain.notes.size(), 1);
+    SUPERGBAMIDI_REQUIRE_EQ(plain.notes.size(), 1);
     SUPERGBAMIDI_CHECK(plain.bends == (std::vector<std::pair<uint32_t, int>>{{5, 8192 - 7680}}));
 
     const Square1 restarting = convert(0x8000);
 
     // With the restart bit, each note FF starts a note of its own, on the key of note 0, bent down by 12/32 semitone of
     // the 2-semitone bend range. The bend is already there for the second one.
-    SUPERGBAMIDI_CHECK_EQ(restarting.notes.size(), 3);
+    SUPERGBAMIDI_REQUIRE_EQ(restarting.notes.size(), 3);
     SUPERGBAMIDI_CHECK(restarting.bends == (std::vector<std::pair<uint32_t, int>>{{5, 8192 - 1536}}));
-    if (restarting.notes.size() == 3 && plain.notes.size() == 1)
-    {
-        const int key0 = plain.notes[0].second - 9;
-        SUPERGBAMIDI_CHECK(restarting.notes[1] == std::make_pair(uint32_t(5), key0));
-        SUPERGBAMIDI_CHECK(restarting.notes[2] == std::make_pair(uint32_t(15), key0));
-    }
+    const int key0 = plain.notes[0].second - 9;
+    SUPERGBAMIDI_CHECK(restarting.notes[1] == std::make_pair(uint32_t(5), key0));
+    SUPERGBAMIDI_CHECK(restarting.notes[2] == std::make_pair(uint32_t(15), key0));
 
     fs::remove_all(dir, ec);
 }
@@ -1209,26 +1303,32 @@ void TestManyPresets()
     }
 
     SUPERGBAMIDI_CHECK(own.ok);
-    SUPERGBAMIDI_CHECK_EQ(presets.size(), 150);
-    SUPERGBAMIDI_CHECK_EQ(ids.size(), presets.size());
-    if (presets.size() == 150)
-    {
-        SUPERGBAMIDI_CHECK(presets[128].bank == 1 && presets[128].program == 0);
-        SUPERGBAMIDI_CHECK(presets.back().bank == 128 && presets.back().name == "Voice 11");
-    }
+    SUPERGBAMIDI_REQUIRE_EQ(presets.size(), 150);
+    SUPERGBAMIDI_REQUIRE_EQ(ids.size(), presets.size());
+    SUPERGBAMIDI_CHECK(presets[128].bank == 1 && presets[128].program == 0);
+    SUPERGBAMIDI_CHECK(presets.back().bank == 128 && presets.back().name == "Voice 11");
 
-    // In a shared SoundFont, the song's bank can't hold them. The song fails and leaves the SoundFont as it was.
-    SoundfontBuilder shared(rom, info);
+    // In a shared SoundFont, the song's bank takes the first 128 presets, and the other 21 the free programs after song
+    // 0's in bank 0. Banks 1 and 2 stay free for songs 1 and 2.
+    SoundfontBuilder shared(rom, info, 4);
     SUPERGBAMIDI_CHECK(ConvertSong(rom, info, 0, opt, &shared).ok);
-    const SoundfontBuilder::Checkpoint before = shared.Save();
+    const int song0 = int(shared.File().presets.size());
 
     const SongSummary in_shared = ConvertSong(rom, info, 3, opt, &shared);
 
-    const SoundfontBuilder::Checkpoint after = shared.Save();
-    SUPERGBAMIDI_CHECK(!in_shared.ok);
-    SUPERGBAMIDI_CHECK(!in_shared.warnings.empty() && in_shared.warnings.back().find("needs 149 presets") == 0);
-    SUPERGBAMIDI_CHECK(after.samples == before.samples && after.instruments == before.instruments &&
-                       after.presets == before.presets);
+    const std::vector<Sf2Preset>& shared_presets = shared.File().presets;
+    std::set<std::pair<int, int>> shared_ids;
+    for (const Sf2Preset& p : shared_presets)
+    {
+        shared_ids.insert({p.bank, p.program});
+    }
+    SUPERGBAMIDI_CHECK(in_shared.ok);
+    SUPERGBAMIDI_REQUIRE_EQ(shared_presets.size(), size_t(song0) + 149);
+    SUPERGBAMIDI_REQUIRE_EQ(shared_ids.size(), shared_presets.size());
+    const Sf2Preset& first = shared_presets[size_t(song0)];
+    const Sf2Preset& spilled = shared_presets[size_t(song0) + 128];
+    SUPERGBAMIDI_CHECK(first.bank == 3 && first.program == 0);
+    SUPERGBAMIDI_CHECK(spilled.bank == 0 && spilled.program == song0);
     fs::remove_all(dir, ec);
 }
 
@@ -1708,6 +1808,52 @@ void TestWct2004Sequencer()
     SUPERGBAMIDI_CHECK(stopping.Stopped());
 }
 
+// --dump lists the commands that a call plays after the call's line, and counts their delays in the frames after the
+// call. The call's duty reads like the duty of 80-83. Rave Master stores it as it is. 93 therefore gives 12.5% there.
+void TestCallDump()
+{
+    // Square 1: a call of 1 command at +0x0A that also sets the duty, wait 5, PSG note (vol 9, note 0x30), wait 3, end,
+    // and then the fragment: wait 2, PSG note (vol 5, note 0x30), wait 6. The other tracks end at once.
+    Image m(0x200);
+    constexpr uint32_t kTable = kRomBase + 0x100;
+    constexpr uint32_t kBase = kTable + 2 * kSongEntrySize;
+    m.Song(kTable, 0, kBase, 0x20, {{0, 0x00}});
+    m.Bytes(kBase, {0x00, 0x93, 0x0A, 0x00, 0x01, 0x05, 0xD9, 0x30, 0x03, 0xFD, 0x02, 0xD5, 0x30, 0x06});
+    m.Bytes(kBase + 0x20, {0x00, 0xFD});
+    const Rom rom = m.ToRom();
+    DriverInfo info = SongsAt(kTable);
+    std::string error;
+
+    std::string listings[2];
+    for (const Revision revision : {Revision::kWct2004, Revision::kRaveMaster})
+    {
+        info.revision = revision;
+        const std::string path = Utf8(TempPath("call_dump.txt"));
+        SUPERGBAMIDI_CHECK(DumpSong(rom, info, 0, path, error));
+        const std::vector<uint8_t> text = ReadAll(path);
+        listings[revision == Revision::kRaveMaster].assign(text.begin(), text.end());
+    }
+
+    const auto line_at = [](const std::string& s, uint32_t addr)
+    {
+        char key[16];
+        std::snprintf(key, sizeof key, "0x%08X", addr);
+        const size_t at = s.find(key);
+        return at == std::string::npos ? std::string() : s.substr(at, s.find('\n', at) - at);
+    };
+    for (const std::string& s : listings)
+    {
+        SUPERGBAMIDI_CHECK(line_at(s, kBase + 0x01).find("  0  93 0A 00 01 ") != std::string::npos);
+        SUPERGBAMIDI_CHECK(line_at(s, kBase + 0x01).ends_with(" wait 2"));
+        SUPERGBAMIDI_CHECK(line_at(s, kBase + 0x0B).find("  2  D5 30 ") != std::string::npos);
+        SUPERGBAMIDI_CHECK(line_at(s, kBase + 0x0B).ends_with(" wait 5"));
+        SUPERGBAMIDI_CHECK(line_at(s, kBase + 0x06).find("  7  D9 30 ") != std::string::npos);
+        SUPERGBAMIDI_CHECK(line_at(s, kBase + 0x09).find(" 10  FD ") != std::string::npos);
+    }
+    SUPERGBAMIDI_CHECK(listings[0].find("call       1 commands at +0x000A, duty 75%") != std::string::npos);
+    SUPERGBAMIDI_CHECK(listings[1].find("call       1 commands at +0x000A, duty 12.5%") != std::string::npos);
+}
+
 void TestWct2004Panning()
 {
     // Song 0: square 1 pans left 8 right 15, plays PSG note 0x30 at volume 12, waits 8 and ends. Square 2 plays note
@@ -1756,14 +1902,11 @@ void TestWct2004Panning()
 
     // Square 1 plays its right side, and square 2 its left side, a copy of square 1's note in place of its own.
     SUPERGBAMIDI_CHECK(sum.ok);
-    SUPERGBAMIDI_CHECK_EQ(notes["Square 1"].size(), 1);
-    SUPERGBAMIDI_CHECK_EQ(notes["Square 2"].size(), 1);
-    if (notes["Square 1"].size() == 1 && notes["Square 2"].size() == 1)
-    {
-        SUPERGBAMIDI_CHECK_EQ(notes["Square 1"][0].second, 127);
-        SUPERGBAMIDI_CHECK_EQ(notes["Square 2"][0].second, 0);
-        SUPERGBAMIDI_CHECK_EQ(notes["Square 2"][0].first, notes["Square 1"][0].first);
-    }
+    SUPERGBAMIDI_REQUIRE_EQ(notes["Square 1"].size(), 1);
+    SUPERGBAMIDI_REQUIRE_EQ(notes["Square 2"].size(), 1);
+    SUPERGBAMIDI_CHECK_EQ(notes["Square 1"][0].second, 127);
+    SUPERGBAMIDI_CHECK_EQ(notes["Square 2"][0].second, 0);
+    SUPERGBAMIDI_CHECK_EQ(notes["Square 2"][0].first, notes["Square 1"][0].first);
 
     fs::remove_all(dir, ec);
 }
@@ -1976,25 +2119,22 @@ void TestEternalDuelistConversion()
 
     // Square 1's legato notes bend its first note by 32 semitones in either direction. The bend range must cover both.
     SUPERGBAMIDI_CHECK(sum.ok);
-    SUPERGBAMIDI_CHECK_EQ(notes["Square 1"].size(), 1);
+    SUPERGBAMIDI_REQUIRE_EQ(notes["Square 1"].size(), 1);
     SUPERGBAMIDI_CHECK_EQ(range["Square 1"], 32);
     SUPERGBAMIDI_CHECK(bends["Square 1"] == (std::vector<std::pair<uint32_t, int>>{{4, 0}, {8, 16383}}));
 
     // The wave's legato note reloads wave 0, which MIDI plays as a new note.
-    SUPERGBAMIDI_CHECK_EQ(notes["Wave"].size(), 2);
-    if (notes["Wave"].size() == 2)
-    {
-        SUPERGBAMIDI_CHECK_EQ(notes["Wave"][1].first, 4);
-        SUPERGBAMIDI_CHECK(notes["Wave"][1].second != notes["Wave"][0].second);
-    }
+    SUPERGBAMIDI_REQUIRE_EQ(notes["Wave"].size(), 2);
+    SUPERGBAMIDI_CHECK_EQ(notes["Wave"][1].first, 4);
+    SUPERGBAMIDI_CHECK(notes["Wave"][1].second != notes["Wave"][0].second);
 
     // Voice 0's second note doesn't start, and its first plays on at the second's pitch, 7 semitones up.
-    SUPERGBAMIDI_CHECK_EQ(notes["Voice 0"].size(), 1);
+    SUPERGBAMIDI_REQUIRE_EQ(notes["Voice 0"].size(), 1);
     SUPERGBAMIDI_CHECK_EQ(range["Voice 0"], 7);
     SUPERGBAMIDI_CHECK(bends["Voice 0"] == (std::vector<std::pair<uint32_t, int>>{{8, 16383}}));
 
     // Voice 1's first note plays on as well, an octave up, at the step of sample 6 at semitone 0.
-    SUPERGBAMIDI_CHECK_EQ(notes["Voice 1"].size(), 1);
+    SUPERGBAMIDI_REQUIRE_EQ(notes["Voice 1"].size(), 1);
     SUPERGBAMIDI_CHECK_EQ(range["Voice 1"], 12);
     SUPERGBAMIDI_CHECK(bends["Voice 1"] == (std::vector<std::pair<uint32_t, int>>{{8, 16383}}));
 
@@ -2291,6 +2431,45 @@ Image DungeonDiceImage()
     return m;
 }
 
+void TestDungeonDiceLoopDelay()
+{
+    // Square 2: wait 2, a loop point with a wait for the loop and duty 75%, wait 2, note (vol 7, note 0x10), wait 18,
+    // loop the song. The first pass skips the wait. With a wait of 3, the later passes play the track 3 frames later,
+    // and the conversion marks the second pass as the loop. A wait of 0 moves nothing.
+    for (const uint8_t wait : {uint8_t(0), uint8_t(3)})
+    {
+        Image m(0x1000);
+        constexpr uint32_t kTable = kRomBase + 0x100;
+        constexpr uint32_t kBase = kRomBase + 0x200;
+        constexpr uint32_t kMap = kRomBase + 0x600;
+        constexpr uint32_t kPeriods = kRomBase + 0x800;
+        DungeonDiceSong(m, kTable, 0, kBase, 0x60, {{1, 0x40}});
+        m.Bytes(kBase + 0x40, {0x02, 0xFA, wait, 0x7F, 0x02, 0xE7, 0x10, 0x12, 0xFE});
+        m.Bytes(kBase + 0x60, {0x00, 0xFD});
+        m.Bytes(kMap, {0x00, 0x05, 0x07});
+        for (uint32_t p = 0; p < 0x200; p++)
+        {
+            m.Put16(kPeriods + 2 * p, uint16_t(0x4000 - p));
+        }
+        const Rom rom = m.ToRom();
+        DriverInfo info = SongsAt(kTable);
+        info.revision = Revision::kDungeonDiceMonsters;
+        info.sample_map = kMap;
+        info.sample_period_table = kPeriods;
+        DungeonDiceSequencer seq(rom, info, 0);
+
+        bool looped = false;
+        for (int f = 0; f < 40 && !looped; f++)
+        {
+            seq.Step();
+            looped = seq.LoopedLastFrame();
+        }
+
+        SUPERGBAMIDI_CHECK(looped);
+        SUPERGBAMIDI_CHECK_EQ(seq.LoopPointDelayed(), wait > 0);
+    }
+}
+
 void TestDungeonDiceDetection()
 {
     const Rom rom = DungeonDiceImage().ToRom();
@@ -2400,28 +2579,22 @@ void TestDungeonDiceConversion()
 
     // Square 1's vibrato steps restart the channel, but bend its one note, and NR50 plays it louder on the left.
     SUPERGBAMIDI_CHECK(sum.ok);
-    SUPERGBAMIDI_CHECK_EQ(notes["Square 1"].size(), 1);
-    SUPERGBAMIDI_CHECK(bends["Square 1"].size() >= 2);
+    SUPERGBAMIDI_REQUIRE_EQ(notes["Square 1"].size(), 1);
+    SUPERGBAMIDI_REQUIRE(bends["Square 1"].size() >= 2);
     SUPERGBAMIDI_CHECK(pans["Square 1"].size() == 1 && pans["Square 1"][0] < 64);
 
     // Loading a wave while a note plays restarts the channel with the new wave, a new note on another program.
-    SUPERGBAMIDI_CHECK_EQ(notes["Wave"].size(), 2);
-    if (notes["Wave"].size() == 2)
-    {
-        SUPERGBAMIDI_CHECK_EQ(notes["Wave"][1][0], 8);
-        SUPERGBAMIDI_CHECK(notes["Wave"][1][2] != notes["Wave"][0][2]);
-    }
+    SUPERGBAMIDI_REQUIRE_EQ(notes["Wave"].size(), 2);
+    SUPERGBAMIDI_CHECK_EQ(notes["Wave"][1][0], 8);
+    SUPERGBAMIDI_CHECK(notes["Wave"][1][2] != notes["Wave"][0][2]);
 
     // Noise note 0x4A is the third noise setting, on key 38.
     SUPERGBAMIDI_CHECK(notes["Noise"].size() == 1 && notes["Noise"][0][1] == 38);
 
     // Voice 0's note at pitch 28 * 16 + 1 plays 4 semitones above its note at the sample's rate, and F2 bends it up a
     // semitone, the most the range of 2 semitones needs.
-    SUPERGBAMIDI_CHECK_EQ(notes["Voice 0"].size(), 2);
-    if (notes["Voice 0"].size() == 2)
-    {
-        SUPERGBAMIDI_CHECK_EQ(notes["Voice 0"][1][1] - notes["Voice 0"][0][1], 4);
-    }
+    SUPERGBAMIDI_REQUIRE_EQ(notes["Voice 0"].size(), 2);
+    SUPERGBAMIDI_CHECK_EQ(notes["Voice 0"][1][1] - notes["Voice 0"][0][1], 4);
     SUPERGBAMIDI_CHECK(bends["Voice 0"] == (std::vector<std::pair<uint32_t, int>>{{16, 12288}}));
 
     fs::remove_all(dir, ec);
@@ -2658,12 +2831,16 @@ void RunTests()
     TestLoopStart();
     TestLoopStartEarliest();
     TestLoopStartLast();
+    TestLoopStartFarEarlier();
+    TestSampleAboveEf();
+    TestLoopStartEndedTrack();
     TestBendKept();
     TestConversion();
     TestSilentSongs();
     TestSharedSoundfont();
     TestEchoRouting();
     TestLoopSettingsAgain();
+    TestLoopStartsAtSecondPass();
     TestNoiseKeys();
     TestPsgPastTable();
     TestSampleKeys();
@@ -2679,12 +2856,14 @@ void RunTests()
     TestWct2004Decoding();
     TestRaveMasterSequencer();
     TestWct2004Sequencer();
+    TestCallDump();
     TestWct2004Panning();
     TestEternalDuelistDecoding();
     TestEternalDuelistSequencer();
     TestEternalDuelistConversion();
     TestDungeonDiceDecoding();
     TestDungeonDiceSequencer();
+    TestDungeonDiceLoopDelay();
     TestDungeonDiceDetection();
     TestDungeonDiceNoFrequencyTable();
     TestDungeonDiceSongTableFallback();

@@ -2,6 +2,7 @@
 
 #include "krawall/song.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <iterator>
 #include <string>
@@ -93,20 +94,29 @@ std::string NoteName(int note)
 bool DumpSong(const Rom& rom, const DriverInfo& info, int song, const std::string& path, std::string& error)
 {
     ModuleInfo module;
-    if (song < 0 || size_t(song) >= info.modules.size() || !ReadModule(rom, info.modules[size_t(song)], module))
+    if (song < 0 || size_t(song) >= info.songs.size() || !ReadModule(rom, info.songs[size_t(song)].module, module))
     {
         error = "module " + std::to_string(song) + " can't be read";
         return false;
     }
 
+    // A song of a module that holds several lists the whole module. The first line names the module by its place in
+    // the list.
     std::string out;
     char line[256];
+    const int place = int(std::find(info.modules.begin(), info.modules.end(), module.address) - info.modules.begin());
+    if (info.songs[size_t(song)].song >= 0)
+    {
+        std::snprintf(line, sizeof line, "Song %d of ", info.songs[size_t(song)].song);
+        out += line;
+    }
     std::snprintf(line, sizeof line,
-                  "Module %d at 0x%08X: %d channels, %d orders, restart at order %d, speed %d, tempo %d, global volume "
+                  "%s %d at 0x%08X: %d channels, %d orders, restart at order %d, speed %d, tempo %d, global volume "
                   "%d, %s, %s periods%s\n",
-                  song, unsigned(module.address), module.channels, module.order_count, module.restart, module.speed,
-                  module.tempo, module.global_volume, module.instruments ? "instruments" : "samples",
-                  module.linear ? "linear" : "Amiga", module.fast_slides ? ", fast volume slides" : "");
+                  out.empty() ? "Module" : "module", place, unsigned(module.address), module.channels,
+                  module.order_count, module.restart, module.speed, module.tempo, module.global_volume,
+                  module.instruments ? "instruments" : "samples", module.linear ? "linear" : "Amiga",
+                  module.fast_slides ? ", fast volume slides" : "");
     out += line;
 
     // The orders, with +++ for a marker between songs, and the channels' pans.

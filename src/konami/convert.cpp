@@ -19,8 +19,10 @@
 #include "konami/seqformat.h"
 #include "konami/sequencer.h"
 #include "midi.h"
+#include "music.h"
 #include "program.h"
 #include "sf2.h"
+#include "song_banks.h"
 
 namespace supergbamidi::konami
 {
@@ -75,18 +77,21 @@ struct FrameState
     int wave_loads = 0; // wave loads since the song started, including reloads
 };
 
-// Every frame of a song's sequencer output, and the frames of the first pass through its loop.
+// Every frame of a song's sequencer output, and the frames of the marked pass through its loop.
 struct Simulation
 {
     std::vector<std::array<TrackOutput, kTracks>> frames;
     std::vector<FrameState> state;
-    int loop_start = -1, loop_end = -1; // frames of the first pass through the loop
+    int loop_start = -1, loop_end = -1; // frames of the marked pass through the loop
+    int first_loop_end = -1;            // the frame the song first loops in, which starts its second pass
+    bool delayed_loop_point = false;    // a track's loop point starts with a delay that only the later passes play
     std::vector<std::string> warnings;
 };
 
 // Records each frame's track outputs and echo settings until the song stops, all tracks end, or the loop has played
-// `opt.loops` times. An invalid song header produces a warning and no frames.
-Simulation Simulate(const Rom& rom, const DriverInfo& info, int song, const ConvertOptions& opt)
+// `loops` times. With `second`, the marked loop is the song's second pass through it, and the song plays the first pass
+// before it. An invalid song header produces a warning and no frames.
+Simulation Simulate(const Rom& rom, const DriverInfo& info, int song, int loops, bool second)
 {
     Simulation sim;
     const std::unique_ptr<Sequencer> sequencer = Sequencer::Create(rom, info, song);
@@ -107,9 +112,16 @@ Simulation Simulate(const Rom& rom, const DriverInfo& info, int song, const Conv
             {
                 sim.loop_end = int(f);
                 sim.loop_start = seq.LoopStartFrame();
+                sim.first_loop_end = int(f);
+                sim.delayed_loop_point = seq.LoopPointDelayed();
+            }
+            else if (second && seq.LoopsDone() == 2)
+            {
+                sim.loop_start = sim.loop_end;
+                sim.loop_end = int(f);
             }
 
-            if (seq.LoopsDone() >= opt.loops)
+            if (seq.LoopsDone() >= loops + (second ? 1 : 0))
             {
                 ended = true; // this frame already belongs to the next pass
                 break;
@@ -155,7 +167,7 @@ Simulation Simulate(const Rom& rom, const DriverInfo& info, int song, const Conv
     else if (!ended)
     {
         sim.warnings.push_back("song reached the frame limit after playing its loop " +
-                               std::to_string(seq.LoopsDone()) + " of " + std::to_string(opt.loops) +
+                               std::to_string(seq.LoopsDone()) + " of " + std::to_string(loops + (second ? 1 : 0)) +
                                " times; output truncated");
     }
 
@@ -1157,6 +1169,53 @@ std::array<std::vector<Event>, kTracks> RenderTracks(const Rom& rom, const Drive
     return events;
 }
 
+// Returns true if every track's notes of the song's second pass through its loop start as those of its first do: with
+// the same gaps between them, the same sound, note and pitch, and the levels and echo send that the MIDI file gives
+// them. The driver sends every track back to its loop point with the volume, pan and sample that the loop's end left,
+// so the first pass can play unlike the later ones. Each track's notes are timed from its first note in the pass, since
+// a track's loop point can come a frame after the loop's start, where every track starts the next pass together. `sim`
+// has to hold two passes of the loop.
+bool FirstPassRepeats(const Rom& rom, const DriverInfo& info, const Simulation& sim)
+{
+    std::vector<std::string> warnings;
+    const std::array<std::vector<Event>, kTracks> events = RenderTracks(rom, info, sim, warnings);
+    const uint32_t start = uint32_t(sim.loop_start), length = uint32_t(sim.loop_end - sim.loop_start);
+    PassComparison passes(start, length);
+    for (int t = 0; t < kTracks; t++)
+    {
+        // The frame of the track's first note in each pass.
+        std::array<uint32_t, 2> first = {UINT32_MAX, UINT32_MAX};
+        for (const Event& e : events[size_t(t)])
+        {
+            if (e.type == Event::kNoteOn && e.frame >= start && e.frame - start < 2 * length)
+            {
+                uint32_t& f = first[(e.frame - start) / length];
+                f = std::min(f, e.frame);
+            }
+        }
+
+        int echo = 0;
+        for (const Event& e : events[size_t(t)])
+        {
+            if (e.type == Event::kEcho)
+            {
+                echo = e.echo;
+            }
+            else if (e.type == Event::kNoteOn && e.frame >= start && e.frame - start < 2 * length)
+            {
+                const uint32_t pass = (e.frame - start) / length;
+                int cc10 = 64, cc11 = 0;
+                LevelsToControllers(e.level_l, e.level_r, cc10, cc11);
+                passes.Add(
+                    start + pass * length + (e.frame - first[pass]), t, e.note,
+                    {double(int(e.kind)), double(e.param), double(e.dev), double(cc10), double(cc11), double(echo)});
+            }
+        }
+    }
+
+    return passes.Alike();
+}
+
 // Sound sources, pitches and timing used to build the song's SoundFont and MIDI file.
 struct Usage
 {
@@ -1219,16 +1278,17 @@ struct Programs
     std::map<int, Placement> noise_keys; // noise note -> its preset and key
     std::array<TrackKeymap, kTracks> keymaps;
     std::array<std::vector<ProgramRef>, kTracks> tracks; // the presets of each DS track
+    bool fits = true;                                    // every preset found a free program
 };
 
-// Adds a preset for each instrument the song uses, numbered from program 0 of `bank` on, and with `prefix` in front of
-// its name.
-Programs AddPresets(const Usage& usage, SoundfontBuilder& sf, const Rom& rom, const DriverInfo& info, int bank,
+// Adds a preset for each instrument the song uses, in the banks and programs that the SoundFont gives song `song`, and
+// with `prefix` in front of its name.
+Programs AddPresets(const Usage& usage, SoundfontBuilder& sf, const Rom& rom, const DriverInfo& info, int song,
                     const std::string& prefix)
 {
     Programs programs;
     Sf2File& file = sf.File();
-    int next_program = 0;
+    sf.Banks().Begin(song);
 
     auto add_preset = [&](const std::string& name, std::vector<Sf2Zone> zones)
     {
@@ -1237,13 +1297,14 @@ Programs AddPresets(const Usage& usage, SoundfontBuilder& sf, const Rom& rom, co
         inst.zones = std::move(zones);
         file.instruments.push_back(std::move(inst));
 
+        const std::optional<BankProgram> slot = sf.Banks().Next();
+        programs.fits = programs.fits && slot;
         Sf2Preset p;
         p.name = prefix + name;
-        p.bank = uint16_t(bank + next_program / 128);
-        p.program = uint16_t(next_program % 128);
+        p.bank = uint16_t(slot ? slot->bank : 0);
+        p.program = uint16_t(slot ? slot->program : 0);
         p.instrument = int(file.instruments.size()) - 1;
         file.presets.push_back(p);
-        next_program++;
 
         return ProgramRef{p.bank, p.program};
     };
@@ -1414,10 +1475,13 @@ void WriteConductor(MidiTrack& conductor, const std::string& title, const BeatGr
                   rom.GameCode().c_str(), song, h.base, kProgramName);
     conductor.Meta(0, 0x01, text);
 
+    // The beat's tempo at the loop's start is given again after the marker. The loop's end can have another, which a
+    // player that keeps its tempo when it jumps back would otherwise play the loop's start at.
     if (sim.loop_end >= 0)
     {
         conductor.Meta(loop_tick(sim.loop_start), 0x06, "loopStart");
         conductor.Meta(loop_tick(sim.loop_end), 0x06, "loopEnd");
+        conductor.RepeatTempo(loop_tick(sim.loop_start));
     }
 
     int last_fb = -1, last_delay = -1;
@@ -1578,8 +1642,17 @@ void WriteTrack(MidiTrack& mt, int ch, int range, const std::vector<Event>& even
 SongSummary Run(const Rom& rom, const DriverInfo& info, int song, const ConvertOptions& opt, SoundfontBuilder* shared,
                 bool write)
 {
+    // The marked loop starts at the song's second pass if its first plays unlike it, as when the tracks come back to
+    // their loop points with the volume or pan that the loop's end left them. A delay at the start of a loop point
+    // plays only in the later passes. It moves its track's notes there. The comparison of passes times each track's
+    // notes from its first note and misses the move.
     SongSummary sum;
-    const Simulation sim = Simulate(rom, info, song, opt);
+    Simulation sim = Simulate(rom, info, song, opt.loops, false);
+    if (sim.loop_end >= 0 &&
+        (sim.delayed_loop_point || !FirstPassRepeats(rom, info, Simulate(rom, info, song, 2, false))))
+    {
+        sim = Simulate(rom, info, song, opt.loops, true);
+    }
     sum.warnings = sim.warnings;
     if (sim.frames.empty())
     {
@@ -1601,28 +1674,20 @@ SongSummary Run(const Rom& rom, const DriverInfo& info, int song, const ConvertO
         return sum;
     }
 
-    // With a SoundFont shared by all songs, each song's presets go in the bank numbered after it.
+    // With a SoundFont shared by all songs, SongBanks gives each song's presets their bank and programs.
     std::unique_ptr<SoundfontBuilder> own;
     SoundfontBuilder& sf = shared ? *shared : *(own = std::make_unique<SoundfontBuilder>(rom, info));
     const SoundfontBuilder::Checkpoint before = sf.Save();
     const std::string prefix = shared ? "S" + TwoDigits(song) + " " : "";
     const Programs programs = AddPresets(usage, sf, rom, info, shared ? song : 0, prefix);
-
-    // In a shared SoundFont, presets past the 128th would go in the next song's bank.
-    const size_t preset_count = sf.File().presets.size() - before.presets;
-    if (shared && preset_count > 128)
+    if (!programs.fits)
     {
+        const size_t preset_count = sf.File().presets.size() - before.presets;
         sf.Restore(before);
         sum.warnings.push_back("needs " + std::to_string(preset_count) +
-                               " presets, but a bank holds 128; convert the song without --single-sf2");
+                               " presets, more than the SoundFont's banks have free" +
+                               (shared ? "; convert the song without --single-sf2" : ""));
         return sum;
-    }
-
-    if (sf.File().presets.back().bank > 127)
-    {
-        sum.warnings.push_back(
-            "some presets are in banks above 127, which MIDI can't select; convert the song without "
-            "--single-sf2");
     }
 
     // Some players force channel 10 to the drum bank, so the presets of the track on it get a copy there, to be found
@@ -1681,7 +1746,8 @@ SongSummary Run(const Rom& rom, const DriverInfo& info, int song, const ConvertO
         }
     }
     std::vector<uint32_t> hints;
-    for (int f = sim.loop_end; sim.loop_end > sim.loop_start && f < int(end_frame); f += sim.loop_end - sim.loop_start)
+    const int length = sim.loop_end - sim.loop_start;
+    for (int f = sim.first_loop_end; length > 0 && f < int(end_frame); f += length)
     {
         hints.push_back(uint32_t(f));
     }
@@ -1799,7 +1865,8 @@ bool DumpSong(const Rom& rom, const DriverInfo& info, int song, const std::strin
                       TrackName(t).c_str(), h.offsets[t], h.base + h.offsets[t]);
         text += line;
 
-        // Each command's line is finished by the delay that follows it.
+        // Each command's line is finished by the delay that follows it. The commands that a call plays come after the
+        // call's line. The frames after the call count their delays.
         std::string pending;
         auto list_command = [&](const Command& c, uint32_t frame)
         {
@@ -1837,7 +1904,7 @@ bool DumpSong(const Rom& rom, const DriverInfo& info, int song, const std::strin
                 pending.clear();
             }
         };
-        WalkTrack(rom, h, t, info.revision, list_command);
+        WalkTrack(rom, h, t, info.revision, list_command, kMaxWalkCommands, true);
 
         if (!pending.empty())
         {

@@ -23,16 +23,20 @@ def _load_gsf(path, image, depth=0):
     if depth > 10:
         raise ValueError('GSF _lib chain too deep')
     data = path.read_bytes()
-    if data[:3] != b'PSF' or data[3] != 0x22:
+    if len(data) < 16 or data[:4] != b'PSF\x22':
         raise ValueError('%s isn\'t a GSF file' % path)
     reserved, size = struct.unpack('<II', data[4:12])
     program_pos = 16 + reserved
+    if program_pos + size > len(data):
+        raise ValueError('%s is truncated' % path)
     tags = _psf_tags(data, program_pos + size)
     # _lib first, then the file's program on top of it, then _lib2, _lib3 and so on up to the first one missing.
     if tags.get('_lib'):
         _load_gsf(path.parent / tags['_lib'], image, depth + 1)
     if size:
         program = zlib.decompress(data[program_pos:program_pos + size])
+        if len(program) < 12:
+            raise ValueError('the program section of %s is too short' % path)
         offset, length = struct.unpack('<II', program[4:12])
         start = offset & 0x01FFFFFF
         chunk = program[12:12 + length]

@@ -232,6 +232,7 @@ void Sequencer::ReadNotes(int c)
         {
             Warn("channel " + std::to_string(c) + " reads commands without reaching a note, so it was ended");
             ch.position = 0;
+            AddEvent(c, Event::kEnd);
             return;
         }
 

@@ -18,6 +18,7 @@
 #include "files.h"
 #include "krawall/player.h"
 #include "midi.h"
+#include "music.h"
 #include "program.h"
 #include "sf2.h"
 
@@ -61,21 +62,6 @@ constexpr int kRootKey = 60;
 // The points of a sample that follow its end in the SoundFont, so that a synth that reads past the end of a loop reads
 // the loop's start.
 constexpr uint32_t kGuardPoints = 8;
-
-// Formats a module number for file names, using at least two digits and enough for the largest module number. It's
-// padded by hand, since GCC can't determine the field width from the inlined `digits` count.
-std::string SongNumber(int song, int count)
-{
-    int digits = 2;
-    for (int n = count - 1; n >= 100; n /= 10)
-    {
-        digits++;
-    }
-
-    const std::string number = std::to_string(song);
-
-    return std::string(size_t(std::max(0, digits - int(number.size()))), '0') + number;
-}
 
 // Maps module channel `c` to MIDI channels in order, skipping the drum channel, and from the 16th module channel on,
 // reuses them from the beginning.
@@ -131,11 +117,13 @@ struct Simulation
 };
 
 // Runs the model until a row revisits an earlier module position with the same speed, tempo and pattern-loop state, and
-// the module has played the loop between them `loops` times in all.
-Simulation Simulate(const Rom& rom, const DriverInfo& info, uint32_t module, int loops)
+// the module has played the loop between them `loops` times in all. With `second`, the loop starts at the module's
+// second pass through it, and the module plays the first pass before it. A song of a module that separates songs with
+// +++ plays in song mode. Song mode loops back to the song's start at the song's end.
+Simulation Simulate(const Rom& rom, const DriverInfo& info, const ModuleSong& song, int loops, bool second)
 {
     Simulation sim;
-    Player player(rom, info, module);
+    Player player(rom, info, song.module, song.song >= 0 ? kModeLoop | kModeSong : kModeLoop, std::max(song.song, 0));
     sim.channels = player.Module().channels;
     sim.mix_rate = info.mix_rate;
     if (!player.Valid())
@@ -196,10 +184,12 @@ Simulation Simulate(const Rom& rom, const DriverInfo& info, uint32_t module, int
             const auto [it, added] = rows.emplace(key, sim.ticks.size());
             if (!added)
             {
+                const size_t length = sim.ticks.size() - it->second;
+                const size_t skip = second ? length : 0;
                 sim.plan.loops = true;
-                sim.plan.loop_start = it->second;
-                sim.plan.loop_end = sim.ticks.size();
-                end = sim.plan.loop_start + size_t(std::max(loops, 1)) * (sim.plan.loop_end - sim.plan.loop_start);
+                sim.plan.loop_start = it->second + skip;
+                sim.plan.loop_end = sim.ticks.size() + skip;
+                end = sim.plan.loop_start + size_t(std::max(loops, 1)) * length;
             }
         }
 
@@ -317,6 +307,27 @@ std::vector<Note> MakeNotes(const Rom& rom, const DriverInfo& info, const Simula
     return notes;
 }
 
+// Returns true if the notes of the module's second pass through its loop start as those of its first do: on the same
+// channels and ticks from the pass's start, with the same sample, start point, key, bend and levels, and ticks of the
+// same length. The module's channels keep their pan and volume when it comes back to its loop, so the first pass can
+// play unlike the later ones. `sim` has to hold two passes of the loop.
+bool FirstPassRepeats(const Rom& rom, const DriverInfo& info, const Simulation& sim)
+{
+    const Plan& plan = sim.plan;
+    PassComparison passes(plan.loop_start, plan.loop_end - plan.loop_start);
+    InstrumentSet instruments;
+    for (int c = 0; c < sim.channels; c++)
+    {
+        for (const Note& n : MakeNotes(rom, info, sim, c, instruments))
+        {
+            const Sound& s = n.sounds.front();
+            passes.Add(n.on, c, n.key, {double(n.program), s.bend, s.left, s.right, double(sim.ticks[n.on].length)});
+        }
+    }
+
+    return passes.Alike();
+}
+
 // A run of rows within one order. A new run starts when the order changes or playback returns to the same or an earlier
 // row.
 struct OrderRun
@@ -394,7 +405,6 @@ K Commonest(const std::map<K, size_t>& counts)
 bool SameGrid(uint32_t speed, uint32_t main)
 {
     const uint32_t high = std::max(speed, main), low = std::min(speed, main);
-
     return low > 0 && high % low == 0 && ((high / low) & (high / low - 1)) == 0;
 }
 
@@ -737,28 +747,34 @@ SongSummary Run(const Rom& rom, const DriverInfo& info, int song, const ConvertO
                 bool write)
 {
     SongSummary sum;
-    if (song < 0 || size_t(song) >= info.modules.size())
+    if (song < 0 || size_t(song) >= info.songs.size())
     {
         sum.warnings.push_back("there's no module " + std::to_string(song));
         return sum;
     }
 
-    const uint32_t module = info.modules[size_t(song)];
-    const Simulation sim = Simulate(rom, info, module, opt.loops);
+    // The marked loop starts at the module's second pass if its first plays unlike it, as when the channels come back
+    // to the loop with the pan or volume that its end left them.
+    const ModuleSong& entry = info.songs[size_t(song)];
+    const uint32_t module = entry.module;
+    Simulation sim = Simulate(rom, info, entry, opt.loops, false);
+    if (sim.plan.loops && !FirstPassRepeats(rom, info, Simulate(rom, info, entry, 2, false)))
+    {
+        sim = Simulate(rom, info, entry, opt.loops, true);
+    }
     sum.warnings = sim.warnings;
     if (sim.ticks.empty())
     {
         return sum;
     }
 
-    // The notes of each channel chosen. The mask has a bit for each of channels 0-15, which --tracks can name, and the
-    // channels after them are converted when every channel is.
+    // The notes of each channel chosen.
     InstrumentSet own;
     InstrumentSet& instruments = shared ? *shared : own;
     std::vector<std::vector<Note>> notes(size_t(sim.channels));
     for (int c = 0; c < sim.channels; c++)
     {
-        if (c < 16 ? ((opt.track_mask >> c) & 1) != 0 : opt.track_mask == 0xFFFF)
+        if ((opt.track_mask >> c) & 1)
         {
             notes[size_t(c)] = MakeNotes(rom, info, sim, c, instruments);
             sum.tracks += notes[size_t(c)].empty() ? 0 : 1;
@@ -788,12 +804,22 @@ SongSummary Run(const Rom& rom, const DriverInfo& info, int song, const ConvertO
         return sum;
     }
 
-    // The files' names and titles, and the MIDI file's description.
-    const std::string number = SongNumber(song, int(info.modules.size()));
+    // The files' names and titles, and the MIDI file's description. The description names the module by its place in
+    // the list.
+    const std::string number = SongNumber(song, int(info.songs.size()));
     const std::string title = rom.Title() + " #" + number;
-    char about[160];
-    std::snprintf(about, sizeof about, "%s (%s) module %d at 0x%08X, converted by %s", rom.Title().c_str(),
-                  rom.GameCode().c_str(), song, unsigned(module), kProgramName);
+    const int place = int(std::find(info.modules.begin(), info.modules.end(), module) - info.modules.begin());
+    char about[192];
+    if (entry.song < 0)
+    {
+        std::snprintf(about, sizeof about, "%s (%s) module %d at 0x%08X, converted by %s", rom.Title().c_str(),
+                      rom.GameCode().c_str(), place, unsigned(module), kProgramName);
+    }
+    else
+    {
+        std::snprintf(about, sizeof about, "%s (%s) song %d of module %d at 0x%08X, converted by %s",
+                      rom.Title().c_str(), rom.GameCode().c_str(), entry.song, place, unsigned(module), kProgramName);
+    }
     const std::string stem = Utf8(PathFromUtf8(opt.out_dir) / PathFromUtf8(SafeFileName(opt.base_name) + "_" + number));
     std::string error;
     sum.midi_path = stem + ".mid";
@@ -929,7 +955,6 @@ uint32_t SampleRate(const Rom& rom, const DriverInfo& info, uint32_t sample)
     const int fine_tune = rom.S8(sample + 0xC);
     const uint32_t factor = rom.U16(info.fine_tunes + 2 * uint32_t(32 + (fine_tune >> 2)));
     const uint32_t period = (rom.U16(info.periods + 2 * kRootNote) * factor) >> 15;
-
     return period ? 14317456 / period : 8363;
 }
 

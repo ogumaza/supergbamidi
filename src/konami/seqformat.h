@@ -153,11 +153,18 @@ struct SongHeader
 // Reads entry `song` of a song table of revision `revision`. Returns false if the entry isn't in the ROM.
 bool ReadSongHeader(const Rom& rom, uint32_t song_table, int song, Revision revision, SongHeader& out);
 
-// Walks one track linearly from its start, following the F3 rebasing rule, until an end/jump command, an unknown
-// opcode, or `max_commands`. Calls `visit(cmd, frame)` for each command (and each delay). A call (kCall) is walked
-// past, not followed. Returns true if the track reached an end command.
+// The most commands that WalkTrack reads unless it's told otherwise.
+inline constexpr uint32_t kMaxWalkCommands = 200000;
+
+// Walks one track from its start until an end/jump command, an unknown opcode, or `max_commands`, and follows the F3
+// rebasing rule. Calls `visit(cmd, frame)` for each command (and each delay). The walk passes over a call (kCall). With
+// `follow_calls` set, the walk plays the call's commands with their delays and goes back after the last one. The
+// driver plays a call the same way. The walk leaves out a quirk of the Eternal Duelist and Dungeon Dice Monsters
+// revisions: they go back to the same place every 256 commands after that. Returns true if the track reached an end
+// command.
 bool WalkTrack(const Rom& rom, const SongHeader& song, int track, Revision revision,
-               const std::function<void(const Command&, uint32_t frame)>& visit, uint32_t max_commands = 200000);
+               const std::function<void(const Command&, uint32_t frame)>& visit,
+               uint32_t max_commands = kMaxWalkCommands, bool follow_calls = false);
 
 // Returns a human-readable form of a command on the given track of a song of revision `revision`.
 std::string Describe(const Command& c, int track, Revision revision);

@@ -15,6 +15,7 @@
 
 #include "rom.h"
 #include "sf2.h"
+#include "song_banks.h"
 
 namespace supergbamidi::quintet
 {
@@ -83,12 +84,19 @@ struct PcmSound
 class SoundfontBuilder
 {
 public:
-    // Keeps a reference to `rom`, which has to outlive the builder.
-    explicit SoundfontBuilder(const Rom& rom);
+    // Keeps a reference to `rom`. The ROM has to outlive the builder. In a SoundFont that `songs` songs share,
+    // SongBanks gives each song's presets their bank and programs.
+    explicit SoundfontBuilder(const Rom& rom, int songs = 1);
 
     Sf2File& File()
     {
         return file_;
+    }
+
+    // Returns the banks and programs of the presets.
+    SongBanks& Banks()
+    {
+        return banks_;
     }
 
     // Each returns the index of the SF2 sample for a sound, which is made on first use and shared afterwards. A square
@@ -113,6 +121,7 @@ public:
 private:
     const Rom& rom_;
     Sf2File file_;
+    SongBanks banks_;
     std::map<int, int> squares_;
     std::map<WaveShape, int> waves_;
     std::map<NoiseSound, int> noises_;

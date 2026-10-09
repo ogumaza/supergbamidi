@@ -82,10 +82,10 @@ public:
         return false;
     }
 
-    // Each song's presets go in a bank of their own in the shared SoundFont, numbered after the song.
+    // SongBanks gives each song's presets their bank and programs in the shared SoundFont.
     void ShareSoundfont() override
     {
-        shared_ = std::make_unique<SoundfontBuilder>(rom_);
+        shared_ = std::make_unique<SoundfontBuilder>(rom_, SongCount());
     }
 
     bool WriteSharedSoundfont(const std::string& path, std::string& error) override
@@ -138,7 +138,7 @@ private:
     {
         ConvertOptions opt;
         opt.loops = settings.loops;
-        opt.track_mask = settings.track_mask;
+        opt.track_mask = uint16_t(settings.track_mask);
         opt.frame_timing = settings.frame_timing;
         opt.bank = shared_ ? song : 0;
         opt.out_dir = settings.out_dir;

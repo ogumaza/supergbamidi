@@ -16,7 +16,7 @@ import struct
 import subprocess
 from pathlib import Path
 
-DRIVERS = ('konami', 'rare', 'quintet', 'rd2', 'mp2k', 'brownie', 'krawall')
+DRIVERS = ('konami', 'rare', 'quintet', 'rd2', 'mp2k', 'brownie', 'krawall', 'ubimilan')
 
 _STEM = re.compile(r'(.+?)(?:_(%s))?_(\d+)' % '|'.join(DRIVERS))
 

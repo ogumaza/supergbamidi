@@ -40,7 +40,8 @@ void LevelsToControllers(double left, double right, int& cc10, int& cc11);
 
 // A track of a Standard MIDI File. Events can be added in any order: they're written by tick, and at the same tick meta
 // events come first, then note-offs, bank selects, program changes, controllers, pitch bends and note-ons, each kind in
-// the order it was added.
+// the order it was added. A tick's events can also take steps. Each step's events come after those of the steps before
+// it. A note can then play between two program changes at its tick.
 class MidiTrack
 {
 public:
@@ -54,16 +55,23 @@ public:
     void Tempo(uint32_t tick, uint32_t micros_per_quarter);
     void TimeSignature(uint32_t tick, int numerator, int denominator_pow2);
 
-    // Adds a note on. With `before_programs`, it goes before the bank selects and program changes at the same tick, so
-    // that it plays with the program from before them.
-    void NoteOn(uint32_t tick, int ch, int key, int velocity, bool before_programs = false);
+    // Adds a tempo change at `tick` to the tempo that the track's tempo changes give there, if it has any. It goes
+    // after the meta events added at `tick` so far, such as a loopStart marker. A player that jumps back to the marker
+    // and keeps the tempo it was playing then takes the tempo that the tick had the first time.
+    void RepeatTempo(uint32_t tick);
+
+    // Adds a note on. With `before_programs`, it goes before the bank selects and program changes at the same tick. It
+    // then plays with the program from before them. `step` is its step at the tick.
+    void NoteOn(uint32_t tick, int ch, int key, int velocity, bool before_programs = false, int step = 0);
 
     void NoteOff(uint32_t tick, int ch, int key);
     void Control(uint32_t tick, int ch, int cc, int value);
-    void Program(uint32_t tick, int ch, int program);
 
-    // Adds a bank select (CC0 + CC32), which goes before program changes at the same tick.
-    void Bank(uint32_t tick, int ch, int bank);
+    // Adds a program change, at step `step` of its tick.
+    void Program(uint32_t tick, int ch, int program, int step = 0);
+
+    // Adds a bank select (CC0 + CC32). It goes before program changes at the same tick and step.
+    void Bank(uint32_t tick, int ch, int bank, int step = 0);
 
     // Adds a pitch bend of `value`, from 0 to 16383 with the centre at 8192.
     void PitchBend(uint32_t tick, int ch, int value);
@@ -99,11 +107,12 @@ private:
     struct Event
     {
         uint32_t tick;
+        int step; // its step at the tick. Steps sort before `order`.
         int order;
         std::vector<uint8_t> bytes;
     };
 
-    void AddEvent(uint32_t tick, int order, std::vector<uint8_t> bytes);
+    void AddEvent(uint32_t tick, int order, std::vector<uint8_t> bytes, int step = 0);
 
     std::vector<Event> events_;
     uint32_t end_ = 0;

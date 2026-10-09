@@ -24,6 +24,7 @@
 #include "music.h"
 #include "rom.h"
 #include "sf2.h"
+#include "song_banks.h"
 #include "test_util.h"
 #include "thumb.h"
 
@@ -312,14 +313,21 @@ void TestGsfLoading()
     SUPERGBAMIDI_CHECK_EQ(rom.U8(kRomBase + 0xF00), 0xA5);
     SUPERGBAMIDI_CHECK_EQ(rom.U32(kRomBase + 0x100), 0x12345678);
 
+    // A _lib tag whose case differs from the library's name finds the library.
+    WriteGsf(dir / "set-03.minigsf", kRomBase + 0xF00, {0x5A}, "_lib=SET.GSFLIB\n");
+
+    SUPERGBAMIDI_CHECK(rom.Load(Utf8(dir / "set-03.minigsf"), err));
+
+    SUPERGBAMIDI_CHECK_EQ(rom.U32(kRomBase + 0x100), 0x12345678);
+
     WriteGsf(dir / "orphan.minigsf", kRomBase + 0xF00, {0x5A}, "_lib=missing.gsflib\n");
 
     SUPERGBAMIDI_CHECK(!rom.Load(Utf8(dir / "orphan.minigsf"), err));
-    SUPERGBAMIDI_CHECK(err.find("missing.gsflib") != std::string::npos);
+    SUPERGBAMIDI_CHECK(err == "the library missing.gsflib can't be read");
 
     // A folder dropped on the program by mistake.
     SUPERGBAMIDI_CHECK(!rom.Load(Utf8(dir), err));
-    SUPERGBAMIDI_CHECK(err.find("is a folder") != std::string::npos);
+    SUPERGBAMIDI_CHECK(err == "it's a folder, not a ROM or GSF file");
 
     // A zipped ROM, which has to be taken out of its archive first.
     std::vector<uint8_t> zip(0x200, 0);
@@ -329,7 +337,7 @@ void TestGsfLoading()
 
     SUPERGBAMIDI_CHECK(!rom.Load(Utf8(dir / "game.zip"), err));
 
-    SUPERGBAMIDI_CHECK(err.find("is an archive") != std::string::npos);
+    SUPERGBAMIDI_CHECK(err.find("it's an archive") == 0);
     fs::remove_all(dir, ec);
 }
 
@@ -339,7 +347,7 @@ void TestNoDriver()
 {
     Rom rom;
     rom.Assign(std::vector<uint8_t>(0x1000, 0));
-    Overrides konami_only, rare_only, quintet_only, rd2_only, mp2k_only, brownie_only, krawall_only;
+    Overrides konami_only, rare_only, quintet_only, rd2_only, mp2k_only, brownie_only, krawall_only, ubimilan_only;
     konami_only.driver = Driver::kKonami;
     rare_only.driver = Driver::kRare;
     quintet_only.driver = Driver::kQuintet;
@@ -347,7 +355,8 @@ void TestNoDriver()
     mp2k_only.driver = Driver::kMp2k;
     brownie_only.driver = Driver::kBrownie;
     krawall_only.driver = Driver::kKrawall;
-    std::string any, konami, rare, quintet, rd2, mp2k, brownie, krawall, all, all_mp2k;
+    ubimilan_only.driver = Driver::kUbiMilan;
+    std::string any, konami, rare, quintet, rd2, mp2k, brownie, krawall, ubimilan, all, all_mp2k;
 
     const bool found_any = OpenMusic(rom, Overrides(), any) != nullptr;
     const bool found_konami = OpenMusic(rom, konami_only, konami) != nullptr;
@@ -357,17 +366,19 @@ void TestNoDriver()
     const bool found_mp2k = OpenMusic(rom, mp2k_only, mp2k) != nullptr;
     const bool found_brownie = OpenMusic(rom, brownie_only, brownie) != nullptr;
     const bool found_krawall = OpenMusic(rom, krawall_only, krawall) != nullptr;
-    const bool found_all = !OpenAllMusic(rom, Overrides(), all).empty();
-    const bool found_all_mp2k = !OpenAllMusic(rom, mp2k_only, all_mp2k).empty();
+    const bool found_ubimilan = OpenMusic(rom, ubimilan_only, ubimilan) != nullptr;
+    std::vector<std::string> unread, unread_mp2k;
+    const bool found_all = !OpenAllMusic(rom, Overrides(), all, unread).empty();
+    const bool found_all_mp2k = !OpenAllMusic(rom, mp2k_only, all_mp2k, unread_mp2k).empty();
 
     SUPERGBAMIDI_CHECK(!found_any && !found_konami && !found_rare && !found_quintet && !found_rd2 && !found_mp2k &&
-                       !found_brownie && !found_krawall);
-    SUPERGBAMIDI_CHECK(!found_all && !found_all_mp2k);
+                       !found_brownie && !found_krawall && !found_ubimilan);
+    SUPERGBAMIDI_CHECK(!found_all && !found_all_mp2k && unread.empty() && unread_mp2k.empty());
     SUPERGBAMIDI_CHECK(all == any && all_mp2k == mp2k);
     SUPERGBAMIDI_CHECK(
         any ==
-        "no Konami, Rare, Quintet, Nintendo R&D2, Brownie Brown, Krawall or MP2K sound driver found: this game's "
-        "music uses another engine, or a driver version supergbamidi doesn't know");
+        "no Konami, Rare, Quintet, Nintendo R&D2, Brownie Brown, Ubisoft Milan, Krawall or MP2K sound driver found: "
+        "this game's music uses another engine, or a driver version supergbamidi doesn't know");
     SUPERGBAMIDI_CHECK(konami ==
                        "no Konami sound driver found: this game's music uses another engine, or a driver version "
                        "supergbamidi doesn't know");
@@ -385,6 +396,9 @@ void TestNoDriver()
     SUPERGBAMIDI_CHECK(krawall ==
                        "no Krawall sound driver found: this game's music uses another engine, or a driver version "
                        "supergbamidi doesn't know");
+    SUPERGBAMIDI_CHECK(ubimilan ==
+                       "no Ubisoft Milan sound driver found: this game's music uses another engine, or a driver "
+                       "version supergbamidi doesn't know");
 }
 
 // A song's loop lasts until every track's loop is back where it started: loops of 3 and 4 bars make one of 12, and a
@@ -398,6 +412,47 @@ void TestLoopLength()
     SUPERGBAMIDI_CHECK_EQ(LoopLength({8, 9}), uint64_t(72));
     SUPERGBAMIDI_CHECK_EQ(LoopLength({9, 10}), uint64_t(10));
     SUPERGBAMIDI_CHECK_EQ(LoopLength({6138, 6144}), uint64_t(6144));
+}
+
+void TestSongBanks()
+{
+    // Three songs share a SoundFont. Song 0 takes bank 0, and song 2's 130 presets take bank 2 and then the free
+    // programs after song 0's in bank 0. Bank 1 stays free until song 1 takes it.
+    SongBanks banks(3);
+
+    const std::vector<BankProgram> song0 = banks.Place(0, 3);
+    const std::vector<BankProgram> song2 = banks.Place(2, 130);
+    const std::vector<BankProgram> song1 = banks.Place(1, 2);
+
+    SUPERGBAMIDI_CHECK(song0.size() == 3 && song0[2].bank == 0 && song0[2].program == 2);
+    SUPERGBAMIDI_CHECK(song2.size() == 130);
+    if (song2.size() == 130)
+    {
+        SUPERGBAMIDI_CHECK(song2[127].bank == 2 && song2[127].program == 127);
+        SUPERGBAMIDI_CHECK(song2[128].bank == 0 && song2[128].program == 3 && song2[129].program == 4);
+    }
+    SUPERGBAMIDI_CHECK(song1.size() == 2 && song1[0].bank == 1 && song1[0].program == 0);
+
+    // A SoundFont of one song's goes on from bank 0 into bank 1.
+    SongBanks own(1);
+
+    const std::vector<BankProgram> one = own.Place(0, 130);
+
+    SUPERGBAMIDI_CHECK(one.size() == 130 && one[128].bank == 1 && one[128].program == 0);
+
+    // With one free program left in each of the 128 banks, song 128 finds no room for 129 presets and takes nothing,
+    // and then finds room for 128.
+    SongBanks full(128);
+    for (int s = 0; s < 128; s++)
+    {
+        full.Place(s, 127);
+    }
+
+    const bool too_many = full.Place(128, 129).empty();
+    const std::vector<BankProgram> fits = full.Place(128, 128);
+
+    SUPERGBAMIDI_CHECK(too_many);
+    SUPERGBAMIDI_CHECK(fits.size() == 128 && fits[0].bank == 0 && fits[0].program == 127);
 }
 
 // Returns true if `a` and `b` are within `tolerance` of each other.
@@ -695,6 +750,7 @@ int Run()
     TestGsfLoading();
     TestNoDriver();
     TestLoopLength();
+    TestSongBanks();
     TestBeatGridSteady();
     TestBeatGridRitardando();
     TestBeatGridRubato();
@@ -711,6 +767,7 @@ int Run()
     rd2::RunTests();
     brownie::RunTests();
     krawall::RunTests();
+    ubimilan::RunTests();
 
     std::error_code ec;
     fs::remove_all(g_temp, ec);

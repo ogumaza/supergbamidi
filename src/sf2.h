@@ -49,6 +49,7 @@ enum : uint16_t
     kNoteOnVelocity = 2,
     kController = 0x80, // a MIDI controller, whose number is in the low 7 bits
     kNegative = 0x100,  // from the maximum down to the minimum
+    kBipolar = 0x200,   // from -1 to 1 rather than from 0 to 1
     kConcave = 0x400,
 };
 

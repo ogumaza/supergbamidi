@@ -185,7 +185,7 @@ table says otherwise.
 | `D3` | | volume envelope off |
 | `D5` | detune | a signed detune, × 10 on a PCM channel |
 | `D6` | | repeat from here |
-| `D7` | count | go back to the matching `D6` until the passes add up to `count`. Repeats nest up to 8 deep. |
+| `D7` | count | go back to the matching `D6` until the passes add up to `count`. A count of 0 makes 256 passes. Repeats nest up to 8 deep. |
 | `DA` | wave | load wave `wave & 7F` from the wave table into the wave RAM: into bank 0, or bank 1 if bit 7 is set |
 | `DB` | macro | the noise macro that each note starts, or 0 for none |
 | `DC`, `DD` | sample | load sample `sample` into the channel's FIFO, and clear the range set by `E7` |
@@ -372,10 +372,14 @@ A note plays the sample:
 1. It stops the FIFO.
 2. It sets the rate: the sample's rate + the sample's rate × pitch / 1000,
    rounded towards 0.
-3. It sets the range from `E7`. With a range of 0, 0 and 0 the whole sample
-   plays once. Otherwise it plays from `start`% of the length to `end`%, and
-   then loops back to `loop`%, unless `loop` equals `end`. The position starts
-   at the start × 60.
+3. It sets the range from `E7`. With a range of 0, 0 and 0, the FIFO plays
+   the sample's length once. The FIFO starts where the last range that it
+   played started, or at the sample's start if no range has played since `DC`
+   or `DD` loaded the sample. After a range that started past the sample's
+   start, the FIFO therefore plays on past the sample's end. Otherwise it
+   plays from `start`% of the length to `end`%, and then loops back to
+   `loop`%. With `loop` equal to `end`, the range plays once. The position
+   starts at the start × 60.
 4. It starts the FIFO: it resets the FIFO in SOUNDCNT_H, writes the first 32
    bytes into it, points the DMA at the 32 bytes after them, and starts the
    DMA (control `0xB640`) and the timer, at 0x10000 − 16780000 / rate.

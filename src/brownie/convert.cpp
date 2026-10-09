@@ -54,21 +54,6 @@ constexpr int kMaxBendRange = 96;
 constexpr int kOctaveKeys = 12;
 constexpr int kSampleOctaves = 4;
 
-// Returns a song's number for file names and titles: at least two digits, and as many as the largest song's.
-std::string SongNumber(int song, int count)
-{
-    int digits = 2;
-    for (int n = count - 1; n >= 100; n /= 10)
-    {
-        digits++;
-    }
-
-    char b[16];
-    std::snprintf(b, sizeof b, "%0*d", digits, song);
-
-    return b;
-}
-
 // Returns the seconds that `frames` frames take.
 double FrameSeconds(double frames)
 {
@@ -196,7 +181,8 @@ Simulation Simulate(const Rom& rom, const DriverInfo& info, int song, int loops)
     int loop_channel = -1;
     size_t times = 1; // the passes the loop channel makes through its loop in each of the song's
     bool planned = false;
-    uint32_t run_on = 0; // the frames the model runs on for after the loop channel's last pass
+    bool finished = false; // the song played what the plan requires
+    uint32_t run_on = 0;   // the frames the model runs on for after the loop channel's last pass
     std::array<uint8_t, kChannelCount> length_sets = {};
     for (uint32_t f = 0; f < kMaxFrames && (f == 0 || seq.Playing()); f++)
     {
@@ -300,6 +286,7 @@ Simulation Simulate(const Rom& rom, const DriverInfo& info, int song, int loops)
         if (planned && loop_channel >= 0 && passes[size_t(loop_channel)].size() >= size_t(loops) * times &&
             f >= passes[size_t(loop_channel)][size_t(loops) * times - 1] + run_on)
         {
+            finished = true;
             break;
         }
     }
@@ -333,7 +320,7 @@ Simulation Simulate(const Rom& rom, const DriverInfo& info, int song, int loops)
     }
 
     sim.warnings = seq.Warnings();
-    if (frames == kMaxFrames)
+    if (!finished && seq.Playing() && frames == kMaxFrames)
     {
         sim.warnings.push_back("the song was cut off after an hour");
     }
@@ -972,10 +959,13 @@ bool WriteMidi(const std::string& path, const std::string& title, const std::str
     {
         conductor.Tempo(QuarterTick(t.quarter), uint32_t(std::lround(FrameSeconds(t.frames) * 1e6)));
     }
+    // The beat's tempo at the loop's start is given again after the marker. The loop's end can have another, which a
+    // player that keeps its tempo when it jumps back would otherwise play the loop's start at.
     if (plan.loops)
     {
         conductor.Meta(loop_tick(plan.loop_start), 0x06, "loopStart");
         conductor.Meta(loop_tick(plan.loop_end), 0x06, "loopEnd");
+        conductor.RepeatTempo(loop_tick(plan.loop_start));
     }
     conductor.SetEnd(end);
 

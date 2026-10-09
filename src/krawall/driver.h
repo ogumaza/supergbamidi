@@ -55,6 +55,15 @@ constexpr uint32_t kPatternData = 33;
 // A module's header size up to the patterns' table.
 constexpr uint32_t kModulePatterns = 0x16C;
 
+// A piece of music that the conversion converts: a module, or one of the songs that its orders separate with +++.
+struct ModuleSong
+{
+    auto operator<=>(const ModuleSong&) const = default;
+
+    uint32_t module = 0;
+    int song = -1; // the song's number in its module, or -1 for a whole module without markers
+};
+
 // Krawall's tables, which the player reads, and the settings that the game gives the mixer.
 struct DriverInfo
 {
@@ -77,6 +86,7 @@ struct DriverInfo
     uint32_t module_table = 0;     // the game's table of modules, a word each, which the scan found, or 0
     int table_count = 0;           // its entries, which come first in `modules`
     std::vector<uint32_t> modules;
+    std::vector<ModuleSong> songs;     // the pieces that the conversion numbers, in the modules' order
     std::vector<std::string> log;      // detection results for --info
     std::vector<std::string> warnings; // assumptions detection had to make
 };
@@ -87,6 +97,10 @@ bool DetectDriver(const Rom& rom, const DriverOverrides& overrides, DriverInfo& 
 
 // Reads a module's header. Returns false if it isn't one that the player can play.
 bool ReadModule(const Rom& rom, uint32_t address, ModuleInfo& module);
+
+// Returns the number of songs that a module's orders separate with +++, or 0 if they have no marker. A song is a run of
+// orders between markers.
+int SongCount(const ModuleInfo& module);
 
 // Returns `v` as 0x and 8 hexadecimal digits, for messages.
 std::string Hex(uint32_t v);

@@ -4,6 +4,7 @@
 
 #include "music.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <memory>
@@ -64,7 +65,13 @@ public:
 
     int SongCount() const override
     {
-        return int(info_.modules.size());
+        return int(info_.songs.size());
+    }
+
+    // The files' numbers have as many digits as the largest song's.
+    std::string FileNumber(int song) const override
+    {
+        return SongNumber(song, SongCount());
     }
 
     bool HasSong(int) const override
@@ -122,7 +129,9 @@ public:
             return false;
         }
 
-        Player player(rom_, info_, info_.modules[size_t(song)]);
+        const ModuleSong& entry = info_.songs[size_t(song)];
+        Player player(rom_, info_, entry.module, entry.song >= 0 ? kModeLoop | kModeSong : kModeLoop,
+                      std::max(entry.song, 0));
         if (!player.Valid())
         {
             warnings.insert(warnings.end(), player.Warnings().begin(), player.Warnings().end());
@@ -161,10 +170,10 @@ public:
     }
 
 private:
-    // Returns the address of a module's header.
+    // Returns the address of the header of a song's module.
     uint32_t Address(int song) const
     {
-        return song >= 0 && song < SongCount() ? info_.modules[size_t(song)] : 0;
+        return song >= 0 && song < SongCount() ? info_.songs[size_t(song)].module : 0;
     }
 
     static ConvertOptions OptionsFor(const ConvertSettings& settings)

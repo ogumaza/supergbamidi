@@ -424,13 +424,24 @@ bool DetectDriver(const Rom& rom, const DriverOverrides& overrides, DriverInfo& 
         info.master_volume = uint32_t(master_volume);
     }
 
-    // The modules: from the given table, or the headers that a scan of the ROM finds.
-    if (overrides.module_table)
+    // The modules: from the given table, or the headers that a scan of the ROM finds. A count given for the modules
+    // applies to a given table and to the game's table that the scan finds. The count leaves out the modules that the
+    // table doesn't list.
+    std::vector<uint32_t> found;
+    uint32_t table = overrides.module_table;
+    if (!table)
+    {
+        found = ScanModules(rom);
+        FindModuleTable(rom, found, info.module_table, info.table_count);
+        table = overrides.module_count > 0 ? info.module_table : 0;
+    }
+
+    if (table)
     {
         const int count = overrides.module_count > 0 ? overrides.module_count : int(kMaxModules);
-        for (int i = 0; i < count && rom.Contains(overrides.module_table + 4 * uint32_t(i), 4); i++)
+        for (int i = 0; i < count && rom.Contains(table + 4 * uint32_t(i), 4); i++)
         {
-            const uint32_t at = rom.U32(overrides.module_table + 4 * uint32_t(i));
+            const uint32_t at = rom.U32(table + 4 * uint32_t(i));
             ModuleInfo module;
             if (!ReadModule(rom, at, module))
             {
@@ -449,9 +460,8 @@ bool DetectDriver(const Rom& rom, const DriverOverrides& overrides, DriverInfo& 
     }
     else
     {
-        // The modules in the order of the game's table, and then any that it doesn't list, in the ROM's order.
-        const std::vector<uint32_t> found = ScanModules(rom);
-        FindModuleTable(rom, found, info.module_table, info.table_count);
+        // The modules in the order of the game's table, and then any that it doesn't list, in the ROM's order. Without
+        // a table, a count given for the modules keeps that many of them.
         for (int i = 0; i < info.table_count; i++)
         {
             info.modules.push_back(rom.U32(info.module_table + 4 * uint32_t(i)));
@@ -462,6 +472,10 @@ bool DetectDriver(const Rom& rom, const DriverOverrides& overrides, DriverInfo& 
             {
                 info.modules.push_back(at);
             }
+        }
+        if (overrides.module_count > 0 && info.modules.size() > size_t(overrides.module_count))
+        {
+            info.modules.resize(size_t(overrides.module_count));
         }
     }
     if (info.modules.empty())
@@ -487,14 +501,54 @@ bool DetectDriver(const Rom& rom, const DriverOverrides& overrides, DriverInfo& 
         std::snprintf(text, sizeof text, "module table: %s (%d)", Hex(info.module_table).c_str(), info.table_count);
         info.log.push_back(text);
     }
-    const size_t unlisted = info.modules.size() - size_t(info.table_count);
-    if (!overrides.module_table && unlisted)
+    const size_t unlisted = info.modules.size() - std::min(info.modules.size(), size_t(info.table_count));
+    if (!table && unlisted)
     {
         info.log.push_back(std::to_string(unlisted) + (unlisted == 1 ? " module" : " modules") +
                            (info.table_count ? " that the table doesn't list" : ", which no table lists"));
     }
 
+    // A module without markers converts as a whole. One with markers converts song by song, each in the player's song
+    // mode.
+    for (uint32_t at : info.modules)
+    {
+        ModuleInfo module;
+        const int songs = ReadModule(rom, at, module) ? SongCount(module) : 0;
+        if (songs == 0)
+        {
+            info.songs.push_back({at, -1});
+            continue;
+        }
+
+        for (int s = 0; s < songs; s++)
+        {
+            info.songs.push_back({at, s});
+        }
+        std::snprintf(text, sizeof text, "the module at %s separates %d %s with +++", Hex(at).c_str(), songs,
+                      songs == 1 ? "song" : "songs");
+        info.log.push_back(text);
+    }
+
     return true;
+}
+
+int SongCount(const ModuleInfo& module)
+{
+    int songs = 0;
+    bool markers = false;
+    bool in_song = false;
+    for (int i = 0; i < module.order_count; i++)
+    {
+        const uint8_t o = module.orders[size_t(i)];
+        markers = markers || o == kOrderSkip;
+        if (o < kOrderSkip && !in_song)
+        {
+            songs++;
+        }
+        in_song = o < kOrderSkip;
+    }
+
+    return markers ? std::min(songs, int(module.song_starts.size())) : 0;
 }
 
 } // namespace supergbamidi::krawall

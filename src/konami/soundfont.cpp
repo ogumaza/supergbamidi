@@ -65,8 +65,12 @@ double SquareNoteZeroHz(const Rom& rom, const DriverInfo& info)
 
 } // namespace
 
-SoundfontBuilder::SoundfontBuilder(const Rom& rom, const DriverInfo& info)
-    : rom_(rom), info_(info), square_note0_hz_(SquareNoteZeroHz(rom, info)), square_base_(NearestKey(square_note0_hz_))
+SoundfontBuilder::SoundfontBuilder(const Rom& rom, const DriverInfo& info, int songs)
+    : rom_(rom),
+      info_(info),
+      square_note0_hz_(SquareNoteZeroHz(rom, info)),
+      square_base_(NearestKey(square_note0_hz_)),
+      banks_(songs)
 {
 }
 
@@ -95,6 +99,7 @@ void SoundfontBuilder::Restore(const Checkpoint& c)
     file_.samples.resize(c.samples);
     file_.instruments.resize(c.instruments);
     file_.presets.resize(c.presets);
+    banks_ = c.banks;
 
     // Remove stale cache entries so discarded samples can be rebuilt on demand.
     for (auto it = cache_.begin(); it != cache_.end();)

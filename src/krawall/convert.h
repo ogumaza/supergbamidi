@@ -20,8 +20,8 @@ namespace supergbamidi::krawall
 // Conversion settings and output paths.
 struct ConvertOptions
 {
-    int loops = 2;                // times a looping module's loop is played
-    uint16_t track_mask = 0xFFFF; // channels to include (bit c = channel c), and at 0xFFFF the channels from 16 on
+    int loops = 2;                    // times a looping module's loop is played
+    uint32_t track_mask = 0xFFFFFFFF; // channels to include (bit c = channel c)
     std::string out_dir = ".";
     std::string base_name = "song";
 };

@@ -21,7 +21,7 @@ struct ConvertOptions
     int loops = 2;                // times a looping song's loop is played
     uint16_t track_mask = 0xFFFF; // channels to include (bit c = channel c)
     bool frame_timing = false;    // each event on the frame the driver plays it in, rather than on the beat
-    int bank = 0;                 // the bank of the song's presets
+    int bank = 0;                 // the song whose bank holds the presets, as SongBanks gives them out
     std::string out_dir = ".";
     std::string base_name = "song";
 };
@@ -42,8 +42,8 @@ struct SongSummary
 // Works out a song's length, loop and channels the way ConvertSong() does, without writing anything.
 SongSummary InspectSong(const Rom& rom, const DriverInfo& info, int song, const ConvertOptions& opt);
 
-// Converts one song. If `shared` is supplied, adds its presets to that SoundFont in bank `opt.bank`; otherwise writes a
-// SoundFont next to the MIDI file.
+// Converts one song. If `shared` is supplied, adds its presets to that SoundFont, in the banks that `opt.bank` picks;
+// otherwise writes a SoundFont next to the MIDI file.
 SongSummary ConvertSong(const Rom& rom, const DriverInfo& info, int song, const ConvertOptions& opt,
                         SoundfontBuilder* shared);
 

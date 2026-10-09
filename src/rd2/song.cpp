@@ -244,23 +244,25 @@ bool DumpSong(const Rom& rom, const DriverInfo& info, int song, const std::strin
     char line[320];
     std::snprintf(line, sizeof line,
                   "; %s (%s) sequence %d at 0x%08X: %d tracks\n; columns: address, tick, bytes, command\n"
-                  "; each track is listed as the driver plays it, calls included, up to its end or its loop\n",
+                  "; each track is listed as the driver plays it, calls included, up to its end or its loop\n"
+                  "; a track that F8 starts comes after the others, with ticks from its start\n",
                   rom.Title().c_str(), rom.GameCode().c_str(), song, unsigned(sequence), count);
     text += line;
 
-    for (int t = 0; t < count && t < kPlayerTracks; t++)
+    // The tracks that F8 starts: where each starts, its number in the player, and the F8's address.
+    struct Start
     {
-        const uint32_t offset = rom.U16(sequence + 2 + 2 * uint32_t(t));
-        if (offset == 0)
-        {
-            continue;
-        }
+        uint32_t address = 0;
+        int number = 0;
+        uint32_t from = 0;
+    };
 
-        std::snprintf(line, sizeof line, "\n; ---- track %d at 0x%08X ----\n", t, unsigned(sequence + offset));
-        text += line;
+    std::vector<Start> starts;
+    std::set<uint32_t> listed;
 
-        // Follow the track as the driver does: waits take up time, and so do notes after C8, and calls return.
-        uint32_t address = sequence + offset;
+    // Follows a track as the driver does: waits take up time, and so do notes after C8, and calls return.
+    const auto list_track = [&](uint32_t address)
+    {
         uint64_t tick = 0;
         uint16_t length = 0x7F;
         uint8_t velocity = 0x7F;
@@ -325,9 +327,43 @@ bool DumpSong(const Rom& rom, const DriverInfo& info, int song, const std::strin
                 address = sequence + c.target;
                 continue;
             }
+            if (op == 0xF8 && rom.U8(address + 1) < kPlayerTracks)
+            {
+                starts.push_back({sequence + c.target, rom.U8(address + 1), address});
+            }
 
             address += c.size;
         }
+    };
+
+    for (int t = 0; t < count && t < kPlayerTracks; t++)
+    {
+        const uint32_t offset = rom.U16(sequence + 2 + 2 * uint32_t(t));
+        if (offset == 0)
+        {
+            continue;
+        }
+
+        std::snprintf(line, sizeof line, "\n; ---- track %d at 0x%08X ----\n", t, unsigned(sequence + offset));
+        text += line;
+        listed.insert(sequence + offset);
+        list_track(sequence + offset);
+    }
+
+    // Then each place that an F8 starts a track at. A place where a listed track starts already is left out. A track
+    // listed here can start more.
+    for (size_t i = 0; i < starts.size(); i++)
+    {
+        const Start start = starts[i];
+        if (!listed.insert(start.address).second)
+        {
+            continue;
+        }
+
+        std::snprintf(line, sizeof line, "\n; ---- track %d at 0x%08X, started by F8 at 0x%08X ----\n", start.number,
+                      unsigned(start.address), unsigned(start.from));
+        text += line;
+        list_track(start.address);
     }
 
     std::vector<uint8_t> data(text.begin(), text.end());
